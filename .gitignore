@@ -1,0 +1,15 @@
+*.env
+*.bak_*
+state/
+*.sqlite*
+/inbox/
+logs/
+__pycache__/
+*.py[cod]
+.venv/
+/tests/tmp/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/

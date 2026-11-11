@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slack-dispatch"
+version = "0.0.1"
+description = "Offline-first scaffold for lane-based message dispatch"
+requires-python = ">=3.12"
+dependencies = ["slack_sdk", "pyyaml"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+slack-dispatch = "slack_dispatch.inbox.cli:main"
+slack-dispatch-service = "slack_dispatch.service:main"
+
+[tool.setuptools.packages.find]
+include = ["slack_dispatch*"]
+
+[tool.setuptools.package-data]
+"slack_dispatch.ledger" = ["schema.sql"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

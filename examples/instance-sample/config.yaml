@@ -1,0 +1,45 @@
+lanes:
+  - id: owner
+    session: null
+    paused: false
+  - id: support
+    session: session-support-placeholder
+    paused: false
+  - id: content
+    session: null
+    paused: true
+channel_defaults:
+  C0000000001: {default: support}
+  C0000000002: {default: null}
+dm_defaults:
+  D0000000001: {default: owner}
+person_channel_rules:
+  - person: U0000000001
+    channel: C0000000002
+    lane: content
+explicit_tags:
+  '[support]': support
+  '[content]': content
+excluded_channels: [C0000000003]
+timers:
+  unassigned_seconds: 1800
+  unacknowledged_seconds: 14400
+  reassign_seconds: 86400
+wake_policy:
+  mode: immediate
+  enabled: true
+  debounce_seconds: 90
+  storm_per_hour: 30
+  batch_seconds: 600
+notify_adapters:
+  - kind: file_inbox
+    path: inbox
+  - kind: session_message
+  - kind: assistant_dm
+    path: state/assistant-outbox
+sources:
+  - kind: slack_socket
+    enabled: true
+  - kind: slack_reconcile
+    enabled: true
+    reconcile_seconds: 3600
