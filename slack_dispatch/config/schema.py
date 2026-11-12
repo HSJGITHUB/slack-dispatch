@@ -43,6 +43,18 @@ class SourceConfig:
     kind: str
     enabled: bool
     reconcile_seconds: int
+    env_file: str = "dummy.env"
+    app_token_key: str = "SLACK_APP_TOKEN"
+    user_token_key: str = "SLACK_USER_TOKEN"
+    interval_seconds: int = 3600
+    lookback_days: int = 7
+    store_body: bool = False
+
+
+@dataclass(frozen=True)
+class LedgerConfig:
+    path: str = "state/ledger.sqlite3"
+    store_body: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,3 +69,4 @@ class Config:
     wake_policy: WakePolicy
     notify_adapters: tuple[NotifyAdapter, ...]
     sources: tuple[SourceConfig, ...]
+    ledger: LedgerConfig = LedgerConfig()

@@ -5,6 +5,14 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### Added
+- Transactional SQLite ledger with versioned migrations, deduplication, routes,
+  state changes, reactions, thread bindings, and per-channel cursors.
+- Redacted Slack event normalization, immediate Socket Mode ACKs, and read-only
+  paginated history reconciliation with Retry-After handling.
+- Explicit body storage configuration, source construction, synthetic fixtures,
+  offline intake tests, and ingestion documentation.
+
 ## [0.0.1] - 2026-11-11
 
 ### Added

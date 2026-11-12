@@ -37,9 +37,19 @@ notify_adapters:
   - kind: session_message
   - kind: assistant_dm
     path: state/assistant-outbox
+ledger:
+  path: state/ledger.sqlite3
+  store_body: false
 sources:
   - kind: slack_socket
     enabled: true
+    env_file: ~/.local/slack-dispatch.env
+    app_token_key: SLACK_APP_TOKEN
+    user_token_key: SLACK_USER_TOKEN
   - kind: slack_reconcile
     enabled: true
     reconcile_seconds: 3600
+    env_file: ~/.local/slack-dispatch.env
+    user_token_key: SLACK_USER_TOKEN
+    interval_seconds: 3600
+    lookback_days: 7

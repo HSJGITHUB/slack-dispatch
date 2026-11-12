@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 
 from .schema import (
-    Config, Lane, NotifyAdapter, PersonChannelRule, SourceConfig, Timers, WakePolicy,
+    Config, Lane, LedgerConfig, NotifyAdapter, PersonChannelRule, SourceConfig, Timers, WakePolicy,
 )
 
 
@@ -116,6 +116,11 @@ def parse_config(raw):
         if kind != "session_message" or path is not None:
             string(path, "notify_adapter.path")
         adapters.append(NotifyAdapter(kind, path))
+    ledger_data = mapping(get("ledger"), "ledger")
+    ledger = LedgerConfig(
+        string(required(ledger_data, "path", "ledger"), "ledger.path"),
+        boolean(ledger_data.get("store_body", False), "ledger.store_body"),
+    )
     sources = []
     for row in rows("sources"):
         row = mapping(row, "sources entry")
@@ -123,9 +128,15 @@ def parse_config(raw):
         if kind not in ("slack_socket", "slack_reconcile"):
             raise ConfigError("source.kind is unsupported")
         sources.append(SourceConfig(kind, boolean(required(row, "enabled", "source"), "source.enabled"),
-                                    positive(row.get("reconcile_seconds", 3600), "source.reconcile_seconds")))
+                                    positive(row.get("reconcile_seconds", 3600), "source.reconcile_seconds"),
+                                    string(row.get("env_file", "dummy.env"), "source.env_file"),
+                                    string(row.get("app_token_key", "SLACK_APP_TOKEN"), "source.app_token_key"),
+                                    string(row.get("user_token_key", "SLACK_USER_TOKEN"), "source.user_token_key"),
+                                    positive(row.get("interval_seconds", row.get("reconcile_seconds", 3600)), "source.interval_seconds"),
+                                    positive(row.get("lookback_days", 7), "source.lookback_days"),
+                                    ledger.store_body))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
-                  tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources))
+                  tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources), ledger)
 
 
 def load_config(path: str | Path) -> Config:
