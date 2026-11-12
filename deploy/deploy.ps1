@@ -25,9 +25,18 @@ if ($PSCmdlet.ShouldProcess($destination, 'Extract tagged checkout and write dep
     & git -C $Checkout archive --format=zip ('--output=' + $archive) $commit
     if ($LASTEXITCODE -ne 0) { throw 'git archive failed.' }
     Expand-Archive -LiteralPath $archive -DestinationPath $destination
+    $canonicalRoot = (Get-Item -LiteralPath $destination).FullName.TrimEnd('\', '/')
+    $rootPrefix = $canonicalRoot + [IO.Path]::DirectorySeparatorChar
+    $comparison = [StringComparison]::Ordinal
+    if ([IO.Path]::DirectorySeparatorChar -eq '\') {
+        $comparison = [StringComparison]::OrdinalIgnoreCase
+    }
     $hashes = [ordered]@{}
-    Get-ChildItem -LiteralPath $destination -File -Recurse -Force | Sort-Object FullName | ForEach-Object {
-        $relative = $_.FullName.Substring($destination.TrimEnd('\', '/').Length + 1).Replace('\', '/')
+    Get-ChildItem -LiteralPath $canonicalRoot -File -Recurse -Force | Sort-Object FullName | ForEach-Object {
+        if (-not $_.FullName.StartsWith($rootPrefix, $comparison)) {
+            throw 'Deployment file is outside the canonical target directory.'
+        }
+        $relative = $_.FullName.Substring($rootPrefix.Length).Replace('\', '/')
         $sha256 = [System.Security.Cryptography.SHA256]::Create()
         try {
             $stream = [IO.File]::OpenRead($_.FullName)
@@ -45,7 +54,8 @@ if ($PSCmdlet.ShouldProcess($destination, 'Extract tagged checkout and write dep
     }
     $manifest = [ordered]@{ tag = $Tag; commit = $commit; sha256 = $hashes; time = [DateTimeOffset]::Now.ToString('o') }
     $json = $manifest | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText((Join-Path $destination 'DEPLOYED.json'), $json, [Text.UTF8Encoding]::new($false))
-    Write-Output $json
+    $manifestPath = Join-Path $canonicalRoot 'DEPLOYED.json'
+    [IO.File]::WriteAllText($manifestPath, $json, [Text.UTF8Encoding]::new($false))
+    Write-Output ([IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8))
     Write-Verbose ('Archive retained at ' + $archive)
 }

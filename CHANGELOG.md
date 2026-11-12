@@ -26,6 +26,7 @@ This project follows Semantic Versioning while remaining pre-alpha.
   offline intake tests, and ingestion documentation.
 
 ### Fixed
+- Derive deployment manifest keys from the canonical target for Windows short paths and casing variants.
 - Compute deployment SHA-256 hashes with disposed .NET file streams without Get-FileHash.
 - Preserve the full parent environment and optional overrides in PowerShell runtime tests.
 - Verify deployment manifest hashes against Python for text, empty and nested binary files.

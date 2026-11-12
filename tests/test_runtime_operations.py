@@ -190,7 +190,42 @@ class WindowsToolTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "git is unavailable")
     def test_tagged_deploy_manifest_and_whatif(self):
+        self.check_tagged_deploy()
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("git"), "Windows and git are required")
+    def test_tagged_deploy_manifest_with_different_casing(self):
+        self.check_tagged_deploy("case")
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("git"), "Windows and git are required")
+    def test_tagged_deploy_manifest_with_short_path(self):
+        self.check_tagged_deploy("short")
+
+    def check_tagged_deploy(self, path_form=None):
         directory = fixture(self)
+        parent = directory / "Deployment Parent With Long Name"
+        parent.mkdir()
+        canonical_parent = parent.resolve()
+        target_parent = canonical_parent
+        if path_form == "case":
+            target_parent = Path(str(canonical_parent).swapcase())
+            self.assertNotEqual(str(target_parent), str(canonical_parent))
+        elif path_form == "short":
+            import ctypes
+            from ctypes import wintypes
+            get_short_path = ctypes.windll.kernel32.GetShortPathNameW
+            get_short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+            get_short_path.restype = wintypes.DWORD
+            size = get_short_path(str(canonical_parent), None, 0)
+            if not size:
+                self.skipTest("An 8.3 short path is unavailable")
+            buffer = ctypes.create_unicode_buffer(size)
+            written = get_short_path(str(canonical_parent), buffer, size)
+            if not written or written >= size:
+                self.skipTest("An 8.3 short path could not be obtained")
+            target_parent = Path(buffer.value)
+            if str(target_parent).casefold() == str(canonical_parent).casefold():
+                self.skipTest("The filesystem did not produce a distinct 8.3 short path")
+            self.assertNotEqual(len(str(target_parent)), len(str(canonical_parent)))
         checkout = directory / "checkout"
         checkout.mkdir()
 
@@ -214,7 +249,7 @@ class WindowsToolTests(unittest.TestCase):
         git("tag", "v-test")
         commit = git("rev-parse", "HEAD")
         (checkout / "sample.txt").write_text("dirty\n", encoding="utf-8")
-        target = directory / "release"
+        target = target_parent / "release"
         archive = directory / "archives"
         script = ROOT / "deploy/deploy.ps1"
         args = ("-Checkout", checkout, "-Tag", "v-test", "-Target", target,
