@@ -90,6 +90,32 @@ No existing field, required section or default is removed. Configured lanes are
 registered before sources start. An existing session claim survives startup;
 configured pause settings are applied on startup.
 
+Lane sessions accept a session name, a full session id or an id prefix of at
+least 8 hex characters (see INBOX.md, "Session values and precedence"). Id forms
+are resolved against the live session files in the optional top-level
+`sessions_dir` (default `~/.claude/sessions`, expanded at resolution time):
+
+```yaml
+sessions_dir: dummy/sessions
+```
+
+Precedence: a non-null `lanes[].session` wins over the ledger pointer written by
+`claim`; the ledger pointer applies only when the configured session is null.
+An explicit `paused: true` always pauses regardless of the ledger value. Earlier
+releases let the ledger pointer win, which kept stale first-launch values after
+config edits. The pipeline and timer delivery gate (`can_notify`) applies the same
+precedence as the adapter builder, so a configured session wakes its lane even when
+the ledger pointer is null, and `paused: true` in config blocks it whatever the
+ledger says. The gate also resolves id forms through the shared resolver: an id that
+is not live or is ambiguous makes the delivery count as not delivered. The pipeline
+does not count it in `delivered` or record a followup delivery, the human queue keeps
+its notice pending, and timers write no receipt, so the next sweep retries. Name
+lanes pass through unchanged. The adapter's own no-live-session skip stays as a
+second guard. When a session_message adapter is configured, heartbeat counters add
+`wake_skipped_no_session`: session deliveries skipped because the configured id was
+not live, summed over the shared resolver and counted on every attempt, retries
+included.
+
 ## Once, dry run and exit codes
 
 --once, or service.once=true, starts enabled reconcile sources only. Each runs
@@ -124,7 +150,8 @@ and metadata events; routed counts successful routing applications;
 human_pending counts new routing outcomes in that state; delivered counts ids
 accepted by successful pipeline delivery groups (inbox and wake groups may both
 count the same id); failures includes pipeline, runtime, timer and source error
-observations. One error can be observed at multiple boundaries. Timers have
+observations. wake_skipped_no_session (present only with a session_message adapter)
+is described under lane sessions above. One error can be observed at multiple boundaries. Timers have
 separate durable receipts and do not increment the pipeline delivered counter.
 Heartbeat ok remains false after any observed failure in that process.
 

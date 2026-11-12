@@ -53,6 +53,7 @@ def build_parser():
             sub.add_argument("lane")
         if command == "claim":
             sub.add_argument("--session")
+            sub.add_argument("--config")
         if command == "inbox":
             sub.add_argument("--include-done", action="store_true")
             sub.add_argument("--thread", action="store_true")
@@ -269,6 +270,15 @@ def bulk_ids(args, root, store, stderr):
     return ids
 
 
+def configured_session(config_path, lane):
+    """Return the lane's configured session from an optional config file, else None."""
+    if not config_path:
+        return None
+    from slack_dispatch.config.loader import load_config
+    configured = next((row for row in load_config(config_path).lanes if row.id == lane), None)
+    return configured.session if configured else None
+
+
 def main(argv=None, *, store=None, stdout=None, stderr=None):
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -288,6 +298,8 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 session = args.session or os.environ.get("SLACK_DISPATCH_SESSION") or os.environ.get("CLAUDE_SESSION_ID")
                 if not session:
                     raise BadInput("Session is required")
+                configured = configured_session(args.config or os.environ.get("SLACK_DISPATCH_CONFIG"),
+                                                args.lane)
             if store is None:
                 path = args.ledger or os.environ.get("SLACK_DISPATCH_LEDGER")
                 if not path:
@@ -343,8 +355,12 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                         if full and full.get("text", full.get("body")) is not None:
                             print(message_id, full.get("text", full.get("body")), file=stdout)
             elif args.command == "claim":
+                # The value is stored verbatim: a session name, a session id or an id prefix.
                 store.upsert_lane(args.lane, session_pointer=session)
                 print(args.lane, "claimed", file=stdout)
+                if configured:
+                    print(f"warning: lane {args.lane} has a configured session; config wins "
+                          "over this claim until the configured session is null", file=stderr)
             elif args.command in ("ack", "done"):
                 ids = bulk_ids(args, root, store, stderr)
                 if ids is None:

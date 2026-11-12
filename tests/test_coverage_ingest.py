@@ -73,12 +73,12 @@ class CoverageIngestTests(unittest.TestCase):
     def test_failure_preserves_replies_cursor_and_logs_only_error_code(self):
         self.store.set_cursor("slack_replies", "CDUMMY", "999900")
         self.store.bind_thread("slack", "CDUMMY", "100", "dummy")
-        self.source.client.api_call.side_effect = [{"messages": []}, {"ok": False, "error": "not_in_channel"}]
+        self.source.client.api_call.side_effect = [{"messages": []}, {"ok": False, "error": "internal_error"}]
         with self.assertLogs("slack_dispatch.ingest.slack_reconcile", level="INFO") as logs:
             self.source.catch_up()
         self.assertEqual(self.store.get_cursor("slack_replies", "CDUMMY"), "999900")
         self.assertEqual(self.source.failures, 1)
-        self.assertIn("error=not_in_channel", " ".join(logs.output))
+        self.assertIn("error=internal_error", " ".join(logs.output))
         self.assertIn("failures=1", " ".join(logs.output))
 
     def test_failed_parent_is_isolated_from_roots_and_other_parents(self):
@@ -89,7 +89,7 @@ class CoverageIngestTests(unittest.TestCase):
             if method == "conversations.history":
                 return {"messages": [dict(ts="999500", user="UOTHER", reply_count=1, latest_reply="999800")]}
             if params["ts"] == "999500":
-                return {"ok": False, "error": "thread_not_found"}
+                return {"ok": False, "error": "fatal_error"}
             return {"messages": [dict(ts="999700", user="UOTHER")]}
         self.source.client.api_call.side_effect = respond
         with self.assertLogs("slack_dispatch.ingest.slack_reconcile", level="INFO") as logs:
@@ -101,8 +101,62 @@ class CoverageIngestTests(unittest.TestCase):
         self.assertEqual((self.source.failures, self.source.summary["parents"]), (1, 2))
         warning = [line for line in logs.output if line.startswith("WARNING")]
         self.assertEqual(len(warning), 1)
-        self.assertIn("channel=CDUMMY parent=999500 class=RuntimeError error=thread_not_found", warning[0])
+        self.assertIn("channel=CDUMMY parent=999500 class=RuntimeError error=fatal_error", warning[0])
         self.assertIn("failures=1", logs.output[-1])
+
+    def test_permanent_parent_error_is_skipped_and_replies_cursor_advances(self):
+        self.store.set_cursor("slack_replies", "CDUMMY", "999000")
+        for thread in ("200", "300"):
+            self.store.bind_thread("slack", "CDUMMY", thread, "dummy")
+        calls = []
+        def respond(method, **kwargs):
+            params = kwargs["params"]
+            if method == "conversations.history":
+                return {"messages": []}
+            calls.append(params["ts"])
+            if params["ts"] == "200":
+                return {"ok": False, "error": "thread_not_found"}
+            return {"messages": [dict(ts="999700", user="UOTHER")]}
+        self.source.client.api_call.side_effect = respond
+        with self.assertLogs("slack_dispatch.ingest.slack_reconcile", level="INFO") as logs:
+            self.source.catch_up()
+            self.source.catch_up()
+        self.assertEqual(self.source.skipped_parents, {("CDUMMY", "200")})
+        self.assertEqual((self.source.failures, self.source.summary["failures"]), (0, 0))
+        self.assertEqual(self.source.summary["permanent_skipped"], 1)
+        self.assertEqual(calls, ["200", "300", "300"])
+        self.assertEqual(self.store.get_cursor("slack_replies", "CDUMMY"), "1000000.000000")
+        self.assertIsNotNone(self.source.last_catchup_at)
+        # The advanced replies cursor moves the second pass past the delivered reply.
+        self.assertEqual([row["ts"] for row in self.events], ["999700"])
+        warnings = [line for line in logs.output if line.startswith("WARNING")]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("channel=CDUMMY parent=200 error=thread_not_found", warnings[0])
+        self.assertIn("failures=0", logs.output[-1])
+        self.assertIn("permanent_skipped=1", logs.output[-1])
+
+    def test_transient_parent_error_keeps_failures_and_replies_cursor(self):
+        self.store.set_cursor("slack_replies", "CDUMMY", "999000")
+        self.store.bind_thread("slack", "CDUMMY", "200", "dummy")
+        responses = iter([{"ok": False, "error": "ratelimited"}, RuntimeError("private fixture text")])
+        calls = []
+        def respond(method, **kwargs):
+            if method == "conversations.history":
+                return {"messages": []}
+            calls.append(kwargs["params"]["ts"])
+            result = next(responses)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        self.source.client.api_call.side_effect = respond
+        for expected in (1, 2):
+            self.source.catch_up()
+            self.assertEqual(self.source.failures, expected)
+            self.assertEqual(self.source.summary["permanent_skipped"], 0)
+        self.assertEqual(calls, ["200", "200"])
+        self.assertEqual(self.source.skipped_parents, set())
+        self.assertEqual(self.store.get_cursor("slack_replies", "CDUMMY"), "999000")
+        self.assertIsNone(self.source.last_catchup_at)
 
     def test_bound_threads_are_capped_by_thread_activity(self):
         self.source.clock = lambda: 2000000

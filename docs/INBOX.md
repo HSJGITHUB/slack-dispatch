@@ -15,8 +15,14 @@ store. This CLI consumes the shared LedgerStore API.
 - `done slack:CDUMMY:1 --note complete`: complete the message with an optional note.
 - `reroute slack:CDUMMY:1 --to content`: route with reason `reroute:<old lane>`
   and append a `reroute` record to the destination inbox.
-- `claim support --session dummy-session`: replace the lane's session pointer.
-  Without `--session`, use `SLACK_DISPATCH_SESSION`, then `CLAUDE_SESSION_ID`.
+- `claim support --session dummy-session [--config PATH]`: replace the lane's ledger
+  session pointer. Without `--session`, use `SLACK_DISPATCH_SESSION`, then
+  `CLAUDE_SESSION_ID`. The value is stored verbatim and may be any form described in
+  "Session values and precedence". With `--config` (or `SLACK_DISPATCH_CONFIG`) the
+  CLI reads the lane's configured session; when it is non-null the claim is still
+  stored but prints `warning: lane <lane> has a configured session; config wins ...`
+  to stderr. An unreadable config returns 2 without writing. Without a config the
+  CLI cannot tell and prints no warning.
 - `queue`: show human-pending ids and classifier suggestions.
 - `import-bindings PATH [--replace]`: import UTF-8 JSONL objects containing
   source, channel, thread_ts, and lane. Extra keys and blank lines are ignored.
@@ -78,6 +84,38 @@ Failures retry once and then raise NotifyError without captured output. Dry-run
 logs placeholder names only, never rendered text, arguments, or target values.
 Templates and session pointers must be credential-free. The sample uses dummy
 arguments and dry-run; building adapters does not execute commands.
+
+## Session values and precedence
+
+`lanes[].session` and claimed pointers accept three forms:
+
+- a session name such as `dummy-session`, passed through as the `{target}`;
+- a full session id (uuid), such as `0000aaaa-0000-4000-8000-000000000001`;
+- a session id prefix of at least 8 hex characters, such as `0000aaaa`.
+
+A value of 8 or more hex characters followed only by hex characters or hyphens is
+an id form; anything else is a name. Id forms are resolved against the live session
+files in `sessions_dir` (default `~/.claude/sessions`), one JSON file per session
+holding at least `sessionId` and `name`. The matching file's `name` becomes the
+`{target}`. An exact id match wins over prefix matches. No match logs
+`session not live: lane <lane>` at INFO and skips the wake; more than one matching
+session id logs `ambiguous session id` and skips the wake. In both cases the item
+stays in the file inbox, and the service delivery gate treats the wake as not
+delivered: no delivery count, no timer receipt, and a later sweep retries it. When several
+live sessions share the resolved name, `duplicate session name` is logged as a
+warning: a name lane still sends (previous behaviour), an id lane uses the name of
+the file whose `sessionId` matches. Directory scans are cached for 30 seconds per
+process. Unreadable or incomplete session files are ignored. Logs carry the lane id
+and counts only, never session values or names.
+
+Precedence when building session targets (the service delivery gate uses the same rule):
+
+| Setting | Config value | Effect |
+| --- | --- | --- |
+| session | non-null | Config wins; the ledger pointer (claim) is ignored |
+| session | null | Ledger pointer applies (claim is the runtime override) |
+| paused | true | Always paused, whatever the ledger says |
+| paused | false | Ledger value applies when set |
 
 ## Wake policy
 

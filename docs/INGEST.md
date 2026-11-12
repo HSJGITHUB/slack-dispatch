@@ -126,12 +126,22 @@ could not be fetched routes without reply-based evidence. The separate
 channel succeeded and every reply callback returned; otherwise it is kept.
 Overlap is deduplicated by deterministic event ids and message identity.
 
+A parent whose replies fetch fails with a permanent Slack error code
+(`thread_not_found`, `channel_not_found`, `not_in_channel`, `message_not_found`,
+`is_archived`; `PERMANENT_REPLY_ERRORS`) is added to an in-process skip set and logged
+once at WARNING with channel, parent ts and error code. It is not counted in
+`failures`, does not hold the `slack_replies` cursor, and is not fetched again until
+the process restarts. The pass summary counts such parents, new or remembered, as
+`permanent_skipped`. Other errors (rate limits, network and unknown codes) keep the
+behaviour above: they count in `failures`, keep the cursor and retry next pass.
+
 Reply parents include recent history parents with newer replies, channel
 bindings (when `bound_threads` is true) and threads referenced by recent ledger
 messages. Binding and ledger candidates are checked only when their thread
 activity, max(thread_ts, newest ledger message ts in that thread), is within
 `bound_threads_max_age_days` of the pass start. Excluded channels are never
-scanned. The pass summary reports `thread_candidates` and `thread_skipped_age`.
+scanned. The pass summary reports `thread_candidates`, `thread_skipped_age` and
+`permanent_skipped`.
 Replies are paginated and delivered in timestamp order. Origins are `socket`,
 `reconcile`, and `hydrate`. Initial inbox delivery from reconcile uses `backfill`;
 explicit reroute and followup kinds retain precedence.

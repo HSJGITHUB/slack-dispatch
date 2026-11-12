@@ -5,6 +5,19 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P8 session resolve
+- Accept session names, full session ids and 8+ hex id prefixes in `lanes[].session` and `claim`.
+- Resolve ids against live session files in the new optional `sessions_dir`, with a 30 second scan cache.
+- Skip wakes for ids that are not live or ambiguous; warn on duplicate session names.
+- A non-null configured session now wins over the ledger claim; `paused: true` in config always pauses.
+- `claim --config` (or `SLACK_DISPATCH_CONFIG`) warns when the configured session wins.
+- The pipeline and timer delivery gate uses the same precedence, so a configured session
+  wakes its lane with a null ledger pointer and config `paused: true` blocks it.
+- A not-live or ambiguous id is not delivered: no delivered count, no timer receipt, retried later.
+- Heartbeat counters add `wake_skipped_no_session` when a session_message adapter is configured.
+- Reconcile skips reply parents with permanent Slack errors for the process lifetime: one
+  WARNING, `permanent_skipped` in the pass summary, no failure, replies cursor not held.
+
 ### P7B inbox context
 - Collapse repeated inbox records with first-delivery age, kind, edit and attention metadata.
 - Add thread context, optional owner reply hints, body controls and JSON views.

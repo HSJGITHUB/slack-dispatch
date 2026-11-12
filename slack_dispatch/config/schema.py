@@ -146,3 +146,5 @@ class Config:
     human_queue: HumanQueue = field(default_factory=HumanQueue)
     bot_messages: BotMessages = field(default_factory=BotMessages)
     owner_signals: OwnerSignals = field(default_factory=OwnerSignals)
+    # Host directory of live session JSON files; expanded at resolution time.
+    sessions_dir: str = "~/.claude/sessions"

@@ -12,6 +12,10 @@ from .tokens import load_token, quiet_logger
 
 LOG = logging.getLogger(__name__)
 HYDRATION_RETRY_LIMIT = 3  # failed retries per root after the first failed fetch
+# Slack error codes that will not clear on retry. A reply parent failing with one of
+# these is skipped for the process lifetime instead of counted as a failure.
+PERMANENT_REPLY_ERRORS = frozenset({"thread_not_found", "channel_not_found", "not_in_channel",
+                                    "message_not_found", "is_archived"})
 
 READ_METHODS = frozenset({"conversations.history", "conversations.replies",
                           "conversations.info", "conversations.list", "auth.test"})
@@ -45,6 +49,7 @@ class SlackReconcileSource:
         self._hydration_failures = {}
         self._abandoned_roots = set()
         self.pending_roots = set()
+        self.skipped_parents = set()  # (channel, parent ts) with a permanent replies error
         self.summary = {}
 
     def _call(self, method, **params):
@@ -76,7 +81,7 @@ class SlackReconcileSource:
             before = self.failures
             self.summary = dict(channels=0, roots=0, parents=0, replies=0, hydrated=0,
                                 duplicates=0, prehandled=0, failures=0, thread_candidates=0,
-                                thread_skipped_age=0, backfill=0)
+                                thread_skipped_age=0, backfill=0, permanent_skipped=0)
             self._pass_started = self.clock()
             if self.config.discover_channels and (self._last_discovery is None
                     or self.clock() - self._last_discovery >= 6 * 3600):
@@ -113,11 +118,11 @@ class SlackReconcileSource:
                 if self.on_catchup:
                     self.on_catchup(self.last_catchup_at)
             LOG.info("Reconcile pass channels=%d roots=%d parents=%d replies=%d hydrated=%d duplicates=%d "
-                     "prehandled=%d failures=%d thread_candidates=%d thread_skipped_age=%d; "
-                     "backfill delivered %d (no wake)",
+                     "prehandled=%d failures=%d thread_candidates=%d thread_skipped_age=%d "
+                     "permanent_skipped=%d; backfill delivered %d (no wake)",
                      *(self.summary[key] for key in ("channels", "roots", "parents", "replies", "hydrated",
                                                      "duplicates", "prehandled", "failures", "thread_candidates",
-                                                     "thread_skipped_age", "backfill")))
+                                                     "thread_skipped_age", "permanent_skipped", "backfill")))
 
     @staticmethod
     def _log_failure(channel, error):
@@ -225,7 +230,11 @@ class SlackReconcileSource:
             self.store.set_cursor("slack_replies", channel, f"{started:.6f}")
 
     def _fetch_replies(self, channel, history, window):
-        """Fetch replies per parent; a failed parent is skipped and keeps the replies cursor."""
+        """Fetch replies per parent; a failed parent is skipped and keeps the replies cursor.
+
+        A parent with a permanent Slack error is skipped for the process lifetime and
+        does not hold the replies cursor; it counts as permanent_skipped, not a failure.
+        """
         started = self._pass_started
         fetched, complete = {}, True
         try:
@@ -239,11 +248,21 @@ class SlackReconcileSource:
         for parent in parents:
             if self._stop.is_set():
                 return fetched, False
+            if (channel, parent) in self.skipped_parents:
+                self.summary["permanent_skipped"] += 1
+                continue
             self.summary["parents"] += 1
             try:
                 rows = self._pages("conversations.replies", channel=channel, ts=parent,
                                    oldest=f"{reply_oldest:.6f}", latest=f"{started:.6f}", inclusive=False, limit=200)
             except Exception as error:
+                code = getattr(error, "slack_error", None)
+                if code in PERMANENT_REPLY_ERRORS:
+                    self.skipped_parents.add((channel, parent))
+                    self.summary["permanent_skipped"] += 1
+                    LOG.warning("Reconcile replies skipped permanently channel=%s parent=%s error=%s",
+                                channel, parent, code)
+                    continue
                 complete = False
                 self._reply_failure(channel, parent, error)
                 continue

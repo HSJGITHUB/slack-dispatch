@@ -112,7 +112,9 @@ class TimerTests(unittest.TestCase):
 
     def test_blocked_session_notice_keeps_receipt_available(self):
         spec = replace(self.config.notify_adapters[0], kind="session_message")
-        self.config = replace(self.config, notify_adapters=(spec,))
+        # Null config sessions so the ledger pointer (claim) decides, as before P8.
+        lanes = tuple(replace(lane, session=None) for lane in self.config.lanes)
+        self.config = replace(self.config, notify_adapters=(spec,), lanes=lanes)
         self.assigned()
         sweep = TimerSweep(self.config, self.store, [self.lane], self.clock)
         self.assertEqual(sweep.run_once(1020), 0)

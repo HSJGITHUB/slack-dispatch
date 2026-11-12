@@ -250,11 +250,13 @@ def parse_config(raw):
         return tuple(values)
     signals = OwnerSignals(posts, reactions("reactions_done", ["white_check_mark", "heavy_check_mark"]),
                            reactions("reactions_ack", ["eyes"]))
+    sessions_dir = string(data.get("sessions_dir", Config.sessions_dir), "sessions_dir")
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
                   explicit_tag_pattern=pattern, inbox=inbox, service=service,
-                  human_queue=queue, bot_messages=bots, owner_signals=signals)
+                  human_queue=queue, bot_messages=bots, owner_signals=signals,
+                  sessions_dir=sessions_dir)
 
 
 def load_config(path: str | Path) -> Config:

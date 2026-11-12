@@ -80,7 +80,10 @@ class NotifierTests(unittest.TestCase):
         self.assertEqual(adapters[1].target_resolver("support"), "session-support-placeholder")
         self.assertIsNone(adapters[1].target_resolver("content"))
         store.upsert_lane("support", session_pointer="dummy-current")
-        self.assertEqual(adapters[1].target_resolver("support"), "dummy-current")
+        # P8: a non-null configured session wins over the ledger pointer.
+        self.assertEqual(adapters[1].target_resolver("support"), "session-support-placeholder")
+        store.upsert_lane("owner", session_pointer="dummy-current")
+        self.assertEqual(adapters[1].target_resolver("owner"), "dummy-current")
         store.upsert_lane("support", paused=True)
         self.assertIsNone(adapters[1].target_resolver("support"))
         for field, value in (("immediate_users", "wrong"), ("owner_user", 42)):

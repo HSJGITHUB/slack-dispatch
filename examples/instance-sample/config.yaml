@@ -8,6 +8,11 @@ lanes:
   - id: content
     session: null
     paused: true
+# lanes[].session takes a session name, a full session id (uuid) or an id prefix of
+# at least 8 hex characters. A non-null value wins over a claim in the ledger.
+# Ids are resolved against the live session files in sessions_dir (default
+# ~/.claude/sessions). The sample uses a dummy directory.
+sessions_dir: dummy/sessions
 channel_defaults:
   C0000000001: {default: support}
   C0000000002: {default: null}

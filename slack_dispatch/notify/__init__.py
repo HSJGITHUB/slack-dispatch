@@ -8,24 +8,40 @@ from .base import Notifier
 from .file_drop import FileDropNotifier
 from .file_inbox import FileInboxNotifier
 from .session_message import NotifyError, SessionMessageNotifier
+from .session_resolve import DEFAULT_SESSIONS_DIR, SessionResolver
 
-__all__ = ["Notifier", "NotifyError", "build_notifiers"]
+__all__ = ["Notifier", "NotifyError", "build_notifiers", "effective_lane"]
+
+
+def effective_lane(config, store, lane):
+    """Return (session, paused) for a lane.
+
+    A non-null configured session wins over the ledger pointer; the ledger pointer
+    (set by claim) applies only when the configured session is null. A configured
+    paused: true always pauses; otherwise the ledger value applies when set.
+    """
+    configured = next((row for row in config.lanes if row.id == lane), None)
+    current = store.get_lane(lane) or {}
+    session = configured.session if configured and configured.session is not None else None
+    if session is None:
+        session = current.get("session_pointer")
+    paused = bool(configured.paused) if configured else False
+    if not paused and current.get("paused") is not None:
+        paused = bool(current["paused"])
+    return session, paused
 
 
 def build_notifiers(config, store) -> list[Notifier]:
     lanes = {lane.id: lane for lane in config.lanes}
+    resolver = SessionResolver(getattr(config, "sessions_dir", None) or DEFAULT_SESSIONS_DIR)
 
     def resolve(lane, purpose):
         if purpose == "lane" and (not config.wake_policy.enabled or (Path(config.wake_policy.state_dir) / "wake.off").exists()):
             return None
-        current = store.get_lane(lane)
-        configured = lanes.get(lane)
-        paused = current.get("paused") if current else None
-        if paused is None:
-            paused = configured.paused if configured else False
-        if paused:
+        session, paused = effective_lane(config, store, lane)
+        if paused or not session:
             return None
-        return current.get("session_pointer") if current else (configured.session if configured else None)
+        return resolver.resolve_target(lane, session)
 
     result = []
     for adapter in config.notify_adapters:
@@ -38,6 +54,8 @@ def build_notifiers(config, store) -> list[Notifier]:
                                                  dry_run=adapter.dry_run, timeout=adapter.timeout,
                                                  template=adapter.template, lanes=list(lanes),
                                                  lookup=store.get_message))
+            # Shared resolver: the delivery gate uses it and the heartbeat sums skipped_no_session.
+            result[-1].session_resolver = resolver
         elif adapter.kind in ("file_drop", "assistant_dm"):
             result.append(FileDropNotifier(adapter.path, adapter.template))
         else:

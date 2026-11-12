@@ -62,7 +62,7 @@ class TimerSweep:
             if purpose == "human_queue" and self.config.human_queue.mode == "digest":
                 self.human.offer(row["id"], timer, adapter=index, now=now)
                 continue
-            if not can_notify(self.config, self.store, spec, lane):
+            if not can_notify(self.config, self.store, spec, lane, notifier):
                 continue
             try:
                 if spec.dry_run:
