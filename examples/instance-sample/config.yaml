@@ -62,6 +62,7 @@ sources:
     user_token_key: SLACK_USER_TOKEN
     interval_seconds: 3600
     lookback_days: 7
+    discover_channels: false
 
 always_human:
   users: [U0000000091]
@@ -86,3 +87,11 @@ service:
   log_level: INFO
   once: false
   followup_window_seconds: 600
+
+human_queue:
+  mode: digest
+  digest_seconds: 1800
+  immediate_flags: [always_human, owner_mention]
+bot_messages:
+  policy: route_or_exclude
+  known_bot_users: []

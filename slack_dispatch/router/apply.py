@@ -16,10 +16,12 @@ def apply_decision(store, message_id, decision, suggester) -> Outcome:
     message = store.get_message(message_id)
     if message is None:
         raise KeyError(message_id)
+    if decision.attention is not None or message.get("attention") is not None:
+        store.set_attention(message_id, decision.attention)
     if decision.rule == "excluded":
         store.set_state(message_id, "excluded", note=decision.reason)
         return Outcome("excluded", None, decision.reason, None)
-    if decision.lane is not None and decision.rule != "always_human":
+    if decision.lane is not None:
         store.set_route(message_id, decision.lane, decision.reason)
         if is_reply(message):
             key = (message["source"], message["channel"], message["thread_ts"])

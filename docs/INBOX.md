@@ -18,6 +18,12 @@ a scaffold and must be supplied by the ledger packet before real CLI operation.
 - `claim support --session dummy-session`: replace the lane's session pointer.
   Without `--session`, use `SLACK_DISPATCH_SESSION`, then `CLAUDE_SESSION_ID`.
 - `queue`: show human-pending ids and classifier suggestions.
+- `import-bindings PATH [--replace]`: import UTF-8 JSONL objects containing
+  source, channel, thread_ts, and lane. Extra keys and blank lines are ignored.
+  Validate all rows before writing. Keep existing bindings by default; --replace
+  overwrites them. Count additions/replacements as added, existing rows as kept,
+  and unknown lanes as skipped unknown lane. Print unknown lane ids without
+  creating lanes. Duplicate keys in separate rows are processed in file order.
 - `assign slack:CDUMMY:1 support --note reviewed`: record a human assignment with
   reason `human:cli`, optionally save a note, and append to the destination inbox.
 
@@ -102,3 +108,22 @@ Wake state is in memory; durable pending work remains in the ledger and inbox.
 Route mutation and inbox append are separate operations; append failures surface
 and require caller retry. Delivery deduplication and crash recovery orchestration
 remain service integration responsibilities.
+
+## Human queue digests
+
+human_queue defaults to mode=digest, digest_seconds=1800 and immediate_flags
+[always_human, owner_mention]. Ordinary items and overdue human timer notices
+share one durable batch per adapter. The first pending item starts the interval;
+no empty digest is sent. Counts include every unique pending message per channel,
+while ids list at most 20 examples. Summaries include queue and assign commands.
+Immediate attention notices contain one id and report the assigned lane if any.
+mode=immediate restores per-item notices. Human adapters bypass the global wake
+switch; their dry_run and session claim/pause requirements still apply.
+
+Built-in session_message, file_drop and assistant_dm adapters carry summaries.
+A human-purpose file_inbox uses atomic JSON notices in
+<inbox-root>/human_queue-notices/ for summaries instead of lane inbox records.
+A custom ids-only adapter receives ids through its existing notify method.
+Retries and restart preserve per-adapter receipts. Resolved work is omitted from
+pending batches. Changes to adapter order require operator review because receipt
+identity includes the adapter position.

@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS messages (
     edited_at TEXT,
     note TEXT,
     suggestion_reason TEXT,
+    attention TEXT,
+    is_bot INTEGER NOT NULL DEFAULT 0,
     UNIQUE (source, channel, ts)
 );
 CREATE TABLE IF NOT EXISTS bindings (
@@ -69,4 +71,21 @@ CREATE TABLE IF NOT EXISTS reactions (
     added_at TEXT,
     removed_at TEXT,
     PRIMARY KEY (message_id, user, reaction)
+);
+
+CREATE TABLE IF NOT EXISTS human_notices (
+    message_id TEXT NOT NULL REFERENCES messages(id),
+    kind TEXT NOT NULL,
+    adapter INTEGER NOT NULL,
+    queued_at REAL NOT NULL,
+    immediate INTEGER NOT NULL DEFAULT 0,
+    sent_at REAL,
+    PRIMARY KEY (message_id, kind, adapter)
+);
+CREATE TABLE IF NOT EXISTS timer_events (
+    message_id TEXT NOT NULL REFERENCES messages(id),
+    timer TEXT NOT NULL,
+    adapter INTEGER NOT NULL,
+    sent_at REAL NOT NULL,
+    PRIMARY KEY (message_id, timer, adapter)
 );

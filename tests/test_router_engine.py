@@ -16,8 +16,8 @@ class EngineTests(unittest.TestCase):
     def test_owner_mention_with_label(self):
         for label in ("dummy-label", ""):
             row = message(text=f"[support] <@U0000000093|{label}>", thread_ts="1")
-            self.assertEqual(route(row, self.config, self.lookup).rule, "always_human")
-        self.lookup.assert_not_called()
+            self.assertEqual(route(row, self.config, self.lookup).attention, "owner_mention")
+        self.assertEqual(self.lookup.call_count, 2)
         row = message(text="<@U00000000930|dummy-label>")
         self.assertEqual(route(row, self.config, self.lookup).rule, "channel_default")
 
@@ -72,15 +72,16 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(custom.match(message(text="#support")).lane, "support")
 
     def test_protection_precedence(self):
-        self.lookup.side_effect = AssertionError("Protection must short circuit")
+        self.lookup.return_value = "owner"
         for changes in ({"user": "U0000000091"}, {"text": "[support] <@U0000000092>"},
                         {"text": "<@U0000000093>"}):
             row = message(thread_ts="1", **changes)
-            self.assertEqual(route(row, self.config, self.lookup).rule, "always_human")
+            self.assertEqual(route(row, self.config, self.lookup).rule, "thread_inherit")
+            self.assertIsNotNone(route(row, self.config, self.lookup).attention)
             row["channel"] = "C0000000003"
             self.assertEqual(route(row, self.config, self.lookup).rule, "excluded")
         self.assertEqual(route(message(text=None, user="U0000000091"), self.config,
-                               self.lookup).rule, "always_human")
+                               self.lookup).attention, "always_human")
         for text in (None, "U0000000093", "<@U00000000930>"):
             self.assertEqual(route(message(text=text), self.config, self.lookup).rule,
                              "channel_default")

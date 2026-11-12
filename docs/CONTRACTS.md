@@ -15,6 +15,7 @@ These contracts let three packets (ingest+ledger, router+queue, inbox+notify) be
 | channel | str or None | conversation id |
 | channel_type | str or None | channel, group, im, mpim |
 | user | str or None | author or actor id |
+| is_bot | bool | Additive service Event field; bot_id, missing user, or configured bot user |
 | ts | str or None | message ts; for message_changed the edited message ts; for reactions the reacted item ts |
 | thread_ts | str or None | parent ts when the message is a thread reply |
 | is_thread_reply | bool | thread_ts present and thread_ts != ts |
@@ -60,10 +61,14 @@ Other packets must not edit `schema.sql` or `store.py`; their tests use an in-me
 ## 4. Router contract (package `slack_dispatch.router`)
 
 ```
-Decision(lane: str | None, reason: str, rule: str | None)       # rule in thread_inherit, explicit_tag, channel_default, person_channel, always_human, excluded, none
+Decision(lane: str | None, reason: str, rule: str | None, attention: str | None = None)       # rule in thread_inherit, explicit_tag, channel_default, person_channel, always_human, excluded, none
 route(message: Message, config: Config, lookup_binding: Callable[[str, str, str], str | None]) -> Decision
 ```
-Order: excluded channel -> always_human (configured user ids or mentions of owner id) -> ThreadInherit -> ExplicitTag -> ChannelDefault (a None default means multi-lane, no match) -> PersonChannel -> none. First match wins; no side effects. `Suggester.suggest` runs only when the decision is none; a suggestion never assigns.
+Order: excluded channel -> bot policy -> collect always-human attention ->
+ThreadInherit -> ExplicitTag -> ChannelDefault -> PersonChannel -> human pending.
+Attention is independent of lane selection. An unmatched protected item uses
+rule=always_human; an unmatched ordinary item uses rule=none. Only rule=none may
+invoke a suggester. See ROUTING.md for the full precedence table.
 
 ## 5. Inbox record (per-lane JSONL, `inbox/<lane>.jsonl`)
 
@@ -80,3 +85,32 @@ Order: excluded channel -> always_human (configured user ids or mentions of owne
 - inbox+notify: `inbox: {root}`, `notify_adapters[]` kinds `file_inbox`, `session_message`, `file_drop`; `wake_policy.immediate_users`, `wake_policy.owner_user`.
 
 Loader changes must keep the existing sample config loading and add the new keys to `examples/instance-sample/config.yaml` with dummy values. Each packet edits only its own keys and adds its own tests for them.
+
+## Shadow-day additive contracts
+
+- Config adds human_queue (mode=digest, digest_seconds=1800,
+  immediate_flags=[always_human, owner_mention]), bot_messages
+  (policy=route_or_exclude, known_bot_users=[]), and
+  sources[].discover_channels=false. mode=immediate preserves per-item delivery.
+- SourceConfig carries excluded_channels from the global configuration for
+  discovery even when constructed through the standalone source factory.
+- The service source wrappers preserve raw bot evidence before legacy
+  normalization discards bot_id. Every Event they deliver has boolean is_bot.
+  Pipeline callers may supply is_bot or bot_id; missing users and configured bot
+  users are also recognized. The standalone normalize_slack_event function is
+  unchanged because its file is outside this packet's allowlist.
+- Ledger v1 migration idempotently adds messages.attention (nullable TEXT),
+  messages.is_bot, human_notices, and timer_events. Existing v1 data and the
+  schema_version value remain intact. set_attention(id, value) accepts None,
+  always_human, or owner_mention. Old rows default to is_bot=0 until processed.
+- human_notices holds message ids, trigger kinds, adapter positions, queue times,
+  immediate flags, and delivery receipts. It never holds source text. Timer
+  receipts are committed only after successful notification, including ids not
+  displayed in the 20-id digest preview. Adapter positions must remain stable.
+- The base notify(lane, ids) protocol is unchanged. Built-in session and file-drop
+  human adapters receive generated summaries through copied templates. Human
+  file-inbox adapters write atomic summary notices under
+  <inbox-root>/human_queue-notices/, preserving lane JSONL record contracts.
+  Custom adapters implementing only notify receive the capped ids list.
+- Global wake controls apply to lane wakes only. Human queue delivery retains
+  adapter dry-run and session availability/pause checks.

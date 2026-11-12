@@ -1,5 +1,7 @@
 """Plain-text inbox commands against the shared LedgerStore API."""
 import argparse
+import json
+from pathlib import Path
 import os
 import sys
 from datetime import datetime, timezone
@@ -44,6 +46,10 @@ def build_parser():
             sub.add_argument("--session")
         if command == "inbox":
             sub.add_argument("--include-done", action="store_true")
+    sub = commands.add_parser("import-bindings")
+    options(sub)
+    sub.add_argument("path")
+    sub.add_argument("--replace", action="store_true")
     return parser
 
 
@@ -86,7 +92,36 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                     print("Message not found", file=stderr)
                     error_reported = True
                     return 3
-            if args.command == "inbox":
+            if args.command == "import-bindings":
+                rows = []
+                for line in Path(args.path).read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if not isinstance(row, dict) or any(
+                            not isinstance(row.get(key), str) or not row[key].strip()
+                            for key in ("source", "channel", "thread_ts", "lane")):
+                        raise BadInput("Invalid binding row")
+                    validate_lane(row["lane"])
+                    rows.append(row)
+                added = kept = skipped = 0
+                unknown = set()
+                for row in rows:
+                    lane = row["lane"]
+                    if store.get_lane(lane) is None:
+                        skipped += 1
+                        unknown.add(lane)
+                        continue
+                    key = (row["source"], row["channel"], row["thread_ts"])
+                    if store.lookup_binding(*key) is not None and not args.replace:
+                        kept += 1
+                        continue
+                    store.bind_thread(*key, lane)
+                    added += 1
+                print(f"added={added} kept={kept} skipped unknown lane={skipped}", file=stdout)
+                if unknown:
+                    print("Unknown lanes: " + ", ".join(sorted(unknown)), file=stdout)
+            elif args.command == "inbox":
                 print("id age channel thread followup state", file=stdout)
                 for row in read(root, args.lane, include_done=args.include_done, store=store):
                     print(row["id"], age(row), row["channel"], bool(row.get("thread_ts") and row["thread_ts"] != row["ts"]),

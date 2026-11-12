@@ -1,24 +1,43 @@
 # Routing and human review
 
 The router consumes a normalized message and a validated Config. It does not
-mutate the message, call a classifier, or write to the ledger. First match wins:
+mutate the message, call a classifier, or write to the ledger.
 
-1. Excluded channel: excluded state, no suggestion.
-2. Always-human author or configured mention: human queue, no suggestion.
-3. Existing reply thread binding.
-4. First recognized explicit tag in message text.
-5. Channel or DM default, unless the configured value is null.
-6. First matching person and channel rule.
-7. No match: human queue, optionally with a classifier suggestion.
+| Precedence | Condition | Result |
+| --- | --- | --- |
+| 1 | Excluded channel | Excluded, no attention or classifier |
+| 2 | Bot with exclude_all | Excluded with excluded:bot |
+| 2 | Bot with route_or_exclude | Channel/DM default only, otherwise excluded:bot |
+| 3 | Protected author or configured exact mention | Set attention, continue routing |
+| 4 | Existing reply thread binding | Assign inherited lane |
+| 5 | First recognized explicit tag | Assign tagged lane |
+| 6 | Non-null channel or DM default | Assign default lane |
+| 7 | First person-channel rule | Assign rule lane |
+| 8 | No lane with attention | Human pending, no classifier |
+| 9 | No lane without attention | Human pending, optional classifier suggestion |
 
-`Decision(lane, reason, rule)` identifies the selected rule. Deterministic reasons
+The optional bot policy route_all uses the complete normal routing path, including
+human review and the optional classifier. The default route_or_exclude never
+sends bot traffic to human review, attention, storm notices, or reassignment
+proposals. A bot is identified by is_bot, bot_id, a missing author, or membership
+in bot_messages.known_bot_users. Channel defaults for bots use the existing DM
+semantics and override explicit tags and thread bindings.
+
+Protected authors set attention=always_human; matching mentions set
+attention=owner_mention and take priority when both match. Attention does not
+prevent assignment. A lane assignment also sends an immediate human notice by
+default, with the generated text "FYI, assigned to lane X". With no matching lane,
+the item remains human_pending. The ledger stores attention separately from the
+selected routing rule. Excluded messages have no attention.
+
+`Decision(lane, reason, rule, attention=None)` identifies the selected rule. Deterministic reasons
 are stable rule names, never copies of message text. Author matching accepts the
 normalized `user` field, or the ledger `author` field if `user` is absent. Reply
 identity is derived from a nonempty `thread_ts` different from `ts`.
 
 ## Configuration
 
-All original required scaffold keys remain required. The three new keys are
+All original required scaffold keys remain required. The routing keys are
 optional, including when loading older configuration files:
 
 ```yaml
@@ -65,6 +84,7 @@ the person-channel rule to run. Person-channel rules use the validated
 
 Call `apply_decision(store, message_id, decision, suggester)` after `route`.
 Assigned decisions call `set_route`; excluded decisions call `set_state`.
+Attention is persisted through the additive `set_attention` store method.
 All other decisions enter `human_pending` before any classifier call. Only a
 `none` decision may invoke the supplied suggester. Pass None or NullSuggester
 when disabled. An adapter exposing `enabled=False` is also skipped. Legacy
@@ -124,6 +144,6 @@ never changes routing or enables automatic assignment. Promotion remains manual.
 ## Integration boundary
 
 Tests exercise the consumed LedgerStore API through an in-memory fake and a fake
-classifier client. Ledger, ingest, service, inbox and notifier implementation are
-owned by other packets and are unchanged. No live SDK, credential, network or
-service integration validation is claimed.
+classifier client. The shadow-fix tests also exercise the real SQLite store, service source wrappers,
+pipeline and timers with fake clients and clocks. No live SDK, credential, network
+or deployment validation is claimed.

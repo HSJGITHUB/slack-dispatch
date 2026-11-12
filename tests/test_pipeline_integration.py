@@ -20,6 +20,7 @@ SAMPLE = Path(__file__).resolve().parents[1] / "examples/instance-sample/config.
 def fixture_config(root):
     config = load_config(SAMPLE)
     return replace(config,
+                   human_queue=replace(config.human_queue, mode="immediate"),
                    ledger=replace(config.ledger, path=str(root / "ledger.sqlite3")),
                    service=replace(config.service, state_dir=str(root / "state"),
                                    log_dir=str(root / "logs")),
@@ -138,11 +139,11 @@ class PipelineTests(unittest.TestCase):
         excluded = self.pipeline.handle_event(event(channel="C0000000003"))
         self.assertEqual(excluded.state, "excluded")
         human = self.pipeline.handle_event(event(2, text="[support] <@U0000000093>"))
-        self.assertEqual(human.state, "human_pending")
+        self.assertEqual(human.state, "assigned")
         self.pipeline.handle_event(event(3, ts="1000.000002", subtype="message_deleted"))
         self.assertEqual(self.store.get_message(human.message_id)["note"], "message_deleted")
         self.human.notify.assert_called_once()
-        self.lane.notify.assert_not_called()
+        self.lane.notify.assert_called_once()
 
     def test_debounce_flush_does_not_duplicate_durable_inbox(self):
         self.pipeline.handle_event(event())

@@ -65,7 +65,8 @@ class LedgerStore:
             columns = {r[1] for r in db.execute("PRAGMA table_info(messages)")}
             additions = {"event_id": "TEXT", "channel_type": "TEXT",
                          "has_files": "INTEGER NOT NULL DEFAULT 0", "edited_at": "TEXT",
-                         "note": "TEXT", "suggestion_reason": "TEXT"}
+                         "note": "TEXT", "suggestion_reason": "TEXT",
+                         "attention": "TEXT", "is_bot": "INTEGER NOT NULL DEFAULT 0"}
             for name, declaration in additions.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE messages ADD COLUMN {name} {declaration}")
@@ -107,8 +108,9 @@ class LedgerStore:
                 exists = db.execute("SELECT 1 FROM messages WHERE id=?", (mid,)).fetchone()
                 subtype = event.get("subtype")
                 if subtype == "message_changed":
-                    db.execute("UPDATE messages SET edited_at=?, followup=1, has_files=? WHERE id=?",
-                               (received, bool(event.get("has_files")), mid))
+                    db.execute("UPDATE messages SET edited_at=?, followup=1, has_files=?, is_bot=? WHERE id=?",
+                               (received, bool(event.get("has_files")),
+                                bool(event.get("is_bot") or event.get("bot_id") or not event.get("user")), mid))
                     if self.store_body and "text" in event:
                         db.execute("UPDATE messages SET body=? WHERE id=?", (event["text"], mid))
                 elif subtype == "message_deleted":
@@ -119,12 +121,13 @@ class LedgerStore:
                 else:
                     db.execute("""INSERT INTO messages
                         (id, source, channel, ts, thread_ts, author, is_thread_reply,
-                         received_at, state, body, event_id, channel_type, has_files)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?)""",
+                         received_at, state, body, event_id, channel_type, has_files, is_bot)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?)""",
                                (mid, source, channel, ts, event.get("thread_ts"), event.get("user"),
                                 bool(event.get("is_thread_reply")), received,
                                 event.get("text") if self.store_body else None,
-                                event_id, event.get("channel_type"), bool(event.get("has_files"))))
+                                event_id, event.get("channel_type"), bool(event.get("has_files")),
+                                bool(event.get("is_bot") or event.get("bot_id") or not event.get("user"))))
                     created = True
             elif kind in ("reaction_added", "reaction_removed") and mid:
                 user, reaction = event.get("user"), event.get("reaction")
@@ -201,6 +204,11 @@ class LedgerStore:
     def set_suggestion(self, message_id, lane, reason, classifier_version):
         self._update(message_id, {"classifier_suggestion": lane, "suggestion_reason": reason,
                                   "classifier_version": classifier_version})
+
+    def set_attention(self, message_id, attention):
+        if attention not in (None, "always_human", "owner_mention"):
+            raise ValueError("Invalid attention flag")
+        self._update(message_id, {"attention": attention})
 
     def mark_followup(self, message_id):
         self._update(message_id, {"followup": 1})

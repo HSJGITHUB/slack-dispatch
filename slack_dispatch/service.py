@@ -1,6 +1,7 @@
 """Resident orchestration for the existing intake, ledger and notification packages."""
 import argparse
 from dataclasses import replace
+from datetime import datetime
 import logging
 from pathlib import Path
 import sys
@@ -10,6 +11,8 @@ from slack_dispatch import __version__
 from slack_dispatch.config.loader import ConfigError, load_config
 from slack_dispatch.ingest import build_sources
 from slack_dispatch.ingest.slack_reconcile import SlackReconcileSource
+from slack_dispatch.ingest.slack_socket import SlackSocketSource
+from slack_dispatch.ingest.normalize import normalize_slack_event
 from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.notify import build_notifiers
 from slack_dispatch.notify.wake import WakePolicyEngine
@@ -31,7 +34,67 @@ class _DryRunNotifier:
                  len(message_ids), list(message_ids))
 
 
-class _OnceReconcileSource(SlackReconcileSource):
+def _is_bot(metadata, known=()):
+    return bool(metadata.get("is_bot") or metadata.get("bot_id") or not metadata.get("user")
+                or metadata.get("user") in known)
+
+
+class _ServiceSocketSource(SlackSocketSource):
+    """Preserve bot identity before the legacy normalizer drops bot_id."""
+    def _receive(self, client, request):
+        try:
+            client.send_socket_mode_response(self._response_class(envelope_id=request.envelope_id))
+            if request.type == "disconnect":
+                self._observe(False)
+                return
+            if request.type != "events_api" or self._stopped.is_set():
+                return
+            payload = dict(request.payload)
+            retry = getattr(request, "retry_attempt", None)
+            if retry is not None:
+                payload["retry_attempt"] = retry
+            event = normalize_slack_event(payload, datetime.now().astimezone().isoformat(),
+                                          store_body=self.config.store_body)
+            if event is not None:
+                raw = payload.get("event", {})
+                if raw.get("subtype") in ("message_changed", "message_deleted"):
+                    raw = raw.get("message", raw.get("previous_message", {}))
+                event["is_bot"] = _is_bot(raw, self.known_bot_users)
+                self.on_event(event)
+        except Exception:
+            self.failures += 1
+
+
+class _ServiceReconcileSource(SlackReconcileSource):
+    """Keep a channel-local bot map while the existing history pass normalizes."""
+    def __init__(self, *args, known_bot_users=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.known_bot_users = known_bot_users
+        self._bots = {}
+        callback = self.on_event
+        def deliver(event):
+            event = dict(event, is_bot=self._bots.get(event.get("ts"),
+                         _is_bot(event, self.known_bot_users)))
+            callback(event)
+        self.on_event = deliver
+
+    def _call(self, method, **params):
+        response = super()._call(method, **params)
+        if method == "conversations.history":
+            for message in response.get("messages", []):
+                if isinstance(message, dict):
+                    self._bots[message.get("ts")] = _is_bot(message, self.known_bot_users)
+        return response
+
+    def _catch_up_channel(self, channel):
+        self._bots.clear()
+        try:
+            return super()._catch_up_channel(channel)
+        finally:
+            self._bots.clear()
+
+
+class _OnceReconcileSource(_ServiceReconcileSource):
     """Reuse startup initialization but stop before the interval thread can poll."""
     def catch_up(self):
         try:
@@ -59,9 +122,15 @@ def build_service_sources(config, on_event, store, *, once=False):
     for source in sources:
         # Source text is transient routing input. The ledger keeps its own policy.
         source.config = replace(source.config, store_body=True)
-        if once and isinstance(source, SlackReconcileSource):
-            source = _OnceReconcileSource(source.config, source.on_event,
-                                          source.env_file, source.user_token_key, store)
+        if isinstance(source, SlackReconcileSource):
+            cls = _OnceReconcileSource if once else _ServiceReconcileSource
+            source = cls(source.config, source.on_event, source.env_file, source.user_token_key,
+                         store, excluded_channels=config.excluded_channels,
+                         known_bot_users=config.bot_messages.known_bot_users)
+        elif isinstance(source, SlackSocketSource):
+            source = _ServiceSocketSource(source.config, source.on_event,
+                                           source.env_file, source.app_token_key)
+            source.known_bot_users = config.bot_messages.known_bot_users
         result.append(source)
     return result
 
@@ -119,7 +188,7 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None):
                 notifiers = [_DryRunNotifier() for _ in notifiers]
             wake = WakePolicyEngine(config.wake_policy, clock)
             pipeline = Pipeline(config, store, suggester, notifiers, wake, clock)
-            sweep = TimerSweep(config, store, notifiers, clock)
+            sweep = TimerSweep(config, store, notifiers, clock, human=pipeline.human)
             sweep.lock = pipeline.lock
             sources = build_service_sources(config, pipeline.handle_event, store, once=once)
             for source in sources:

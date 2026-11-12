@@ -10,11 +10,11 @@ from .normalize import normalize_slack_event, safe, IDENTIFIER, TIMESTAMP
 from .tokens import load_token, quiet_logger
 
 READ_METHODS = frozenset({"conversations.history", "conversations.replies",
-                          "conversations.info", "auth.test"})
+                          "conversations.info", "conversations.list", "auth.test"})
 
 
 class SlackReconcileSource:
-    def __init__(self, config, on_event, env_file, user_token_key, store, *, sleep=None):
+    def __init__(self, config, on_event, env_file, user_token_key, store, *, sleep=None, clock=None, excluded_channels=None):
         self.config, self.on_event, self.store = config, on_event, store
         self.env_file, self.user_token_key = env_file, user_token_key
         self.client = None
@@ -23,6 +23,10 @@ class SlackReconcileSource:
         self._sleep = sleep or self._stop.wait
         self._thread = None
         self._pass_lock = threading.Lock()
+        self.clock = clock or time.time
+        self.excluded_channels = set(config.excluded_channels if excluded_channels is None else excluded_channels)
+        self._discovered = set()
+        self._last_discovery = None
 
     def _call(self, method, **params):
         if method not in READ_METHODS:
@@ -46,7 +50,14 @@ class SlackReconcileSource:
 
     def catch_up(self):
         with self._pass_lock:
-            for channel in self.store.list_channels("slack"):
+            if self.config.discover_channels and (self._last_discovery is None
+                    or self.clock() - self._last_discovery >= 6 * 3600):
+                try:
+                    self._discover_channels()
+                except Exception:
+                    self.failures += 1
+            channels = set(self.store.list_channels("slack")) | self._discovered
+            for channel in sorted(channels - self.excluded_channels):
                 if self._stop.is_set():
                     return
                 if safe(channel, IDENTIFIER) is None:
@@ -56,6 +67,28 @@ class SlackReconcileSource:
                 except Exception:
                     # Keep failed channel cursors unchanged and continue the pass.
                     self.failures += 1
+
+    def _discover_channels(self):
+        channels, page, visited = set(), None, set()
+        while True:
+            params = dict(types="public_channel,private_channel,im,mpim", limit=200)
+            if page:
+                params["cursor"] = page
+            response = self._call("conversations.list", **params)
+            if not response.get("ok", True):
+                raise RuntimeError("Slack channel discovery failed")
+            for channel in response.get("channels", []):
+                identifier = safe(channel.get("id"), IDENTIFIER) if isinstance(channel, dict) else None
+                if identifier and identifier not in self.excluded_channels:
+                    channels.add(identifier)
+            page = response.get("response_metadata", {}).get("next_cursor")
+            if not page:
+                break
+            if not isinstance(page, str) or page in visited:
+                raise RuntimeError("Invalid discovery pagination cursor")
+            visited.add(page)
+        self._discovered.update(channels)
+        self._last_discovery = self.clock()
 
     def _catch_up_channel(self, channel):
         cursor = self.store.get_cursor("slack", channel)

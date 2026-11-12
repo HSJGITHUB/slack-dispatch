@@ -5,6 +5,14 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### Added
+- Durable human-queue digests with channel counts, capped ids and timer receipts.
+- Optional bot traffic policies and service Event bot identity.
+- JSONL thread binding import with keep/replace behavior and unknown-lane counts.
+- Opt-in read-only reconcile discovery with six-hour refresh and exclusions.
+- Keep human-queue notices live while lane wakes are disabled.
+- Preserve lane routing for protected authors and mentions, with operator attention.
+
 ### Fixed
 - Add an indefinite one-minute time trigger with an install-time start boundary so stopped services restart without another logon.
 - Render Task Scheduler XML as UTF-16 LE with BOM and a matching UTF-16 declaration.

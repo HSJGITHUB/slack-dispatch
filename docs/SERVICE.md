@@ -50,7 +50,8 @@ lanes only. Adapters with purpose=human_queue receive lane="human_queue" and
 message ids. With no such adapter the pipeline logs once and continues exporting.
 The timer sweep logs its own missing-adapter warning once. Adapter selection is
 independent of kind. To use a session_message adapter for the human queue,
-configure and claim a lane named human_queue; its pause and wake controls apply.
+configure and claim a lane named human_queue; its pause control applies. Global
+wake controls do not suppress human-queue notices.
 
 ## Configuration
 
@@ -95,8 +96,9 @@ one synchronous catch-up pass. A service-only subclass closes its interval gate
 after that pass, so the inherited interval thread performs no second poll.
 The service performs one timer sweep and a due flush before exiting. There is
 no local event-inbox format in the source API: "pending" means history after the
-ledger's channel cursors. A fresh ledger has no known channels. --once neither
-starts Socket Mode nor discovers workspace channels.
+ledger's channel cursors. A fresh ledger has no known channels. --once does not start Socket Mode.
+With sources[].discover_channels=true, reconcile discovers visible conversations
+before the startup pass, including on a fresh ledger.
 
 --dry-run replaces every notifier with an ids-only logging adapter. It does not
 call file inbox, file drop or session adapters, write delivery timestamps, or
@@ -136,17 +138,18 @@ sent. Lane reminders and reassignment proposals skip file_inbox adapters;
 session messages carry a reminder prefix and file drops carry a reminder notice.
 timer_events identifies the originating timer.
 
-The service adds timer_events and service_deliveries with idempotent CREATE TABLE
-operations through the existing store transaction lock. The ledger's own schema
-version remains 1 because its migrator rejects version 2. No ledger package file
-is changed. Timer receipts are per item, threshold and adapter configuration
+The ledger adds timer_events and human_notices through idempotent v1 migration.
+The service also creates service_deliveries through the existing store transaction
+lock. The ledger schema version remains 1, including the attention and is_bot
+column additions. Timer receipts are per item, threshold and adapter configuration
 position. Keep adapter order stable for receipt identity. An adapter failure is
 retried on the next sweep without repeating successful adapters. Session notices
 blocked by wake.off, pause or an absent claim do not consume receipts.
 
-Delivery history survives restart. Failed pipeline notifications are retried on
+Delivery history survives restart. Failed lane notifications are retried on
 flush, using ids only. Successful sibling adapters are not repeated for those
-retries. These retry sets and wake debounce/batch queues are process-local.
+retries. Lane retry sets and wake debounce/batch queues are process-local.
+Human notification backlogs and receipts are durable in the ledger.
 A graceful stop flushes only due work and respects wake.off. Deferred wakes are
 not replayed automatically after exit; durable inbox entries remain available.
 Exactly-once external delivery is not claimed: a crash between a notification and
@@ -176,3 +179,28 @@ not changes to the underlying package contracts.
 No live probe, credentials, Slack request, session command or deployment was
 used for the service's offline validation. Older architecture/status documents
 retain their original packet descriptions; this document describes integration.
+
+## Shadow traffic policies
+
+Human queue notifications default to 30-minute digests. The pipeline and timers
+share the same durable backlog. Each adapter emits once an interval is due,
+with per-channel unique-message counts, up to 20 ids and queue/assign commands.
+Unassigned and reassignment notices join the batch; successful delivery writes
+one-shot timer receipts even for ids beyond the preview. Immediate attention
+bypasses the interval, and failed or dry-run delivery does not consume receipts.
+Heartbeat delivered includes human message deliveries per successful adapter;
+timer-only delivery does not increment that counter.
+
+always_human collects attention while normal lane rules continue. Assigned work
+still reaches its lane inbox and additionally sends an operator FYI. Bot traffic
+uses channel/DM defaults or is excluded by default. It never reaches the human
+queue or classifier under route_or_exclude or exclude_all. route_all explicitly
+restores full routing. See ROUTING.md for precedence and alternative policies.
+
+Reconcile discovery is opt-in. conversations.list uses GET with public_channel,
+private_channel, im and mpim types, with pagination. Discovery runs at startup
+and on the first catch-up pass at or after six hours. Discovered ids are retained
+in memory for that source lifetime and unioned with known ledger channels.
+Excluded channels are removed before any history fetch, including known channels.
+Failed discovery is retried on the next pass and does not prevent known-channel
+scans. No join, invite, message send, or other write API is introduced.

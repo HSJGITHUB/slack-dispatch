@@ -57,6 +57,8 @@ class SourceConfig:
     interval_seconds: int = 3600
     lookback_days: int = 7
     store_body: bool = False
+    discover_channels: bool = False
+    excluded_channels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,19 @@ class Service:
 
 
 @dataclass(frozen=True)
+class HumanQueue:
+    mode: str = "digest"
+    digest_seconds: int = 1800
+    immediate_flags: tuple[str, ...] = ("always_human", "owner_mention")
+
+
+@dataclass(frozen=True)
+class BotMessages:
+    policy: str = "route_or_exclude"
+    known_bot_users: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
     channel_defaults: dict[str, str | None]
@@ -115,3 +130,5 @@ class Config:
     explicit_tag_pattern: str = r"\[(?P<lane>[a-z0-9-]+)\]"
     inbox: Inbox = field(default_factory=Inbox)
     service: Service = field(default_factory=Service)
+    human_queue: HumanQueue = field(default_factory=HumanQueue)
+    bot_messages: BotMessages = field(default_factory=BotMessages)

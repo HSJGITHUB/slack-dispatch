@@ -1,10 +1,12 @@
 """Service orchestration with transient routing text and metadata-only delivery."""
 from dataclasses import dataclass
+from collections import Counter
 import logging
 from pathlib import Path
 import threading
 
 from slack_dispatch.notify.wake import Deliver
+from slack_dispatch.notify import notify_human
 from slack_dispatch.queue.human import export_jsonl
 from slack_dispatch.router.apply import apply_decision
 from slack_dispatch.router.engine import route
@@ -22,14 +24,114 @@ def adapter_entries(config, notifiers, purpose):
 
 
 def can_notify(config, store, spec, lane):
+    if spec.purpose == "lane" and spec.kind != "file_inbox":
+        if not config.wake_policy.enabled or (Path(config.service.state_dir) / "wake.off").exists():
+            return False
     if spec.kind != "session_message":
         return True
-    if not config.wake_policy.enabled:
-        return False
-    if (Path(config.service.state_dir) / "wake.off").exists():
-        return False
     current = store.get_lane(lane)
     return bool(current and not current.get("paused") and current.get("session_pointer"))
+
+
+class HumanQueueDelivery:
+    """Durable ids-only digest backlog and per-adapter one-shot receipts."""
+    def __init__(self, config, store, notifiers, clock):
+        self.config, self.store, self.notifiers, self.clock = config, store, notifiers, clock
+        self.failures = 0
+        self.delivered = 0
+
+    def offer(self, mid, kind="message", *, immediate=False, adapter=None, now=None):
+        now = self.clock() if now is None else now
+        with self.store._transaction() as db:
+            for index, spec, _ in adapter_entries(self.config, self.notifiers, "human_queue"):
+                if adapter is not None and index != adapter:
+                    continue
+                db.execute("INSERT OR IGNORE INTO human_notices "
+                           "(message_id, kind, adapter, queued_at, immediate) VALUES (?, ?, ?, ?, ?)",
+                           (mid, kind, index, now, immediate))
+        if immediate or self.config.human_queue.mode == "immediate":
+            return self.flush(now, immediate_only=True)
+        return 0
+
+    def _send(self, index, rows, now, digest):
+        spec, notifier = self.config.notify_adapters[index], self.notifiers[index]
+        if not can_notify(self.config, self.store, spec, HUMAN_QUEUE):
+            return 0
+        messages = {row["message_id"]: self.store.get_message(row["message_id"]) for row in rows}
+        ids = sorted(messages)[:20]
+        counts = dict(sorted(Counter(row["channel"] for row in messages.values()).items()))
+        commands = "Run: python -m slack_dispatch.inbox.cli queue; python -m slack_dispatch.inbox.cli assign ID LANE"
+        title = "Human queue digest" if digest else "Human queue notice"
+        assigned = sorted({f"FYI, assigned to lane {row['lane']}" for row in messages.values()
+                           if row.get("attention") and row["state"] == "assigned"})
+        timer_counts = dict(Counter(row["kind"] for row in rows
+                                    if row["kind"] in ("unassigned", "reassign")))
+        timer_summary = "; ".join(
+            f"{'reassignment proposal' if kind == 'reassign' else kind}={count}"
+            for kind, count in sorted(timer_counts.items()))
+        summary = (f"{title}: {len(messages)} item(s); channels: "
+                   + ", ".join(f"{channel}={count}" for channel, count in counts.items())
+                   + "; ids: " + ", ".join(ids) + ". " + "; ".join(assigned)
+                   + ("; timers: " + timer_summary if timer_summary else "")
+                   + "\n" + commands)
+        metadata = dict(count=len(messages), channels=counts, ids=ids, summary=summary,
+                        timer_counts=timer_counts,
+                        timers=sorted({row["kind"] for row in rows
+                                       if row["kind"] in ("unassigned", "reassign")}))
+        try:
+            if spec.dry_run:
+                LOG.info("Dry-run human notice: %s", summary)
+                return 0
+            notify_human(notifier, ids, metadata)
+            if getattr(notifier, "service_dry_run", False) is True:
+                return 0
+            with self.store._transaction() as db:
+                for row in rows:
+                    db.execute("UPDATE human_notices SET sent_at=? WHERE message_id=? AND kind=? AND adapter=?",
+                               (now, row["message_id"], row["kind"], index))
+                    if row["kind"] in ("unassigned", "reassign"):
+                        db.execute("INSERT OR IGNORE INTO timer_events VALUES (?, ?, ?, ?)",
+                                   (row["message_id"], row["kind"], index, now))
+            self.delivered += len({row["message_id"] for row in rows
+                                   if row["kind"] not in ("unassigned", "reassign")})
+            return len(rows)
+        except Exception:
+            self.failures += 1
+            LOG.error("Human queue notification failed")
+            return 0
+
+    def flush(self, now, *, immediate_only=False):
+        sent = 0
+        for index, _, _ in adapter_entries(self.config, self.notifiers, "human_queue"):
+            rows = self.store._rows("SELECT * FROM human_notices WHERE adapter=? AND sent_at IS NULL "
+                                    "ORDER BY queued_at, message_id, kind", (index,))
+            active = []
+            for row in rows:
+                message = self.store.get_message(row["message_id"])
+                valid = message and message["state"] not in ("done", "acked", "excluded")
+                if row["kind"] in ("unassigned", "reassign") and self.store._rows(
+                        "SELECT 1 FROM timer_events WHERE message_id=? AND timer=? AND adapter=?",
+                        (row["message_id"], row["kind"], index)):
+                    valid = False
+                if row["kind"] in ("message", "unassigned"):
+                    valid = valid and message["state"] in ("new", "human_pending")
+                if row["kind"] == "reassign":
+                    valid = valid and message["state"] == "assigned" and not message.get("ack_at")
+                if valid:
+                    active.append(row)
+                else:
+                    with self.store._transaction() as db:
+                        db.execute("DELETE FROM human_notices WHERE message_id=? AND kind=? AND adapter=?",
+                                   (row["message_id"], row["kind"], index))
+            immediate, batch = [], []
+            for row in active:
+                (immediate if row["immediate"] or self.config.human_queue.mode == "immediate"
+                 else batch).append(row)
+            for row in immediate:
+                sent += self._send(index, [row], now, False)
+            if not immediate_only and batch and now >= batch[0]["queued_at"] + self.config.human_queue.digest_seconds:
+                sent += self._send(index, batch, now, True)
+        return sent
 
 
 @dataclass(frozen=True)
@@ -51,6 +153,7 @@ class Pipeline:
         self._missing_human_logged = False
         self._retry = {}
         self._export_pending = False
+        self.human = HumanQueueDelivery(config, store, self.notifiers, clock)
         # Keep the package's v1 migration compatible. This table is service-owned.
         with store._transaction() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS service_deliveries (
@@ -65,7 +168,8 @@ class Pipeline:
 
     def snapshot(self):
         with self.lock:
-            return dict(self.counters)
+            return dict(self.counters, failures=self.counters["failures"] + self.human.failures,
+                        delivered=self.counters["delivered"] + self.human.delivered)
 
     def _thread_key(self, message, lane):
         return (message["source"], message["channel"],
@@ -144,6 +248,8 @@ class Pipeline:
                 raise RuntimeError("Event processing failed") from None
 
     def _handle(self, event):
+        event = dict(event, is_bot=bool(event.get("is_bot") or event.get("bot_id")
+                     or not event.get("user") or event.get("user") in self.config.bot_messages.known_bot_users))
         recorded = self.store.record_event(event)
         mid = recorded.message_id
         if recorded.duplicate or recorded.kind != "message":
@@ -153,6 +259,7 @@ class Pipeline:
             return HandleResult(mid, recorded.kind)
         if "text" in event:
             message["text"] = event["text"]
+        message["is_bot"] = event["is_bot"]
         decision = route(message, self.config, self.store.lookup_binding)
         outcome = apply_decision(self.store, mid, decision, self.suggester)
         self.counters["routed"] += 1
@@ -173,16 +280,29 @@ class Pipeline:
             if isinstance(wake, Deliver):
                 self._send("lane", lane, [mid], inbox=False)
             if getattr(wake, "notice", None) is not None:
-                self._send("human_queue", HUMAN_QUEUE, [mid])
+                self._human_notice(mid, kind="storm")
                 self.wake_engine.notices.clear()
         elif outcome.state == "human_pending":
             self.counters["human_pending"] += 1
             self._export_queue()
-            self._send("human_queue", HUMAN_QUEUE, [mid])
+            self._human_notice(mid, attention=decision.attention)
+        if outcome.state == "assigned" and decision.attention:
+            self._human_notice(mid, attention=decision.attention)
         return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane)
+
+    def _human_notice(self, mid, kind="message", attention=None):
+        row = self.store.get_message(mid)
+        if row.get("is_bot") and self.config.bot_messages.policy != "route_all":
+            return
+        if not adapter_entries(self.config, self.notifiers, "human_queue") and not self._missing_human_logged:
+            LOG.warning("No human queue notifier configured")
+            self._missing_human_logged = True
+        self.human.offer(mid, "attention:" + attention if attention else kind,
+                         immediate=attention in self.config.human_queue.immediate_flags)
 
     def flush(self, now):
         with self.lock:
+            self.human.flush(now)
             for (index, lane), pending in list(self._retry.items()):
                 spec = self.config.notify_adapters[index]
                 ids = self._current_ids(lane, pending, spec.purpose)

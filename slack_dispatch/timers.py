@@ -7,7 +7,7 @@ import threading
 
 from slack_dispatch.notify.file_drop import FileDropNotifier
 from slack_dispatch.notify.session_message import SessionMessageNotifier
-from slack_dispatch.pipeline import HUMAN_QUEUE, adapter_entries, can_notify
+from slack_dispatch.pipeline import HUMAN_QUEUE, HumanQueueDelivery, adapter_entries, can_notify
 
 LOG = logging.getLogger(__name__)
 
@@ -31,11 +31,12 @@ def _reminder_notifier(notifier, timer):
 
 
 class TimerSweep:
-    def __init__(self, config, store, notifiers, clock):
+    def __init__(self, config, store, notifiers, clock, *, human=None):
         self.config, self.store = config, store
         self.notifiers, self.clock = list(notifiers), clock
         self.lock = threading.RLock()
         self.failures = 0
+        self.human = human or HumanQueueDelivery(config, store, self.notifiers, clock)
         self._missing_human_logged = False
         with store._transaction() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS timer_events (
@@ -44,6 +45,8 @@ class TimerSweep:
                 PRIMARY KEY (message_id, timer, adapter))""")
 
     def _notice(self, row, timer, purpose, lane, now):
+        if purpose == "human_queue" and row.get("is_bot") and self.config.bot_messages.policy != "route_all":
+            return 0
         entries = adapter_entries(self.config, self.notifiers, purpose)
         if timer in ("unacknowledged", "reassign"):
             entries = [entry for entry in entries if entry[1].kind != "file_inbox"]
@@ -56,9 +59,15 @@ class TimerSweep:
                                 "WHERE message_id=? AND timer=? AND adapter=?",
                                 (row["id"], timer, index)):
                 continue
+            if purpose == "human_queue" and self.config.human_queue.mode == "digest":
+                self.human.offer(row["id"], timer, adapter=index, now=now)
+                continue
             if not can_notify(self.config, self.store, spec, lane):
                 continue
             try:
+                if spec.dry_run:
+                    LOG.info("Dry-run timer notice: timer=%s id=%s", timer, row["id"])
+                    continue
                 if timer in ("unacknowledged", "reassign"):
                     notifier = _reminder_notifier(notifier, timer)
                 notifier.notify(lane, [row["id"]])
@@ -100,4 +109,5 @@ class TimerSweep:
                 except Exception:
                     self.failures += 1
                     LOG.error("Timer item failed")
+            sent += self.human.flush(now)
         return sent

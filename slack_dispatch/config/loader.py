@@ -5,7 +5,7 @@ import re
 import yaml
 
 from .schema import (
-    AlwaysHuman, Classifier, Config, Inbox, Lane, LedgerConfig, NotifyAdapter,
+    AlwaysHuman, BotMessages, Classifier, Config, HumanQueue, Inbox, Lane, LedgerConfig, NotifyAdapter,
     PersonChannelRule, Service, SourceConfig, Timers, WakePolicy,
 )
 
@@ -157,7 +157,9 @@ def parse_config(raw):
                                     string(row.get("user_token_key", "SLACK_USER_TOKEN"), "source.user_token_key"),
                                     positive(row.get("interval_seconds", row.get("reconcile_seconds", 3600)), "source.interval_seconds"),
                                     positive(row.get("lookback_days", 7), "source.lookback_days"),
-                                    ledger.store_body))
+                                    ledger.store_body,
+                                    boolean(row.get("discover_channels", False), "source.discover_channels"),
+                                    excluded))
     human = mapping(data.get("always_human", {}), "always_human")
     def user_ids(key):
         values = human.get(key, [])
@@ -212,10 +214,28 @@ def parse_config(raw):
         followup_window_seconds=positive(service.get("followup_window_seconds", 600),
                                         "service.followup_window_seconds"),
     )
+    queue = mapping(data.get("human_queue", {}), "human_queue")
+    mode = queue.get("mode", "digest")
+    if mode not in ("digest", "immediate"):
+        raise ConfigError("human_queue.mode must be digest or immediate")
+    flags = queue.get("immediate_flags", ["always_human", "owner_mention"])
+    if not isinstance(flags, list) or any(flag not in ("always_human", "owner_mention") for flag in flags):
+        raise ConfigError("human_queue.immediate_flags must contain supported flags")
+    queue = HumanQueue(mode, positive(queue.get("digest_seconds", 1800),
+                                     "human_queue.digest_seconds"), tuple(flags))
+    bots = mapping(data.get("bot_messages", {}), "bot_messages")
+    policy = bots.get("policy", "route_or_exclude")
+    if policy not in ("route_or_exclude", "exclude_all", "route_all"):
+        raise ConfigError("bot_messages.policy is unsupported")
+    known = bots.get("known_bot_users", [])
+    if not isinstance(known, list):
+        raise ConfigError("bot_messages.known_bot_users must be a list")
+    bots = BotMessages(policy, tuple(string(value, "bot_messages.known_bot_users") for value in known))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
-                  explicit_tag_pattern=pattern, inbox=inbox, service=service)
+                  explicit_tag_pattern=pattern, inbox=inbox, service=service,
+                  human_queue=queue, bot_messages=bots)
 
 
 def load_config(path: str | Path) -> Config:
