@@ -1,13 +1,12 @@
 """Offline regressions for the six shadow-day requirements."""
 from dataclasses import replace
-from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from slack_dispatch.config.loader import ConfigError, load_config, parse_config
 from slack_dispatch.config.schema import HumanQueue, SourceConfig
