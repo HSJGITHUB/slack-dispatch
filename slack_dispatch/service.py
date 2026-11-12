@@ -2,6 +2,7 @@
 import argparse
 from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal
 import logging
 import os
 import queue
@@ -12,10 +13,11 @@ import time
 from slack_dispatch import __version__
 from slack_dispatch.config.loader import ConfigError, load_config
 from slack_dispatch.ingest import build_sources
+from slack_dispatch.ingest.normalize import TIMESTAMP, message_body, safe
 from slack_dispatch.ingest.slack_reconcile import SlackReconcileSource
 from slack_dispatch.ingest.slack_socket import SlackSocketSource
 from slack_dispatch.ledger.store import LedgerStore
-from slack_dispatch.notify import build_notifiers
+from slack_dispatch.notify import DEFAULT_STATE_DIR, build_notifiers, wake_dirs_differ, wake_switch_path
 from slack_dispatch.notify.wake import WakePolicyEngine
 from slack_dispatch.pipeline import Pipeline
 from slack_dispatch.router.classifier import AnthropicSuggester, NullSuggester
@@ -25,6 +27,8 @@ from slack_dispatch.runtime import (
 from slack_dispatch.timers import TimerSweep
 
 LOG = logging.getLogger(__name__)
+REHYDRATE_STATES = ("new", "assigned", "acked", "human_pending")
+REHYDRATE_CALLS_PER_MINUTE = 40
 
 
 class _DryRunNotifier:
@@ -176,14 +180,21 @@ class CoverageMonitor:
 
 def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_name="unknown"):
     clock, sleep = clock or time.time, sleep or time.sleep
-    # The service owns the global switch; standalone package defaults stay intact.
+    # One wake switch for the engine, the adapter builder and the delivery gate
+    # (wake_switch_path): wake_policy.state_dir when set, else service.state_dir.
+    switch_differs = wake_dirs_differ(config)
+    switch_field = ("wake_policy.state_dir" if config.wake_policy.state_dir != DEFAULT_STATE_DIR
+                    else "service.state_dir")
     config = replace(config, wake_policy=replace(config.wake_policy,
-                                                state_dir=config.service.state_dir))
+                                                state_dir=str(wake_switch_path(config).parent)))
     state = Path(config.service.state_dir)
     with SingleInstanceLock(state / "service.lock"):
         logger = configure_logging(config.service.log_dir, config.service.log_level)
         handlers = [handler for handler in logger.handlers
                     if getattr(handler, "_dispatch_runtime", False)]
+        if switch_differs:
+            LOG.warning("Wake switch: wake_policy.state_dir and service.state_dir differ; "
+                        "wake.off is read from %s", switch_field)
         store = LedgerStore(config.ledger.path, store_body=config.ledger.store_body)
         flags = ControlFlags(state)
         heartbeat = HeartbeatWriter(state / "heartbeat.json",
@@ -296,17 +307,118 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
         return exit_code if shutdown_ok else 1
 
 
+def rehydrate_bodies(config, store, source, days, *, clock=time.time, sleep=time.sleep):
+    """Fill null bodies of recent open ledger rows once through the reconcile client.
+
+    Rows qualify when their message ts is within the last `days` days, the body is
+    null, the state is one of REHYDRATE_STATES and the row was not deleted. Excluded
+    channels are never fetched. Calls are spaced so at most REHYDRATE_CALLS_PER_MINUTE
+    requests start in any minute. Returns counts; text is stored, never logged.
+    """
+    floor = Decimal(f"{max(0.0, clock() - days * 86400):.6f}")
+    excluded = set(config.excluded_channels)
+    counts = dict(candidates=0, fetched=0, filled=0, missing=0, failures=0, excluded=0)
+    rows = store._rows("SELECT id, channel, ts, thread_ts FROM messages WHERE source='slack' "
+                       "AND body IS NULL AND state IN (?, ?, ?, ?) "
+                       "AND (note IS NULL OR note != 'message_deleted') ORDER BY channel, ts",
+                       REHYDRATE_STATES)
+    spacing = 60 / REHYDRATE_CALLS_PER_MINUTE
+    last_call = None
+    for row in rows:
+        ts = safe(row["ts"], TIMESTAMP)
+        if ts is None or Decimal(ts) < floor:
+            continue
+        if row["channel"] in excluded:
+            counts["excluded"] += 1
+            continue
+        counts["candidates"] += 1
+        if last_call is not None:
+            wait = last_call + spacing - clock()
+            if wait > 0:
+                sleep(wait)
+        last_call = clock()
+        try:
+            message = source.fetch_message(row["channel"], ts, safe(row["thread_ts"], TIMESTAMP))
+        except Exception as error:
+            counts["failures"] += 1
+            LOG.warning("Rehydrate fetch failed id=%s class=%s error=%s", row["id"],
+                        getattr(error, "error_class", type(error).__name__),
+                        getattr(error, "slack_error", None))
+            continue
+        counts["fetched"] += 1
+        body = message_body(message) if isinstance(message, dict) else None
+        if not isinstance(body, str) or not body:
+            counts["missing"] += 1
+            continue
+        try:
+            if store.set_body(row["id"], body):
+                counts["filled"] += 1
+        except Exception as error:
+            counts["failures"] += 1
+            LOG.warning("Rehydrate store failed id=%s class=%s", row["id"], type(error).__name__)
+    LOG.info("Rehydrate bodies days=%d candidates=%d fetched=%d filled=%d missing=%d failures=%d "
+             "excluded=%d", days, *(counts[key] for key in
+                                    ("candidates", "fetched", "filled", "missing", "failures", "excluded")))
+    return counts
+
+
+def run_rehydrate(config, days, *, client=None, clock=None, sleep=None, stdout=None):
+    """One rehydrate pass (exclusive mode). Returns 0, 1 on failures, or 2 when not possible."""
+    clock, sleep = clock or time.time, sleep or time.sleep
+    stdout = stdout or sys.stdout
+    if not config.ledger.store_body:
+        print("Body storage is disabled: set ledger.store_body to true", file=sys.stderr)
+        return 2
+    entries = [entry for entry in config.sources if entry.kind == "slack_reconcile"]
+    entry = next((row for row in entries if row.enabled), entries[0] if entries else None)
+    if entry is None:
+        print("No slack_reconcile source configured", file=sys.stderr)
+        return 2
+    if not Path(config.ledger.path).exists():
+        print("Ledger not found", file=sys.stderr)
+        return 2
+    store = LedgerStore(config.ledger.path, store_body=True)
+    source = SlackReconcileSource(replace(entry, store_body=True), lambda event: None,
+                                  entry.env_file, entry.user_token_key, store, sleep=sleep,
+                                  clock=clock, excluded_channels=config.excluded_channels)
+    store.open()
+    try:
+        store.migrate()
+        if client is None:
+            source.open_client()
+        else:
+            source.client = client
+        counts = rehydrate_bodies(config, store, source, days, clock=clock, sleep=sleep)
+    finally:
+        source.client = None
+        store.close()
+    print("rehydrate " + " ".join(f"{key}={value}" for key, value in counts.items()), file=stdout)
+    return 1 if counts["failures"] else 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run the lane dispatch service")
     parser.add_argument("--config", required=True, metavar="PATH")
     parser.add_argument("--once", action="store_true", help="Run one reconcile pass and exit")
     parser.add_argument("--dry-run", action="store_true", help="Log notifications without calling adapters")
+    parser.add_argument("--rehydrate-bodies", type=int, metavar="DAYS",
+                        help="Fill missing bodies of open rows from the last DAYS days once and exit")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return error.code
+    if args.rehydrate_bodies is not None and (args.once or args.dry_run or args.rehydrate_bodies <= 0):
+        print("Invalid command arguments", file=sys.stderr)
+        return 2
     try:
         config = load_config(args.config)
+        if args.rehydrate_bodies is not None:
+            try:
+                return run_rehydrate(config, args.rehydrate_bodies)
+            except Exception:
+                # Neither exception strings nor tracebacks are safe to print here.
+                print("Rehydrate failed", file=sys.stderr)
+                return 1
         return run(config, once=args.once or config.service.once, dry_run=args.dry_run, config_name=args.config)
     except ConfigError:
         print("Invalid service configuration", file=sys.stderr)

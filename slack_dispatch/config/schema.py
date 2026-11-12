@@ -64,6 +64,8 @@ class SourceConfig:
     replies_overlap_seconds: int = 120
     bound_threads: bool = True
     bound_threads_max_age_days: int = 14
+    # A reply parent with a permanent Slack error is retried once after this many seconds.
+    permanent_error_ttl_seconds: int = 3600
 
 
 @dataclass(frozen=True)
@@ -148,3 +150,7 @@ class Config:
     owner_signals: OwnerSignals = field(default_factory=OwnerSignals)
     # Host directory of live session JSON files; expanded at resolution time.
     sessions_dir: str = "~/.claude/sessions"
+    # Optional user id -> display name map for the inbox CLI author column.
+    people: dict[str, str] = field(default_factory=dict)
+    # IANA time zone name for the inbox CLI `when` column.
+    display_timezone: str = "UTC"

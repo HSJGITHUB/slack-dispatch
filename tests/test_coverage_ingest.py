@@ -121,7 +121,8 @@ class CoverageIngestTests(unittest.TestCase):
         with self.assertLogs("slack_dispatch.ingest.slack_reconcile", level="INFO") as logs:
             self.source.catch_up()
             self.source.catch_up()
-        self.assertEqual(self.source.skipped_parents, {("CDUMMY", "200")})
+        # P9: the skip set is a map of parent -> skipped_at (TTL retry).
+        self.assertEqual(set(self.source.skipped_parents), {("CDUMMY", "200")})
         self.assertEqual((self.source.failures, self.source.summary["failures"]), (0, 0))
         self.assertEqual(self.source.summary["permanent_skipped"], 1)
         self.assertEqual(calls, ["200", "300", "300"])
@@ -154,7 +155,7 @@ class CoverageIngestTests(unittest.TestCase):
             self.assertEqual(self.source.failures, expected)
             self.assertEqual(self.source.summary["permanent_skipped"], 0)
         self.assertEqual(calls, ["200", "200"])
-        self.assertEqual(self.source.skipped_parents, set())
+        self.assertEqual(self.source.skipped_parents, {})
         self.assertEqual(self.store.get_cursor("slack_replies", "CDUMMY"), "999000")
         self.assertIsNone(self.source.last_catchup_at)
 

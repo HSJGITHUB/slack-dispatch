@@ -166,8 +166,10 @@ class ServiceTests(unittest.TestCase):
             store.close()
 
     def test_service_state_directory_controls_wake_switch(self):
+        # P9: service.state_dir governs when wake_policy.state_dir is unset (default `state`);
+        # a non-default wake_policy.state_dir wins (see test_followups_wake_dir).
         self.config = replace(self.config, wake_policy=replace(self.config.wake_policy,
-                                                              state_dir=str(self.root / "unused")))
+                                                              state_dir="state"))
         (self.root / "state").mkdir()
         (self.root / "state/wake.off").touch()
         self.assertEqual(self.invoke("--once"), 0)

@@ -196,7 +196,8 @@ class ShadowTests(unittest.TestCase):
         self.assertIn(result.message_id, runner.call_args.args[0][-1])
         self.assertIn("FYI", runner.call_args.args[0][-1])
         self.assertIsNone(self.receivers[0].target_resolver("support"))
-        self.assertEqual(self.receivers[1].target_resolver("human_queue"), "dummy-human-session")
+        # P9: the human_queue target is template.target or `operator`; the pseudo-lane is ignored.
+        self.assertEqual(self.receivers[1].target_resolver("human_queue"), "operator")
 
     def test_human_adapter_dry_run_keeps_pending_receipt(self):
         self.config = replace(self.config, notify_adapters=tuple(replace(spec, dry_run=True)

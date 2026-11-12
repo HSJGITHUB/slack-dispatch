@@ -90,7 +90,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(reply.lane, "support")
         self.assertEqual(self.store.get_message(reply.message_id)["route_reason"], "thread_inherit")
         self.assertTrue(self.store.get_message(reply.message_id)["followup"])
-        self.assertEqual(self.records()[-1]["kind"], "followup")
+        # P9: a recent reply is kind new with followup: true; kind followup means edited.
+        self.assertEqual((self.records()[-1]["kind"], self.records()[-1]["followup"]), ("new", True))
         self.assertEqual(self.records()[0]["id"], root.message_id)
 
     def test_followup_window_expiry_and_edit(self):

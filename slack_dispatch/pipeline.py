@@ -8,7 +8,7 @@ import threading
 import sys
 
 from slack_dispatch.notify.wake import Deliver
-from slack_dispatch.notify import effective_lane, notify_human
+from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
 from slack_dispatch.notify.session_resolve import SessionResolver
 from slack_dispatch.queue.human import export_jsonl
 from slack_dispatch.router.apply import apply_decision
@@ -36,15 +36,20 @@ def session_resolvers(notifiers):
     return list(found.values())
 
 
-def can_notify(config, store, spec, lane, notifier=None):
+def can_notify(config, store, spec, lane, notifier=None, message_ids=None):
     """Gate one delivery; False means not delivered, so callers keep receipts unwritten.
 
-    Session adapters use the same precedence as the builder (effective_lane). When the
-    notifier carries a session resolver, an id that is not live or is ambiguous also
+    Human-queue adapters address the operator target from their template: no lane
+    lookup, session resolution, pause check or global wake switch applies to them.
+    Lane session adapters use the same precedence as the builder (effective_lane). When
+    the notifier carries a session resolver, an id that is not live or is ambiguous also
     blocks the delivery here, so it is retried later instead of counted as delivered.
+    message_ids lets the resolver count distinct skipped (lane, id) pairs.
     """
+    if spec.purpose == HUMAN_QUEUE:
+        return True
     if spec.purpose == "lane" and spec.kind != "file_inbox":
-        if not config.wake_policy.enabled or (Path(config.service.state_dir) / "wake.off").exists():
+        if not config.wake_policy.enabled or wake_switch_path(config).exists():
             return False
     if spec.kind != "session_message":
         return True
@@ -53,7 +58,8 @@ def can_notify(config, store, spec, lane, notifier=None):
         return False
     resolver = getattr(notifier, "session_resolver", None)
     if isinstance(resolver, SessionResolver):
-        return resolver.resolve_target(lane, session, warn_duplicates=False) is not None
+        return resolver.resolve_target(lane, session, warn_duplicates=False,
+                                       message_ids=message_ids) is not None
     return True
 
 
@@ -93,11 +99,14 @@ class HumanQueueDelivery:
         timer_summary = "; ".join(
             f"{'reassignment proposal' if kind == 'reassign' else kind}={count}"
             for kind, count in sorted(timer_counts.items()))
+        # The last line lists lane ids for `assign ID LANE`; the human queue pseudo-lane is excluded and an empty list omits the line.
+        lane_ids = [lane.id for lane in self.config.lanes if lane.id != HUMAN_QUEUE]
+        lanes = "Lane ids for assign: " + ", ".join(lane_ids) if lane_ids else ""
         summary = (f"{title}: {len(messages)} item(s); channels: "
                    + ", ".join(f"{channel}={count}" for channel, count in counts.items())
                    + "; ids: " + ", ".join(ids) + ". " + "; ".join(assigned)
                    + ("; timers: " + timer_summary if timer_summary else "")
-                   + "\n" + commands)
+                   + "\n" + commands + ("\n" + lanes if lanes else ""))
         metadata = dict(count=len(messages), channels=counts, ids=ids, summary=summary,
                         timer_counts=timer_counts,
                         timers=sorted({row["kind"] for row in rows
@@ -232,7 +241,7 @@ class Pipeline:
 
     def _send_one(self, index, lane, ids):
         spec, notifier = self.config.notify_adapters[index], self.notifiers[index]
-        if not can_notify(self.config, self.store, spec, lane, notifier):
+        if not can_notify(self.config, self.store, spec, lane, notifier, list(ids)):
             return False
         try:
             notifier.notify(lane, list(ids))

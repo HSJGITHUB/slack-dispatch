@@ -12,8 +12,8 @@ from .tokens import load_token, quiet_logger
 
 LOG = logging.getLogger(__name__)
 HYDRATION_RETRY_LIMIT = 3  # failed retries per root after the first failed fetch
-# Slack error codes that will not clear on retry. A reply parent failing with one of
-# these is skipped for the process lifetime instead of counted as a failure.
+# Slack error codes that are not expected to clear soon. A reply parent failing with
+# one of these is skipped for config.permanent_error_ttl_seconds, then retried once.
 PERMANENT_REPLY_ERRORS = frozenset({"thread_not_found", "channel_not_found", "not_in_channel",
                                     "message_not_found", "is_archived"})
 
@@ -49,7 +49,9 @@ class SlackReconcileSource:
         self._hydration_failures = {}
         self._abandoned_roots = set()
         self.pending_roots = set()
-        self.skipped_parents = set()  # (channel, parent ts) with a permanent replies error
+        # (channel, parent ts) -> pass time of the last permanent replies error.
+        self.skipped_parents = {}
+        self._permanent_warned = set()  # parents already reported once at WARNING
         self.summary = {}
 
     def _call(self, method, **params):
@@ -232,8 +234,9 @@ class SlackReconcileSource:
     def _fetch_replies(self, channel, history, window):
         """Fetch replies per parent; a failed parent is skipped and keeps the replies cursor.
 
-        A parent with a permanent Slack error is skipped for the process lifetime and
-        does not hold the replies cursor; it counts as permanent_skipped, not a failure.
+        A parent with a permanent Slack error is skipped for permanent_error_ttl_seconds,
+        then retried once; it does not hold the replies cursor and counts as
+        permanent_skipped, not a failure. Only the first permanent error logs a WARNING.
         """
         started = self._pass_started
         fetched, complete = {}, True
@@ -248,7 +251,9 @@ class SlackReconcileSource:
         for parent in parents:
             if self._stop.is_set():
                 return fetched, False
-            if (channel, parent) in self.skipped_parents:
+            key = (channel, parent)
+            skipped_at = self.skipped_parents.get(key)
+            if skipped_at is not None and started - skipped_at < self.config.permanent_error_ttl_seconds:
                 self.summary["permanent_skipped"] += 1
                 continue
             self.summary["parents"] += 1
@@ -258,14 +263,23 @@ class SlackReconcileSource:
             except Exception as error:
                 code = getattr(error, "slack_error", None)
                 if code in PERMANENT_REPLY_ERRORS:
-                    self.skipped_parents.add((channel, parent))
+                    self.skipped_parents[key] = started
                     self.summary["permanent_skipped"] += 1
-                    LOG.warning("Reconcile replies skipped permanently channel=%s parent=%s error=%s",
-                                channel, parent, code)
+                    if key in self._permanent_warned:
+                        LOG.debug("Reconcile replies still skipped channel=%s parent=%s error=%s",
+                                  channel, parent, code)
+                    else:
+                        self._permanent_warned.add(key)
+                        LOG.warning("Reconcile replies skipped permanently channel=%s parent=%s error=%s",
+                                    channel, parent, code)
                     continue
+                # A transient error after the TTL is an ordinary failure, retried next pass.
+                self.skipped_parents.pop(key, None)
                 complete = False
                 self._reply_failure(channel, parent, error)
                 continue
+            self.skipped_parents.pop(key, None)
+            self._permanent_warned.discard(key)
             fetched[parent] = [dict(row, thread_ts=parent) for row in rows
                                if Decimal(row["ts"]) > reply_oldest and row["ts"] != parent]
             self.summary["replies"] += len(fetched[parent])
@@ -368,6 +382,36 @@ class SlackReconcileSource:
         else:
             self._hydration_failures[key] = count
             self.pending_roots.add(key)
+
+    def open_client(self):
+        """Load the token and build the read-only client without starting intake."""
+        if self.client is None:
+            from slack_sdk import WebClient
+            token = load_token(self.env_file, self.user_token_key, "xoxp-")
+            self.client = WebClient(token=token, logger=quiet_logger(), retry_handlers=[], timeout=10)
+        return self.client
+
+    def fetch_message(self, channel, ts, thread_ts=None):
+        """Return the raw message with exactly this ts, or None when Slack has none.
+
+        Replies use conversations.replies on their parent, roots use conversations.history,
+        both bounded with latest=oldest=ts and inclusive=true. Callers must not log the result.
+        """
+        if channel in self.excluded_channels:
+            return None
+        bounds = dict(channel=channel, latest=ts, oldest=ts, inclusive=True, limit=10)
+        if thread_ts and thread_ts != ts:
+            response = self._call("conversations.replies", ts=thread_ts, **bounds)
+        else:
+            response = self._call("conversations.history", **bounds)
+        if not response.get("ok", True):
+            error = RuntimeError("Slack read response failed")
+            error.slack_error = safe(response.get("error"), r"[a-z_]{1,64}")
+            raise error
+        for message in response.get("messages", []) or []:
+            if isinstance(message, dict) and message.get("ts") == ts:
+                return message
+        return None
 
     def start(self):
         if self._thread is not None:

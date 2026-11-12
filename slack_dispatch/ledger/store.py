@@ -203,6 +203,19 @@ class LedgerStore:
             fields["note"] = note
         self._update(message_id, fields)
 
+    def set_body(self, message_id, body):
+        """Fill a missing body (rehydration). Returns True when a row changed.
+
+        Requires store_body. Rows that already hold a body or were deleted are unchanged.
+        """
+        if not self.store_body:
+            return False
+        with self._transaction() as db:
+            changed = db.execute("UPDATE messages SET body=? WHERE id=? AND body IS NULL "
+                                 "AND (note IS NULL OR note != 'message_deleted')",
+                                 (body, message_id)).rowcount
+        return changed > 0
+
     def set_suggestion(self, message_id, lane, reason, classifier_version):
         self._update(message_id, {"classifier_suggestion": lane, "suggestion_reason": reason,
                                   "classifier_version": classifier_version})

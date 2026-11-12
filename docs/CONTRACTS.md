@@ -72,7 +72,7 @@ invoke a suggester. See ROUTING.md for the full precedence table.
 
 ## 5. Inbox record (per-lane JSONL, `inbox/<lane>.jsonl`)
 
-`{"id": message_id, "delivered_at": iso, "channel": str, "ts": str, "thread_ts": str | None, "followup": bool, "kind": "new" | "followup" | "reroute" | "backfill"}`. No body. Writers hold `inbox/<lane>.lock` while appending.
+`{"id": message_id, "delivered_at": iso, "channel": str, "ts": str, "thread_ts": str | None, "followup": bool, "kind": "new" | "followup" | "reroute" | "backfill"}`. No body. Writers hold `inbox/<lane>.lock` while appending. Kind `followup` means edited (message_changed, ledger `edited_at`); a reply within the followup window keeps `new` or `backfill` with `followup: true` (P9).
 
 ## 6. Notifier contract (package `slack_dispatch.notify`)
 
@@ -112,7 +112,8 @@ Loader changes must keep the existing sample config loading and add the new keys
   <inbox-root>/human_queue-notices/, preserving lane JSONL record contracts.
   Custom adapters implementing only notify receive the capped ids list.
 - Global wake controls apply to lane wakes only. Human queue delivery retains
-  adapter dry-run and session availability/pause checks.
+  adapter dry-run. Since P9 it no longer uses lane session availability or pause:
+  the operator target is the adapter's template.target (default `operator`).
 
 ## P7A coverage
 
@@ -131,7 +132,8 @@ resumed_at TEXT, catchup_at TEXT, note TEXT`. Unknown future versions fail.
 The new cursor source is slack_replies, keyed by channel independently of slack.
 
 Inbox kind additionally accepts `backfill`. files.record derives it from
-origin=reconcile only when no explicit kind and no followup marker are present.
+origin=reconcile only when no explicit kind and no edit marker (edited_at) are
+present; since P9 a followup marker alone keeps `backfill` or `new`.
 FileInboxNotifier retains the origin through its existing row lookup. The read
 signature and output keys are unchanged; consumers can treat kind as opaque.
 Pipeline HandleResult adds `backfill: bool = False`, true when a reconcile
@@ -141,3 +143,34 @@ Owner posts under record policy have state=done, route_reason=owner_post and
 note=owner_post. Prehandled items have state=done, route_reason=prehandled and
 note=prehandled:reaction:<emoji> or prehandled:owner_reply. Neither path changes
 thread bindings, invokes a classifier or sends notifications.
+
+## P9 shadow follow-ups
+
+All additive. Config: optional top-level `people` (map of user id to display name,
+non-empty strings) and `display_timezone` (IANA name, default `UTC`; checked when the
+host has a time zone database); optional `sources[].permanent_error_ttl_seconds`
+(positive integer, default 3600). `NotifyAdapter.template.target` (string) names the
+human_queue session target. No existing key, default or required section changes.
+
+- `notify.human_queue_target(adapter)` returns template.target or `operator`.
+  `can_notify` returns True for purpose human_queue without lane lookup, session
+  resolution, pause check or wake switch. `can_notify` gains an optional
+  `message_ids` argument.
+- `notify.wake_switch_path(config)` is the one wake.off path for the builder, the
+  gate and the service engine (wake_policy.state_dir when not `state`, else
+  service.state_dir).
+- `SessionResolver.resolve_target` gains optional `message_ids`;
+  `skipped_no_session` is a read-only count of distinct (lane, message id) pairs.
+  Not-live and ambiguous lines are logged per lane on transitions with a 30 minute
+  reminder.
+- `SlackReconcileSource.skipped_parents` becomes a dict `(channel, parent) ->
+  skipped_at` (pass start time). New `open_client()` and `fetch_message(channel, ts,
+  thread_ts=None)` read helpers use the existing allowlist and 429 handling.
+- `LedgerStore.set_body(message_id, body) -> bool` fills a null body when
+  store_body is enabled; deleted rows and rows with a body are unchanged.
+- Inbox records: kind `followup` only for edited messages (see section 5). CLI rows
+  add `when`; JSON rows add `ts` and `author_id`; thread JSON roots and items add
+  `when` and `author_id`.
+- Human notices end with `Lane ids for assign: <ids>`.
+- `python -m slack_dispatch.service --config PATH --rehydrate-bodies DAYS` is a
+  one-pass exclusive mode (see SERVICE.md).

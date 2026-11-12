@@ -70,13 +70,22 @@ def lane_lock(root, lane):
 
 
 def record(message, kind=None):
+    """Body-free inbox record.
+
+    Without an explicit kind, `followup` is written only for an edited message (ledger
+    edited_at, set by message_changed). A reply delivered soon after an earlier delivery
+    to its thread keeps its ordinary kind (`new` or `backfill`) with followup: true.
+    """
     from datetime import datetime, timezone
+    if not kind:
+        kind = ("followup" if message.get("edited_at")
+                else "backfill" if message.get("origin") == "reconcile" else "new")
     return {"id": message.get("id", message.get("message_id")),
             "delivered_at": datetime.now(timezone.utc).isoformat(),
             "channel": message["channel"], "ts": message["ts"],
             "thread_ts": message.get("thread_ts"),
             "followup": bool(message.get("followup")),
-            "kind": kind or ("followup" if message.get("followup") else "backfill" if message.get("origin") == "reconcile" else "new")}
+            "kind": kind}
 
 
 def append(root, lane, records):

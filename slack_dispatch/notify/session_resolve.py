@@ -2,7 +2,9 @@
 
 The host writes one JSON file per live session under the sessions directory. Each
 file holds at least `sessionId` and `name`. Session ids are stable; names are not.
-Logs carry lane ids and counts only, never session values or names.
+Logs carry lane ids and counts only, never session values or names. Not-live and
+ambiguous ids are logged per lane on state transitions, plus at most one reminder
+line per lane every REMINDER_SECONDS while the lane stays undeliverable.
 """
 import json
 import logging
@@ -14,6 +16,8 @@ LOG = logging.getLogger(__name__)
 
 DEFAULT_SESSIONS_DIR = "~/.claude/sessions"
 CACHE_SECONDS = 30
+REMINDER_SECONDS = 1800
+LIVE, NOT_LIVE, AMBIGUOUS = "live", "not_live", "ambiguous"
 # A full uuid or a prefix of one: at least 8 hex characters, then hex or hyphens.
 ID_FORM = re.compile(r"[0-9a-f]{8}[0-9a-f-]*", re.IGNORECASE)
 
@@ -47,13 +51,22 @@ def scan_sessions(sessions_dir):
 class SessionResolver:
     """Per-process resolver with a short scan cache shared by all session adapters."""
 
-    def __init__(self, sessions_dir=None, *, clock=time.monotonic, ttl=CACHE_SECONDS):
+    def __init__(self, sessions_dir=None, *, clock=time.monotonic, ttl=CACHE_SECONDS,
+                 reminder=REMINDER_SECONDS):
         self.sessions_dir = sessions_dir or DEFAULT_SESSIONS_DIR
         self.clock = clock
         self.ttl = ttl
-        self.skipped_no_session = 0
+        self.reminder = reminder
+        self.lane_state = {}  # lane -> live, not_live or ambiguous (last observation)
+        self.last_logged = {}  # lane -> clock value of the last not-live/ambiguous line
+        self._skipped = set()  # distinct (lane, message id) pairs skipped as not live
         self._records = None
         self._scanned_at = None
+
+    @property
+    def skipped_no_session(self):
+        """Distinct (lane, message id) pairs whose wake was skipped because the id was not live."""
+        return len(self._skipped)
 
     def sessions(self):
         now = self.clock()
@@ -63,15 +76,18 @@ class SessionResolver:
             self._scanned_at = now
         return self._records
 
-    def resolve_target(self, lane, value, *, warn_duplicates=True):
+    def resolve_target(self, lane, value, *, warn_duplicates=True, message_ids=None):
         """Return the session name to address, or None to skip the wake.
 
         The delivery gate passes warn_duplicates=False so a duplicate name is
-        reported once, by the adapter that sends.
+        reported once, by the adapter that sends. message_ids identifies the
+        skipped items for the wake_skipped_no_session count; without it the
+        lane alone is counted once.
         """
         if not value:
             return None
         if not is_session_id(value):
+            self._observe(lane, LIVE)
             if warn_duplicates:
                 self._warn_duplicates(lane, value, by_id=False)
             return value
@@ -81,17 +97,42 @@ class SessionResolver:
         if not matches:
             matches = [record for record in records if record[0].lower().startswith(key)]
         if not matches:
-            self.skipped_no_session += 1
-            LOG.info("session not live: lane %s", lane)
+            for message_id in (None,) if message_ids is None else message_ids:
+                self._skipped.add((lane, message_id))
+            self._observe(lane, NOT_LIVE)
             return None
-        if len({record[0] for record in matches}) > 1:
-            LOG.warning("ambiguous session id: lane %s matches %d live sessions",
-                        lane, len({record[0] for record in matches}))
+        count = len({record[0] for record in matches})
+        if count > 1:
+            self._observe(lane, AMBIGUOUS, count)
             return None
+        self._observe(lane, LIVE)
         name = matches[0][1]
         if warn_duplicates:
             self._warn_duplicates(lane, name, by_id=True)
         return name
+
+    def _observe(self, lane, state, count=0):
+        """Log state transitions per lane and throttle repeats to one reminder per period."""
+        previous = self.lane_state.get(lane)
+        self.lane_state[lane] = state
+        if state == LIVE:
+            if previous in (NOT_LIVE, AMBIGUOUS):
+                self.last_logged.pop(lane, None)
+                LOG.info("session live again: lane %s", lane)
+            return
+        now = self.clock()
+        reminder = state == previous
+        if reminder:
+            last = self.last_logged.get(lane)
+            if last is not None and 0 <= now - last < self.reminder:
+                return
+        self.last_logged[lane] = now
+        suffix = " (reminder)" if reminder else ""
+        if state == NOT_LIVE:
+            LOG.info("session not live: lane %s%s", lane, suffix)
+        else:
+            LOG.warning("ambiguous session id: lane %s matches %d live sessions%s",
+                        lane, count, suffix)
 
     def _warn_duplicates(self, lane, name, *, by_id):
         count = len({session_id for session_id, other in self.sessions() if other == name})

@@ -42,17 +42,22 @@ File inbox adapters run before wake policy evaluation, including when wakes are
 disabled or deferred. Other lane adapters run on Deliver or due flush batches.
 A successful file inbox or lane-adapter call records the thread delivery time.
 Replies within the inclusive followup window are marked followup; edits are
-always followups, matching existing ledger behavior. File inbox records derive
-kind=followup from the ledger marker. Storm transitions send their triggering
-message id to the human queue adapters.
+always followups, matching existing ledger behavior. File inbox records carry the
+marker in `followup`; kind=followup is written only for edited messages (ledger
+edited_at, set by message_changed). A recent reply keeps kind new or backfill.
+Storm transitions send their triggering message id to the human queue adapters.
 
 Human-pending messages overwrite state/human_queue.jsonl with ids and suggested
 lanes only. Adapters with purpose=human_queue receive lane="human_queue" and
 message ids. With no such adapter the pipeline logs once and continues exporting.
 The timer sweep logs its own missing-adapter warning once. Adapter selection is
-independent of kind. To use a session_message adapter for the human queue,
-configure and claim a lane named human_queue; its pause control applies. Global
-wake controls do not suppress human-queue notices.
+independent of kind. A session_message adapter with purpose human_queue addresses
+its `template.target` string, or the literal `operator` when unset, as `{target}`.
+No lane lookup, claim, session resolution or pause check applies, so no lane named
+human_queue is needed; an existing one is ignored for this purpose. Global wake
+controls do not suppress human-queue notices; adapter dry_run still applies.
+Every human notice (digest or immediate) ends with one line listing the configured
+lane ids for `assign ID LANE`, after the command hint.
 
 ## Configuration
 
@@ -71,8 +76,12 @@ service:
 Intervals must be positive integers. once must be boolean. Supported log levels
 are DEBUG, INFO, WARNING, ERROR and CRITICAL (case-insensitive). state_dir holds
 the lock, heartbeat, control flags and human queue export. ledger.path and
-inbox.root remain independent. Inside the service, state_dir also governs the
-wake switch; standalone wake_policy.state_dir behavior is unchanged.
+inbox.root remain independent. The wake switch file is `wake_switch_path(config)`:
+`<wake_policy.state_dir>/wake.off` when wake_policy.state_dir is set to a value other
+than its default `state`, else `<service.state_dir>/wake.off`. The adapter builder,
+the delivery gate and (inside the service) the wake policy engine all read that one
+path. When the two directories differ the service logs one WARNING at startup naming
+the field it uses.
 
 Notify adapters gain purpose, default lane. The other value is human_queue.
 The YAML key for is an alias; purpose wins if both are supplied. For example:
@@ -112,9 +121,17 @@ does not count it in `delivered` or record a followup delivery, the human queue 
 its notice pending, and timers write no receipt, so the next sweep retries. Name
 lanes pass through unchanged. The adapter's own no-live-session skip stays as a
 second guard. When a session_message adapter is configured, heartbeat counters add
-`wake_skipped_no_session`: session deliveries skipped because the configured id was
-not live, summed over the shared resolver and counted on every attempt, retries
-included.
+`wake_skipped_no_session`: the number of distinct (lane, message id) pairs whose
+session wake was skipped because the configured id was not live, per process and
+summed over the shared resolver. Retries of the same item do not count again.
+
+Not-live logging is per lane and throttled. The resolver logs on state transitions
+only: `session not live: lane X` (INFO) when a lane goes from live or unseen to not
+live, `ambiguous session id: lane X matches N live sessions` (WARNING) when it first
+becomes ambiguous, and `session live again: lane X` (INFO) when it recovers. While a
+lane stays not live or ambiguous it logs at most one reminder line, suffixed
+`(reminder)`, every 30 minutes. The 60 second timer sweep therefore no longer logs
+one line per item per sweep.
 
 ## Once, dry run and exit codes
 
@@ -171,8 +188,8 @@ The service also creates service_deliveries through the existing store transacti
 lock. P7A upgrades the ledger to schema version 2, preserving attention and
 is_bot while adding origin and ingest_gaps. Timer receipts are per item, threshold and adapter configuration
 position. Keep adapter order stable for receipt identity. An adapter failure is
-retried on the next sweep without repeating successful adapters. Session notices
-blocked by wake.off, pause or an absent claim do not consume receipts.
+retried on the next sweep without repeating successful adapters. Lane session
+notices blocked by wake.off, pause or an absent claim do not consume receipts.
 
 Delivery history survives restart. Failed lane notifications are retried on
 flush, using ids only. Successful sibling adapters are not repeated for those
@@ -194,7 +211,8 @@ not changes to the underlying package contracts.
 2. Run the offline acceptance suite before preparing a release. Protect the
    configuration, state, ledger, logs and outbox directories.
 3. Configure a human queue adapter. Claim the intended lane sessions through the
-   existing inbox CLI. Include a human_queue lane if its adapter uses sessions.
+   existing inbox CLI. A human_queue session adapter needs `template.target`
+   (default `operator`); it does not need a human_queue lane.
 4. Keep state/wake.off present until source visibility, routing, queue exports,
    lane inboxes and local session delivery have been inspected.
 5. Review --once --dry-run with known ledger channels. Remember it still consumes
@@ -207,6 +225,29 @@ not changes to the underlying package contracts.
 No live probe, credentials, Slack request, session command or deployment was
 used for the service's offline validation. Older architecture/status documents
 retain their original packet descriptions; this document describes integration.
+
+## Rehydrate bodies
+
+```sh
+python -m slack_dispatch.service --config dummy-config.yaml --rehydrate-bodies 7
+```
+
+An exclusive mode: it cannot be combined with --once or --dry-run, starts no source,
+loop or notifier, runs one pass and exits. DAYS must be a positive integer. It needs
+`ledger.store_body: true`, an existing ledger and a slack_reconcile source (the first
+enabled one, else the first), whose token and read client it reuses. Ledger rows
+qualify when the message ts is within the last DAYS days, the body is null, the
+state is new, assigned, acked or human_pending, and the row was not deleted. Rows in
+`excluded_channels` are never fetched. Replies are read with `conversations.replies`
+(parent ts, `latest=oldest=ts`, `inclusive=true`), roots with `conversations.history`
+using the same bounds. The body is flattened from blocks exactly as the normalizer
+does and stored only into a still-null body. Requests are spaced so that at most 40
+start in any minute; 429 responses keep the reconcile Retry-After handling. The pass
+logs and prints counts only (candidates, fetched, filled, missing, failures,
+excluded), never text. Exit codes: 0 success, 1 with fetch or store failures, 2 for
+invalid arguments or when body storage, the ledger or a reconcile source is missing.
+It does not take the service lock and may run beside the resident service; its
+writes are single-row updates through the ledger transaction lock.
 
 ## Shadow traffic policies
 

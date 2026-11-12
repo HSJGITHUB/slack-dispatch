@@ -13,6 +13,14 @@ lanes:
 # Ids are resolved against the live session files in sessions_dir (default
 # ~/.claude/sessions). The sample uses a dummy directory.
 sessions_dir: dummy/sessions
+# Optional inbox CLI display settings (inbox --config PATH or SLACK_DISPATCH_CONFIG).
+# people maps user ids to display names for the author column. display_timezone is an
+# IANA name for the `when` column, for example Asia/Seoul; names other than UTC need a
+# time zone database (on Windows install the tzdata package), otherwise UTC is shown.
+people:
+  U0000000091: Dummy Person One
+  U0000000093: Dummy Owner
+display_timezone: UTC
 channel_defaults:
   C0000000001: {default: support}
   C0000000002: {default: null}
@@ -59,6 +67,12 @@ notify_adapters:
   - kind: file_drop
     outbox_dir: state/assistant-outbox
     template: {lane: "{lane}", count: "{count}", ids: "{ids}", title: "{title}", body: "{body}"}
+# A session_message adapter with purpose human_queue addresses template.target
+# (default: operator) directly; no lane, claim, session lookup or pause applies:
+#  - kind: session_message
+#    purpose: human_queue
+#    command_template: [dummy-session-cli, --target, "{target}", --message, "{message}"]
+#    template: {target: dummy-operator-session}
 ledger:
   path: state/ledger.sqlite3
   store_body: false
@@ -81,6 +95,7 @@ sources:
     replies_overlap_seconds: 120
     bound_threads: true
     bound_threads_max_age_days: 14
+    permanent_error_ttl_seconds: 3600
 
 always_human:
   users: [U0000000091]

@@ -286,7 +286,8 @@ class DeliveryGateTests(SessionDirTest):
         self.assertEqual(self.receipts(mid), ["unacknowledged"])
         self.assertEqual(self.sweep.run_once(self.UNACKNOWLEDGED + 120), 0)
         self.assertEqual(self.runner.call_count, 1)
-        self.assertEqual(self.pipeline.snapshot()["wake_skipped_no_session"], 2)
+        # P9: distinct (lane, message id) pairs, not attempts (pipeline and timer retry share one).
+        self.assertEqual(self.pipeline.snapshot()["wake_skipped_no_session"], 1)
 
     def test_ambiguous_id_is_undelivered(self):
         self.write("1.json", ID_A, "dummy-alpha")

@@ -16,6 +16,9 @@ def summary(lane, message_ids):
 
 
 class SessionMessageNotifier:
+    # Set by the adapter builder when target_resolver accepts a message_ids keyword.
+    resolver_takes_ids = False
+
     def __init__(self, command_template, target_resolver, *, runner=subprocess.run,
                  dry_run=False, timeout=60, template=None, lanes=(), lookup=None):
         self.command_template = command_template
@@ -26,7 +29,7 @@ class SessionMessageNotifier:
         self.template = dict(template or {})
         self.lanes = list(lanes)
         self.lookup = lookup
-        for key in ("message", "cli"):
+        for key in ("message", "cli", "target"):
             if key in self.template and not isinstance(self.template[key], str):
                 raise ValueError("Session template values must be strings")
 
@@ -47,7 +50,10 @@ class SessionMessageNotifier:
                       lambda match: values.get(match[1], match[0]), self.template["message"])
 
     def notify(self, lane, message_ids):
-        target = self.target_resolver(lane)
+        if self.resolver_takes_ids:
+            target = self.target_resolver(lane, message_ids=list(message_ids))
+        else:
+            target = self.target_resolver(lane)
         if target is None:
             LOG.info("Session notification skipped: no live session")
             return

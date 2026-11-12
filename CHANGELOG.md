@@ -5,6 +5,23 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P9 shadow follow-ups
+- Human-queue session adapters target `template.target` (default `operator`) with no lane
+  lookup, claim, session resolution or pause; the human_queue pseudo-lane is no longer needed.
+- Throttle not-live and ambiguous session logs to per-lane transitions plus one reminder per
+  30 minutes; `wake_skipped_no_session` counts distinct (lane, message id) pairs.
+- One wake switch path (`wake_switch_path`) for the builder, the gate and the service engine;
+  differing state directories log one startup WARNING.
+- Retry permanently failing reply parents once per `permanent_error_ttl_seconds` (default 3600),
+  with DEBUG after the first WARNING.
+- Inbox kind `followup` now means edited (message_changed); recent replies keep `new` or
+  `backfill` with `followup: true`, and the CLI `edited` column follows.
+- Inbox CLI: UTF-8 console output, optional `people` names and a `when` column in
+  `display_timezone`; JSON adds raw `ts` and `author_id`.
+- Add `--rehydrate-bodies DAYS` to fill missing bodies once through the reconcile client
+  (at most 40 calls per minute, counts only in logs).
+- Human notices end with the configured lane ids for `assign ID LANE`.
+
 ### P8 session resolve
 - Accept session names, full session ids and 8+ hex id prefixes in `lanes[].session` and `claim`.
 - Resolve ids against live session files in the new optional `sessions_dir`, with a 30 second scan cache.

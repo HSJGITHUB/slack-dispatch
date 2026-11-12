@@ -128,12 +128,18 @@ Overlap is deduplicated by deterministic event ids and message identity.
 
 A parent whose replies fetch fails with a permanent Slack error code
 (`thread_not_found`, `channel_not_found`, `not_in_channel`, `message_not_found`,
-`is_archived`; `PERMANENT_REPLY_ERRORS`) is added to an in-process skip set and logged
-once at WARNING with channel, parent ts and error code. It is not counted in
-`failures`, does not hold the `slack_replies` cursor, and is not fetched again until
-the process restarts. The pass summary counts such parents, new or remembered, as
-`permanent_skipped`. Other errors (rate limits, network and unknown codes) keep the
-behaviour above: they count in `failures`, keep the cursor and retry next pass.
+`is_archived`; `PERMANENT_REPLY_ERRORS`) is added to an in-process skip map
+(`skipped_parents`, parent -> pass time) and logged once at WARNING with channel,
+parent ts and error code. It is not counted in `failures` and does not hold the
+`slack_replies` cursor. After `permanent_error_ttl_seconds` (optional reconcile
+source key, default 3600) the parent is retried once; a thread the user was invited
+into later is then read again without a restart. If the retry fails with a permanent
+code again the parent is skipped for another TTL and logged at DEBUG only (the
+WARNING is not repeated for that parent). A successful retry removes it from the map;
+a transient error on the retry is an ordinary failure. The pass summary counts
+skipped parents, new or remembered, as `permanent_skipped`. Other errors (rate
+limits, network and unknown codes) keep the behaviour above: they count in
+`failures`, keep the cursor and retry next pass.
 
 Reply parents include recent history parents with newer replies, channel
 bindings (when `bound_threads` is true) and threads referenced by recent ledger

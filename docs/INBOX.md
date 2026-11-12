@@ -8,9 +8,19 @@ store. This CLI consumes the shared LedgerStore API.
 
 ## Commands
 
-- `inbox support`: list id, age, channel, thread root id (or `-`), kind, edited,
-  attention, author and state. `--include-done` includes completed work.
-  `--json` returns the same rows as an array. Repeated ids collapse into one row.
+- `inbox support`: list id, age, when, channel, thread root id (or `-`), kind,
+  edited, attention, author and state. `--include-done` includes completed work.
+  `--json` returns the same rows as an array, plus the raw message `ts` and
+  `author_id`. Repeated ids collapse into one row. `when` is the message time as
+  `MM-DD HH:MM` in `display_timezone`; age is kept. With `--config PATH` (or
+  `SLACK_DISPATCH_CONFIG`) the optional top-level config keys `people`
+  (user id -> display name) and `display_timezone` (IANA name, default `UTC`) apply:
+  author shows the name when known, else the id. Without a config, authors are ids
+  and times are UTC. An unreadable config returns 2. A zone the host cannot load
+  (for example Windows without the tzdata package) prints one warning to stderr and
+  falls back to UTC. When the CLI writes to the console it reconfigures stdout and
+  stderr to UTF-8 with `errors="replace"`, so non-ASCII text survives a legacy code
+  page such as cp949; streams injected by a caller are left unchanged.
 - `ack slack:CDUMMY:1`: mark the message acknowledged.
 - `done slack:CDUMMY:1 --note complete`: complete the message with an optional note.
 - `reroute slack:CDUMMY:1 --to content`: route with reason `reroute:<old lane>`
@@ -51,6 +61,10 @@ Header lines label tables; data lines begin with ids. Notes are not echoed.
 
 Each `<root>/<lane>.jsonl` line has exactly `id`, `delivered_at`, `channel`, `ts`,
 `thread_ts`, `followup`, and `kind`. Kinds include `new`, `followup`, `reroute`, and P7A `backfill`.
+Since P9, kind `followup` is written only for an edited message (message_changed,
+ledger `edited_at`). A reply delivered within the followup window of an earlier
+delivery to its thread keeps its ordinary kind (`new` or `backfill`) with
+`followup: true`.
 The CLI also accepts unknown kind strings unchanged on read.
 Records are append-only and may repeat ids. Read joins ledger state when a store
 is supplied, hides completed work by default, and hides obsolete lane ownership.
@@ -58,7 +72,8 @@ Without a store, ledger state is unknown and completion cannot be inferred.
 The age column measures seconds since the earliest delivery, with an `s` suffix
 in text and JSON. Rows sort by that first delivery. Kind is the latest appended
 non-followup kind (default `new` if all records are followups). Edited is `yes`
-if any record is a followup or the ledger has edited_at; otherwise it is `no`.
+if any record has kind `followup` or the ledger has edited_at; the `followup` field
+alone does not mark an edit. Otherwise it is `no`.
 Missing attention and author values display `-`.
 
 Writers hold `<lane>.lock`; readers use it only when it already exists.
@@ -97,9 +112,11 @@ A value of 8 or more hex characters followed only by hex characters or hyphens i
 an id form; anything else is a name. Id forms are resolved against the live session
 files in `sessions_dir` (default `~/.claude/sessions`), one JSON file per session
 holding at least `sessionId` and `name`. The matching file's `name` becomes the
-`{target}`. An exact id match wins over prefix matches. No match logs
-`session not live: lane <lane>` at INFO and skips the wake; more than one matching
-session id logs `ambiguous session id` and skips the wake. In both cases the item
+`{target}`. An exact id match wins over prefix matches. No match skips the wake and
+logs `session not live: lane <lane>` at INFO; more than one matching session id
+skips the wake and logs `ambiguous session id` at WARNING. These lines are logged per
+lane on state transitions only, with at most one `(reminder)` line per lane every 30
+minutes while it stays undeliverable (see SERVICE.md). In both cases the item
 stays in the file inbox, and the service delivery gate treats the wake as not
 delivered: no delivery count, no timer receipt, and a later sweep retries it. When several
 live sessions share the resolved name, `duplicate session name` is logged as a
@@ -140,8 +157,10 @@ The engine accepts a clock callable returning seconds and exposes Deliver, Defer
 and Batch decisions. A transition's Batch includes a StormNotice, also available
 in `engine.notices`; the caller is responsible for consuming operator notices.
 `flush(now)` returns due `(lane, ids)` batches. Call it periodically, including
-when no new events arrive. `wake_policy.state_dir` defaults to `state` and is
-shared by the policy engine and adapter builder. The global switch is
+when no new events arrive. `wake_policy.state_dir` defaults to `state`. The adapter
+builder and the delivery gate read the switch through `wake_switch_path(config)`:
+wake_policy.state_dir when set to a non-default value, else service.state_dir (see
+SERVICE.md); the service passes the same directory to the engine. The global switch is
 checked at offer, flush, and builder-created session target resolution.
 Disabled offers do not enqueue wakes for replay; their durable inbox records
 remain available. Already pending wakes are retained while disabled.
@@ -161,10 +180,13 @@ human_queue defaults to mode=digest, digest_seconds=1800 and immediate_flags
 [always_human, owner_mention]. Ordinary items and overdue human timer notices
 share one durable batch per adapter. The first pending item starts the interval;
 no empty digest is sent. Counts include every unique pending message per channel,
-while ids list at most 20 examples. Summaries include queue and assign commands.
+while ids list at most 20 examples. Summaries include queue and assign commands,
+followed by a last line `Lane ids for assign: <lane ids from config>`.
 Immediate attention notices contain one id and report the assigned lane if any.
 mode=immediate restores per-item notices. Human adapters bypass the global wake
-switch; their dry_run and session claim/pause requirements still apply.
+switch; their dry_run still applies. A human_queue session_message adapter targets
+`template.target` (default `operator`) with no lane lookup, claim, session
+resolution or pause check.
 
 Built-in session_message, file_drop and assistant_dm adapters carry summaries.
 A human-purpose file_inbox uses atomic JSON notices in

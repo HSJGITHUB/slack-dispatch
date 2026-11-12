@@ -165,7 +165,10 @@ def parse_config(raw):
                                     replies_overlap_seconds=positive(row.get("replies_overlap_seconds", 120), "source.replies_overlap_seconds"),
                                     bound_threads=boolean(row.get("bound_threads", True), "source.bound_threads"),
                                     bound_threads_max_age_days=positive(row.get("bound_threads_max_age_days", 14),
-                                                                        "source.bound_threads_max_age_days")))
+                                                                        "source.bound_threads_max_age_days"),
+                                    permanent_error_ttl_seconds=positive(
+                                        row.get("permanent_error_ttl_seconds", 3600),
+                                        "source.permanent_error_ttl_seconds")))
     human = mapping(data.get("always_human", {}), "always_human")
     def user_ids(key):
         values = human.get(key, [])
@@ -251,12 +254,40 @@ def parse_config(raw):
     signals = OwnerSignals(posts, reactions("reactions_done", ["white_check_mark", "heavy_check_mark"]),
                            reactions("reactions_ack", ["eyes"]))
     sessions_dir = string(data.get("sessions_dir", Config.sessions_dir), "sessions_dir")
+    people = {string(key, "people key"): string(value, "people name")
+              for key, value in mapping(data.get("people", {}), "people").items()}
+    zone = timezone_name(data.get("display_timezone", Config.display_timezone))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
                   explicit_tag_pattern=pattern, inbox=inbox, service=service,
                   human_queue=queue, bot_messages=bots, owner_signals=signals,
-                  sessions_dir=sessions_dir)
+                  sessions_dir=sessions_dir, people=people, display_timezone=zone)
+
+
+def timezone_name(value):
+    """Validate an IANA zone name. UTC is always accepted.
+
+    When the host has no time zone database (for example Windows without the
+    tzdata package) other names cannot be checked here; the inbox CLI then falls
+    back to UTC with a warning.
+    """
+    string(value, "display_timezone")
+    if value == "UTC":
+        return value
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        ZoneInfo(value)
+        return value
+    except ZoneInfoNotFoundError:
+        pass
+    except (ValueError, OSError):
+        raise ConfigError("display_timezone must be an IANA time zone name") from None
+    try:
+        ZoneInfo("Etc/UTC")
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return value  # no database on this host: the name cannot be verified here
+    raise ConfigError("display_timezone must be an IANA time zone name")
 
 
 def load_config(path: str | Path) -> Config:

@@ -26,7 +26,8 @@ class NotifierTests(unittest.TestCase):
             notifier = FileInboxNotifier(root, lambda mid: {"channel": "CDUMMY", "ts": "2", "thread_ts": "1", "followup": True, "body": "PRIVATE_BODY"})
             notifier.notify("support", ["slack:CDUMMY:2"])
             row = read(root, "support")[0]
-            self.assertEqual(row["kind"], "followup")
+            # P9: kind followup needs edited_at; the followup flag alone keeps kind new.
+            self.assertEqual((row["kind"], row["followup"]), ("new", True))
             self.assertEqual(row["thread_ts"], "1")
             self.assertNotIn("PRIVATE_BODY", str(row))
             FileInboxNotifier(root).notify("support", ["slack:CDUMMY:3"])

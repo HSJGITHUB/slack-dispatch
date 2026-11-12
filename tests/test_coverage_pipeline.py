@@ -103,7 +103,9 @@ class CoveragePipelineTests(unittest.TestCase):
         self.pipeline.handle_event(event(origin="reconcile"))
         self.pipeline.handle_event(event(2, origin="reconcile", thread_ts=event()["ts"], is_thread_reply=True))
         rows = [json.loads(line) for line in (self.root / "inbox/support.jsonl").read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([row["kind"] for row in rows], ["backfill", "followup"])
+        # P9: a recent reply keeps its ordinary kind; followup is a field, not an edit.
+        self.assertEqual([row["kind"] for row in rows], ["backfill", "backfill"])
+        self.assertEqual([row["followup"] for row in rows], [False, True])
         self.assertNotIn(event()["text"], json.dumps(rows))
 
     def test_backfill_fills_inbox_without_wake(self):

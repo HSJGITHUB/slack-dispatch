@@ -70,12 +70,15 @@ class InboxViewTests(unittest.TestCase):
             clock.now.return_value = datetime(2026, 1, 5, tzinfo=timezone.utc)
             rows = self.payload("inbox", "support")
         self.assertEqual([row["id"] for row in rows], [first, second])
-        self.assertEqual(rows[0], dict(id=first, age="345600s", channel="CDUMMY",
+        # P9: rows add `when`, and JSON carries the raw ts and author_id.
+        self.assertEqual(rows[0], dict(id=first, age="345600s", when="01-01 00:00", channel="CDUMMY",
                                       thread="-", kind="future-kind", edited="yes",
-                                      attention="owner_mention", author="UAUTHOR", state="assigned"))
+                                      attention="owner_mention", author="UAUTHOR", state="assigned",
+                                      ts="10", author_id="UAUTHOR"))
         self.assertEqual(rows[1]["edited"], "no")
         text = self.cli("inbox", "support")[1]
-        self.assertEqual(text.splitlines()[0], "id age channel thread kind edited attention author state")
+        self.assertEqual(text.splitlines()[0],
+                         "id age when channel thread kind edited attention author state")
         self.assertEqual(sum(line.startswith(first) for line in text.splitlines()), 1)
         self.assertNotIn("DUMMY_BODY", text)
         self.assertEqual(self.payload("inbox", "support", "--show-body")[0]["body"], "DUMMY_BODY")
