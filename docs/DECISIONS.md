@@ -89,3 +89,15 @@ Start with the internal ledger and defer team-visible reactions or status indica
 
 ### Consequences
 Review observed repeat-pings and operator demand later; no automatic public status writes are authorized.
+
+## ADR-007: Python for the resident service and tooling (2026-11-12)
+
+### Context
+The dispatcher is an I/O-bound resident process handling a few hundred Slack events per day, SQLite writes, YAML config and subprocess calls to local agent tooling. A Rust rewrite was considered for long-running robustness and a single-binary deploy.
+
+### Decision
+Keep Python 3.12 for the service, router, inbox CLI and tools in the v0.x line. Obtain robustness through supervision (scheduler restart, heartbeat, flag-file restart), strict typing in CI (mypy strict, ruff) and offline tests. Keep every boundary language-neutral (SQLite ledger, JSONL inbox, YAML config) so any component can be rewritten later.
+
+### Consequences
+Fastest iteration with the official Slack SDK, the Anthropic SDK and the surrounding Python automation. The per-lane inbox CLI is the natural first candidate for a later Rust implementation as a single executable; that would be a separate packet and would not change the contracts.
+
