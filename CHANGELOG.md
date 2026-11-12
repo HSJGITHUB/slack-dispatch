@@ -5,6 +5,12 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P7B inbox context
+- Collapse repeated inbox records with first-delivery age, kind, edit and attention metadata.
+- Add thread context, optional owner reply hints, body controls and JSON views.
+- Support multiple ids and lane-scoped thread selection for ack and done.
+- Add configurable lane wake messages, origin counts and placeholder-only dry-run logs.
+
 ### Added
 - Durable human-queue digests with channel counts, capped ids and timer receipts.
 - Optional bot traffic policies and service Event bot identity.

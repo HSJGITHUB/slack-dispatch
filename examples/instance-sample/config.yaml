@@ -41,6 +41,14 @@ notify_adapters:
     path: inbox
   - kind: session_message
     command_template: [dummy-session-cli, --target, "{target}", --message, "{message}"]
+    template:
+      cli: "python -m slack_dispatch.inbox.cli --ledger dummy/state/ledger.sqlite3 --inbox-root dummy/inbox"
+      message: |-
+        Lane {lane}: {count} inbox item(s) ({kinds}); attention: {attention}.
+        IDs: {ids}
+        Read thread context: {cli} inbox {lane} --thread
+        Reroute lane IDs: {lanes}
+        Your session's own records (registry, handoff) stay as they are.
     dry_run: true
     timeout: 60
   - kind: file_drop

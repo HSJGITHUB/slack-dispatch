@@ -17,12 +17,34 @@ def summary(lane, message_ids):
 
 class SessionMessageNotifier:
     def __init__(self, command_template, target_resolver, *, runner=subprocess.run,
-                 dry_run=False, timeout=60):
+                 dry_run=False, timeout=60, template=None, lanes=(), lookup=None):
         self.command_template = command_template
         self.target_resolver = target_resolver
         self.runner = runner
         self.dry_run = dry_run
         self.timeout = timeout
+        self.template = dict(template or {})
+        self.lanes = list(lanes)
+        self.lookup = lookup
+        for key in ("message", "cli"):
+            if key in self.template and not isinstance(self.template[key], str):
+                raise ValueError("Session template values must be strings")
+
+    def message(self, lane, message_ids):
+        if "message" not in self.template:
+            return summary(lane, message_ids)
+        counts = {"new": 0, "backfill": 0}
+        attention = 0
+        for mid in message_ids:
+            row = (self.lookup(mid) if self.lookup else None) or {}
+            counts["backfill" if row.get("origin") == "reconcile" else "new"] += 1
+            attention += bool(row.get("attention"))
+        values = {"lane": lane, "count": str(len(message_ids)), "ids": ", ".join(message_ids),
+                  "kinds": ", ".join(f"{key} {count}" for key, count in counts.items() if count),
+                  "attention": str(attention), "lanes": ", ".join(self.lanes),
+                  "cli": self.template.get("cli", "")}
+        return re.sub(r"\{([a-zA-Z_][a-zA-Z_0-9]*)\}",
+                      lambda match: values.get(match[1], match[0]), self.template["message"])
 
     def notify(self, lane, message_ids):
         target = self.target_resolver(lane)
@@ -30,16 +52,17 @@ class SessionMessageNotifier:
             LOG.info("Session notification skipped: no live session")
             return
         parts = shlex.split(self.command_template) if isinstance(self.command_template, str) else self.command_template
+        if self.dry_run:
+            names = sorted(set(re.findall(r"\{[a-zA-Z_][a-zA-Z_0-9]*\}",
+                                          " ".join(parts) + " " + self.template.get("message", ""))))
+            LOG.info("Dry-run command placeholders: %s", names)
+            return
+        message = self.message(lane, message_ids)
         def render(part, target):
-            values = {"{target}": target, "{message}": summary(lane, message_ids)}
+            values = {"{target}": target, "{message}": message}
             return re.sub(r"\{(?:target|message)\}", lambda match: values[match[0]], part)
 
         command = [render(part, target) for part in parts]
-        if self.dry_run:
-            # Templates and targets must be credential-free. Log only generated arguments.
-            LOG.info("Dry-run command: %s", [render(part, "<target>")
-                     if "{target}" in part or "{message}" in part else "<literal>" for part in parts])
-            return
         for attempt in range(2):
             try:
                 result = self.runner(command, timeout=self.timeout, check=True,

@@ -35,7 +35,9 @@ def build_notifiers(config, store) -> list[Notifier]:
             if not adapter.command_template:
                 raise ValueError("Session command template is required")
             result.append(SessionMessageNotifier(adapter.command_template, partial(resolve, purpose=adapter.purpose),
-                                                 dry_run=adapter.dry_run, timeout=adapter.timeout))
+                                                 dry_run=adapter.dry_run, timeout=adapter.timeout,
+                                                 template=adapter.template, lanes=list(lanes),
+                                                 lookup=store.get_message))
         elif adapter.kind in ("file_drop", "assistant_dm"):
             result.append(FileDropNotifier(adapter.path, adapter.template))
         else:

@@ -4,13 +4,13 @@ Run `python -m slack_dispatch.inbox.cli --ledger dummy.db --inbox-root inbox COM
 The installed entry point is `slack-dispatch`. Options can appear before or after
 COMMAND. `SLACK_DISPATCH_LEDGER` and `SLACK_DISPATCH_INBOX` supply path defaults.
 The default inbox root is `inbox`; a ledger path is required without an injected
-store. This packet consumes the LedgerStore contract. The bundled ledger remains
-a scaffold and must be supplied by the ledger packet before real CLI operation.
+store. This CLI consumes the shared LedgerStore API.
 
 ## Commands
 
-- `inbox support`: list id, delivery age in seconds, channel, thread flag,
-  followup flag and current ledger state. `--include-done` includes completed work.
+- `inbox support`: list id, age, channel, thread root id (or `-`), kind, edited,
+  attention, author and state. `--include-done` includes completed work.
+  `--json` returns the same rows as an array. Repeated ids collapse into one row.
 - `ack slack:CDUMMY:1`: mark the message acknowledged.
 - `done slack:CDUMMY:1 --note complete`: complete the message with an optional note.
 - `reroute slack:CDUMMY:1 --to content`: route with reason `reroute:<old lane>`
@@ -33,19 +33,27 @@ alone never changes ownership. Old inbox entries are hidden after rerouting.
 Missing messages or destination lanes return 3, invalid input returns 2, and success returns 0.
 Unexpected errors return 1 with one sanitized error line and no traceback.
 
-Body output requires `--show-body` on `inbox` or `queue` and a stored body.
-The store is called with `include_body=True` only for that explicit request.
-Default listings, durable inbox records and notifications never include bodies.
+Ordinary body output requires `--show-body` on `inbox` or `queue`.
+Thread view (`inbox support --thread`) is the exception: bodies print by default.
+Use `--no-body` to suppress bodies, including in JSON; it overrides `--show-body`.
+Body requests use `get_message(id, include_body=True)`. Null bodies display
+`[no body stored]`. Default listings, durable inbox records and notifications
+never include bodies.
 Header lines label tables; data lines begin with ids. Notes are not echoed.
 
 ## Durable formats and locking
 
 Each `<root>/<lane>.jsonl` line has exactly `id`, `delivered_at`, `channel`, `ts`,
-`thread_ts`, `followup`, and `kind`. Kinds are `new`, `followup`, and `reroute`.
+`thread_ts`, `followup`, and `kind`. Kinds include `new`, `followup`, `reroute`, and P7A `backfill`.
+The CLI also accepts unknown kind strings unchanged on read.
 Records are append-only and may repeat ids. Read joins ledger state when a store
 is supplied, hides completed work by default, and hides obsolete lane ownership.
 Without a store, ledger state is unknown and completion cannot be inferred.
-The age column measures time since inbox delivery, not original message age.
+The age column measures seconds since the earliest delivery, with an `s` suffix
+in text and JSON. Rows sort by that first delivery. Kind is the latest appended
+non-followup kind (default `new` if all records are followups). Edited is `yes`
+if any record is a followup or the ledger has edited_at; otherwise it is `no`.
+Missing attention and author values display `-`.
 
 Writers hold `<lane>.lock`; readers use it only when it already exists.
 Reading without a lock file creates neither a lock file nor a directory. Windows uses `msvcrt.locking`; POSIX uses
@@ -67,7 +75,7 @@ list and integer types; nested templates are supported. `{lane}`, `{title}` and
 Session command templates should be argument lists with `{target}` and `{message}`
 placeholders. No shell is used. Missing or paused sessions are skipped and logged.
 Failures retry once and then raise NotifyError without captured output. Dry-run
-logs a sanitized rendered command, masking literal arguments and target values.
+logs placeholder names only, never rendered text, arguments, or target values.
 Templates and session pointers must be credential-free. The sample uses dummy
 arguments and dry-run; building adapters does not execute commands.
 
@@ -127,3 +135,48 @@ A custom ids-only adapter receives ids through its existing notify method.
 Retries and restart preserve per-adapter receipts. Resolved work is omitted from
 pending batches. Changes to adapter order require operator review because receipt
 identity includes the adapter position.
+
+
+## P7B inbox context
+
+`inbox support --thread [--owner UOWNER] [--full] [--json]` groups the same
+filtered inbox items by `slack:<channel>:<thread_ts>`. Non-thread items are their
+own roots. Each group shows the root metadata and first 400 body characters,
+then pending replies in numeric timestamp order with complete bodies. `--full`
+removes only the root truncation. A pending root appears once, as the root, with
+its kind, edited and attention metadata. Context roots and ordinary roots are
+both supported; absent roots say `root not in ledger`.
+
+The latest qualifying owner reply newer than the earliest pending item adds
+`owner replied at <ts>`. A qualifying row has route_reason `owner_post` or the
+specified owner author. This is informational and does not hide pending work.
+Owner detection reads metadata across lanes and beyond the API's 100-row default.
+Thread JSON is an array of `{root, items}` groups; `items` is an array excluding
+the root. Root objects include `missing`; groups may include `owner_replied_at`.
+The `body` fields exist only when bodies are printed. An empty view is `[]`.
+
+`ack ID [ID ...]` and `done ID [ID ...] [--note TEXT]` operate on each unique id.
+Missing ids are reported by id, the rest are applied, and the command returns 3.
+Bulk storage failures also report the failed id and continue, returning 3.
+Unexpected errors outside bulk processing retain exit code 1. `ack --thread ROOT_ID [--lane LANE]`
+and `done --thread ROOT_ID [--lane LANE] [--note TEXT]` operate only on pending
+inbox items of the selected lane, not every ledger row in the thread. The root's
+lane is the default. Without `--lane`, when the root is missing, has no lane (a
+context row), or its lane holds no pending items of the thread, the lane is inferred
+from the lanes whose inbox files hold pending items of the thread (for example a
+rerouted reply). Ambiguous lanes print
+`ambiguous lane for thread ROOT: a, b (use --lane)` and return 2 without mutation.
+A missing root can still select replies. An unknown thread returns 3; an existing
+root with no pending inbox work prints `no pending items for thread ROOT in lane X`
+(`in any lane` when no lane is known) to stderr and returns 0. Acked items remain
+pending until done. Do not combine ids and `--thread`; that returns 2.
+
+Session adapters accept `template.message` and `template.cli` strings. Supported
+message placeholders are `{lane}`, `{count}`, `{ids}`, `{kinds}`, `{attention}`,
+`{lanes}`, and `{cli}`. Ids and lane ids are comma separated. Kinds count ledger
+origin `reconcile` as backfill and all other or absent origins as new, in new then
+backfill order, omitting zero counts. Attention counts ids with a set flag.
+Unset cli is empty; unknown placeholders remain literal. Substitution is a single
+pass, preserving braces in inserted values. An unset message keeps the existing
+summary. Each command template part remains one argv element and no shell runs.
+The sample wake requests thread context and preserves the session's own records.

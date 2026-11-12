@@ -11,7 +11,7 @@ from tests.fakes.fake_store import FakeStore
 class CLITests(unittest.TestCase):
     def test_owned_close_preserves_exit_codes(self):
         cases = [(["queue"], None, 0, ""),
-                 (["ack", "missing"], None, 3, "Message not found\n"),
+                 (["ack", "missing"], None, 3, "Message not found: missing\n"),
                  (["assign", self.mid, "missing"], None, 3, "Lane not found\n"),
                  (["queue"], ValueError("dummy"), 2, "Invalid input\n"),
                  (["queue"], RuntimeError("dummy"), 1, "Inbox operation failed\n")]

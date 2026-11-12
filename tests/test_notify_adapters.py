@@ -163,3 +163,58 @@ class NotifierTests(unittest.TestCase):
             switch.rename(switch.with_name("wake.disabled"))
             self.assertEqual(adapters[1].target_resolver("support"), "session-support-placeholder")
             self.assertTrue(engine.enabled())
+
+
+class SessionTemplateTests(unittest.TestCase):
+    def test_every_placeholder_origin_and_argv_boundaries(self):
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0))
+        rows = {"dummy-a": {"origin": "reconcile", "attention": "owner_mention"},
+                "dummy-b": {"origin": "socket"}, "dummy-c": {"origin": "hydrate"},
+                "dummy-d": {}, "dummy-e": {"origin": "future", "attention": "always_human"}}
+        notifier = SessionMessageNotifier(
+            ["dummy", "--target", "{target}", "--message", "{message}"],
+            lambda lane: "dummy target", runner=runner, lanes=["support", "other"],
+            lookup=rows.get, template={"message": "{lane}|{count}|{ids}|{kinds}|{attention}|{lanes}|{cli}\n{unknown}",
+                                      "cli": 'python "dummy path/cli.py"'})
+        notifier.notify("support", list(rows))
+        command = runner.call_args.args[0]
+        self.assertEqual(len(command), 5)
+        self.assertEqual(command[2], "dummy target")
+        self.assertEqual(command[4], 'support|5|dummy-a, dummy-b, dummy-c, dummy-d, dummy-e|new 4, backfill 1|2|support, other|python "dummy path/cli.py"\n{unknown}')
+        self.assertFalse(runner.call_args.kwargs["shell"])
+
+    def test_default_summary_missing_lookup_and_single_pass(self):
+        from slack_dispatch.notify.session_message import summary
+        notifier = SessionMessageNotifier(["dummy", "{message}"], lambda lane: "dummy")
+        self.assertEqual(notifier.message("support", ["dummy-a"]), summary("support", ["dummy-a"]))
+        notifier.template = {"message": "{kinds}|{attention}|{cli}|{ids}|{lanes}"}
+        self.assertEqual(notifier.message("support", ["dummy-{cli}"]), "new 1|0||dummy-{cli}|")
+        notifier.lookup = lambda mid: None
+        self.assertEqual(notifier.message("support", []), "|0|||")
+
+    def test_dry_run_logs_names_only(self):
+        runner = Mock()
+        notifier = SessionMessageNotifier(["PRIVATE_LITERAL", "{target}", "{message}"],
+                                          lambda lane: "PRIVATE_TARGET", runner=runner, dry_run=True,
+                                          template={"message": "PRIVATE_BODY {lane} {ids} {cli}",
+                                                    "cli": "PRIVATE_PATH"})
+        with self.assertLogs(level="INFO") as logs:
+            notifier.notify("PRIVATE_LANE", ["PRIVATE_ID"])
+        text = str(logs.output)
+        self.assertIn("{message}", text)
+        self.assertIn("{lane}", text)
+        self.assertNotIn("PRIVATE_", text)
+        runner.assert_not_called()
+
+    def test_builder_wires_template_lanes_and_lookup(self):
+        raw = yaml.safe_load(SAMPLE.read_text(encoding="utf-8"))
+        raw["notify_adapters"][1]["template"] = {"message": "{lanes}|{kinds}|{attention}"}
+        config = parse_config(raw)
+        store = FakeStore(messages=[{"id": "dummy-a", "origin": "reconcile", "attention": "always_human"}])
+        notifier = build_notifiers(config, store)[1]
+        self.assertEqual(notifier.message("support", ["dummy-a"]), "owner, support, content|backfill 1|1")
+
+    def test_invalid_template_value(self):
+        for template in ({"message": None}, {"cli": 42}):
+            with self.assertRaises(ValueError):
+                SessionMessageNotifier(["dummy"], lambda lane: "dummy", template=template)
