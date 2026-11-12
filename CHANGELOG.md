@@ -6,6 +6,15 @@ This project follows Semantic Versioning while remaining pre-alpha.
 ## [Unreleased]
 
 ### Added
+- Deterministic routing with excluded and always-human precedence and reply bindings.
+- Suggest-only optional Anthropic adapter with strict response parsing and versioning.
+- Human review queue, metadata-only JSONL exports, and manual promotion statistics.
+- Optional routing configuration defaults and offline router, classifier and queue tests.
+- Routing configuration and integration documentation.
+- Locked per-lane metadata inboxes and ledger-backed CLI commands.
+- Session command and atomic assistant outbox adapters with configuration support.
+- Immediate wake decisions, author debounce, storm batches and a global switch.
+- Offline contract-fake tests and inbox operation documentation.
 - Standalone runtime locks, atomic heartbeats, control flags and redacted daily logs.
 - Windows task template, print-only registration, restart and tagged deployment tools.
 - Offline runtime tests and operator documentation. Service integration remains pending.

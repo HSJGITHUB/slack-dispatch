@@ -31,12 +31,21 @@ wake_policy:
   debounce_seconds: 90
   storm_per_hour: 30
   batch_seconds: 600
+  state_dir: state
+  immediate_users: [U0000000004]
+  owner_user: U0000000005
+inbox:
+  root: inbox
 notify_adapters:
   - kind: file_inbox
     path: inbox
   - kind: session_message
-  - kind: assistant_dm
-    path: state/assistant-outbox
+    command_template: [dummy-session-cli, --target, "{target}", --message, "{message}"]
+    dry_run: true
+    timeout: 60
+  - kind: file_drop
+    outbox_dir: state/assistant-outbox
+    template: {lane: "{lane}", count: "{count}", ids: "{ids}", title: "{title}", body: "{body}"}
 ledger:
   path: state/ledger.sqlite3
   store_body: false
@@ -53,3 +62,19 @@ sources:
     user_token_key: SLACK_USER_TOKEN
     interval_seconds: 3600
     lookback_days: 7
+
+always_human:
+  users: [U0000000091]
+  mention_users: [U0000000092]
+  owner_user: U0000000093
+classifier:
+  kind: none
+  enabled: false
+  model: placeholder-model
+  api_key_env: DUMMY_CLASSIFIER_API_KEY
+  taxonomy_version: v1
+  lane_descriptions:
+    owner: Human-owned work
+    support: Support requests
+    content: Content work
+explicit_tag_pattern: '\[(?P<lane>[a-z0-9-]+)\]'

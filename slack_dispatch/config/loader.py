@@ -1,10 +1,11 @@
 """Load YAML only; never read credentials, expand environment, or start sources."""
 from pathlib import Path
+import re
 
 import yaml
 
 from .schema import (
-    Config, Lane, LedgerConfig, NotifyAdapter, PersonChannelRule, SourceConfig, Timers, WakePolicy,
+    AlwaysHuman, Classifier, Config, Inbox, Lane, LedgerConfig, NotifyAdapter, PersonChannelRule, SourceConfig, Timers, WakePolicy,
 )
 
 
@@ -103,19 +104,36 @@ def parse_config(raw):
     wake = mapping(get("wake_policy"), "wake_policy")
     if required(wake, "mode", "wake_policy") != "immediate":
         raise ConfigError("wake_policy.mode must be immediate")
+    immediate_users = wake.get("immediate_users", [])
+    if not isinstance(immediate_users, list):
+        raise ConfigError("wake_policy.immediate_users must be a list")
+    immediate_users = tuple(string(v, "wake_policy.immediate_users entry") for v in immediate_users)
+    owner_user = wake.get("owner_user")
+    if owner_user is not None:
+        string(owner_user, "wake_policy.owner_user")
     wake = WakePolicy("immediate", boolean(required(wake, "enabled", "wake_policy"), "wake_policy.enabled"),
                       *(positive(required(wake, k, "wake_policy"), "wake_policy." + k)
-                        for k in ("debounce_seconds", "storm_per_hour", "batch_seconds")))
+                        for k in ("debounce_seconds", "storm_per_hour", "batch_seconds")),
+                      immediate_users=immediate_users, owner_user=owner_user,
+                      state_dir=string(wake.get("state_dir", "state"), "wake_policy.state_dir"))
+    inbox = mapping(data.get("inbox", {"root": "inbox"}), "inbox")
+    inbox = Inbox(string(required(inbox, "root", "inbox"), "inbox.root"))
     adapters = []
     for row in rows("notify_adapters"):
         row = mapping(row, "notify_adapters entry")
         kind = required(row, "kind", "notify_adapter")
-        if kind not in ("file_inbox", "session_message", "assistant_dm"):
+        if kind not in ("file_inbox", "session_message", "assistant_dm", "file_drop"):
             raise ConfigError("notify_adapter.kind is unsupported")
-        path = row.get("path")
+        path = row.get("outbox_dir", row.get("path", inbox.root if kind == "file_inbox" else None))
         if kind != "session_message" or path is not None:
             string(path, "notify_adapter.path")
-        adapters.append(NotifyAdapter(kind, path))
+        command = row.get("command_template", [])
+        if not isinstance(command, list) or any(not isinstance(v, str) or not v for v in command):
+            raise ConfigError("notify_adapter.command_template must be a string list")
+        template = mapping(row.get("template", {"lane": "{lane}", "ids": "{ids}", "count": "{count}"}), "notify_adapter.template")
+        adapters.append(NotifyAdapter(kind, path, tuple(command),
+                                      boolean(row.get("dry_run", False), "notify_adapter.dry_run"),
+                                      positive(row.get("timeout", 60), "notify_adapter.timeout"), template))
     ledger_data = mapping(get("ledger"), "ledger")
     ledger = LedgerConfig(
         string(required(ledger_data, "path", "ledger"), "ledger.path"),
@@ -135,8 +153,50 @@ def parse_config(raw):
                                     positive(row.get("interval_seconds", row.get("reconcile_seconds", 3600)), "source.interval_seconds"),
                                     positive(row.get("lookback_days", 7), "source.lookback_days"),
                                     ledger.store_body))
+    human = mapping(data.get("always_human", {}), "always_human")
+    def user_ids(key):
+        values = human.get(key, [])
+        if not isinstance(values, list):
+            raise ConfigError(f"always_human.{key} must be a list")
+        return tuple(string(value, f"always_human.{key}") for value in values)
+    owner = human.get("owner_user")
+    if owner is not None:
+        string(owner, "always_human.owner_user")
+    human = AlwaysHuman(user_ids("users"), user_ids("mention_users"), owner)
+    classifier = mapping(data.get("classifier", {}), "classifier")
+    kind = classifier.get("kind", "none")
+    if kind not in ("none", "anthropic"):
+        raise ConfigError("classifier.kind is unsupported")
+    enabled = boolean(classifier.get("enabled", False), "classifier.enabled")
+    model = classifier.get("model", "")
+    if not isinstance(model, str):
+        raise ConfigError("classifier.model must be a string")
+    if enabled:
+        if kind == "none":
+            raise ConfigError("classifier.enabled requires anthropic kind")
+        string(model, "classifier.model")
+    descriptions = {}
+    for lane, description in mapping(classifier.get("lane_descriptions", {}),
+                                     "classifier.lane_descriptions").items():
+        descriptions[lane_ref(lane, "classifier lane")] = string(description, "lane description")
+    classifier = Classifier(
+        kind, enabled, model,
+        string(classifier.get("api_key_env", "ANTHROPIC_API_KEY"), "classifier.api_key_env"),
+        string(classifier.get("taxonomy_version", "v1"), "classifier.taxonomy_version"),
+        descriptions,
+    )
+    pattern = string(data.get("explicit_tag_pattern", r"\[(?P<lane>[a-z0-9-]+)\]"),
+                     "explicit_tag_pattern")
+    try:
+        compiled = re.compile(pattern)
+    except re.error:
+        raise ConfigError("explicit_tag_pattern must be a valid regex") from None
+    if "lane" not in compiled.groupindex:
+        raise ConfigError("explicit_tag_pattern requires a named lane group")
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
-                  tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources), ledger)
+                  tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
+                  ledger=ledger, always_human=human, classifier=classifier,
+                  explicit_tag_pattern=pattern, inbox=inbox)
 
 
 def load_config(path: str | Path) -> Config:

@@ -1,13 +1,11 @@
-"""First-match orchestration; concrete rule evaluation remains unimplemented.
-
-Production order: ThreadInherit, ExplicitTag, ChannelDefault, PersonChannel.
-An unmatched result must enter the human queue, never an implicit lane.
-"""
+"""Side-effect-free deterministic routing rules."""
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 Message = dict[str, Any]
+DEFAULT_TAG_PATTERN = r"\[(?P<lane>[a-z0-9-]+)\]"
 
 
 @dataclass(frozen=True)
@@ -20,44 +18,57 @@ class Rule(Protocol):
     def match(self, message: Message) -> Route | None: ...
 
 
+def is_reply(message):
+    return bool(message.get("thread_ts") and message["thread_ts"] != message.get("ts"))
+
+
 class ThreadInherit:
-    """Evaluate a message with thread bindings and return a lane id in Route or None.
+    def __init__(self, lookup_binding):
+        self.lookup_binding = lookup_binding
 
-    Evaluation has no side effects; only the first matching rule applies.
-    """
-
-    def match(self, message: Message) -> Route | None:
-        raise NotImplementedError("Thread binding lookup is not implemented")
+    def match(self, message):
+        if not is_reply(message):
+            return None
+        lane = self.lookup_binding(message["source"], message["channel"], message["thread_ts"])
+        return Route(lane, "thread_inherit") if lane is not None else None
 
 
 class ExplicitTag:
-    """Evaluate a message with the configured tag map and return a lane id in Route or None.
+    def __init__(self, tag_map, pattern):
+        self.tag_map = dict(tag_map)
+        self.pattern = re.compile(pattern)
 
-    Evaluation has no side effects; only the first matching rule applies.
-    """
-
-    def match(self, message: Message) -> Route | None:
-        raise NotImplementedError("Explicit tag lookup is not implemented")
+    def match(self, message):
+        for match in self.pattern.finditer(message.get("text") or ""):
+            lane = self.tag_map.get(match.group(0), self.tag_map.get(match.group("lane")))
+            if lane is not None:
+                return Route(lane, "explicit_tag")
+        return None
 
 
 class ChannelDefault:
-    """Evaluate a message with channel defaults and return a lane id in Route or None.
+    def __init__(self, channel_defaults, dm_defaults):
+        self.channel_defaults = dict(channel_defaults)
+        self.dm_defaults = dict(dm_defaults)
 
-    Evaluation has no side effects; only the first matching rule applies.
-    """
-
-    def match(self, message: Message) -> Route | None:
-        raise NotImplementedError("Channel default lookup is not implemented")
+    def match(self, message):
+        channel = message.get("channel")
+        is_dm = message.get("channel_type") in ("im", "mpim")
+        defaults = self.dm_defaults if is_dm or channel in self.dm_defaults else self.channel_defaults
+        lane = defaults.get(channel)
+        return Route(lane, "channel_default") if lane is not None else None
 
 
 class PersonChannel:
-    """Evaluate a message with person-channel rules and return a lane id in Route or None.
+    def __init__(self, rules):
+        self.rules = tuple(rules)
 
-    Evaluation has no side effects; only the first matching rule applies.
-    """
-
-    def match(self, message: Message) -> Route | None:
-        raise NotImplementedError("Person and channel lookup is not implemented")
+    def match(self, message):
+        for rule in self.rules:
+            if (rule.person == message.get("user", message.get("author"))
+                    and rule.channel == message.get("channel")):
+                return Route(rule.lane, "person_channel")
+        return None
 
 
 def first_match(message: Message, rules: Iterable[Rule]) -> Route | None:
