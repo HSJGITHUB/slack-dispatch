@@ -71,11 +71,16 @@ access is performed by these scripts.
    Rendered XML uses UTF-16 LE with BOM as required by Task Scheduler; operators can verify with `schtasks /Query /TN <name> /XML`.
    The template stays UTF-8 on disk because it is read as text before rendering.
 4. The task runs pythonw -X utf8 -B -m slack_dispatch.service --config ... at
-   logon and repeats every minute while the interactive user remains logged on.
+   logon and also uses an independent time trigger that repeats every minute
+   indefinitely while the interactive user remains logged on. The installer sets
+   StartBoundary to local time minus five minutes, in ISO format without an offset.
+   The time trigger relaunches the service within a minute after any stop,
+   including stop.flag restarts, without waiting for another logon.
    IgnoreNew avoids overlapping task runs; runtime locking protects manual
    launches too. There is no execution time limit. This is not boot-time or
-   logged-out supervision. A newly registered task may need the next logon or a
-   manual operator start.
+   logged-out supervision. A manual schtasks /Run is only needed right after
+   registration for an immediate first launch. Manual runs do not arm the
+   LogonTrigger repetition; the independent time trigger supplies supervision.
 5. Preview restart with:
    windows\restart.ps1 -StateDirectory C:\demo\state -WhatIf
    Run without WhatIf to read heartbeat.json, capture the original process,

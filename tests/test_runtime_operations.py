@@ -1,6 +1,6 @@
 """Offline runtime checks with best-effort cleanup of system temporary fixtures."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 import logging
@@ -172,19 +172,38 @@ class WindowsToolTests(unittest.TestCase):
         preview = self.run_ps(script, *args, "-WhatIf")
         self.assertIn("schtasks.exe /Create", preview)
         self.assertEqual(list(directory.iterdir()), [])
+        before_render = datetime.now()
         output = self.run_ps(script, *args)
+        after_render = datetime.now()
         xml_files = list(directory.glob("*.xml"))
         self.assertEqual(len(xml_files), 1)
         self.assertIn(str(xml_files[0]), output)
         self.assertTrue(xml_files[0].read_bytes().startswith(b"\xff\xfe"))
         rendered = xml_files[0].read_text(encoding="utf-16")
         self.assertEqual(rendered.splitlines()[0], '<?xml version="1.0" encoding="UTF-16"?>')
-        for name in ("python", "workdir", "config", "user"):
+        for name in ("python", "workdir", "config", "user", "start"):
             self.assertNotIn("{" + name + "}", rendered)
         root = ET.fromstring(rendered)
         ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
         self.assertEqual(root.find(".//t:Command", ns).text, args[1])
-        self.assertEqual(root.find(".//t:Interval", ns).text, "PT1M")
+        triggers = root.find("t:Triggers", ns)
+        self.assertEqual(len(triggers), 2)
+        logon_trigger = triggers.find("t:LogonTrigger", ns)
+        time_trigger = triggers.find("t:TimeTrigger", ns)
+        self.assertIsNotNone(logon_trigger)
+        self.assertIsNotNone(time_trigger)
+        for trigger in (logon_trigger, time_trigger):
+            self.assertEqual(trigger.find("t:Repetition/t:Interval", ns).text, "PT1M")
+            self.assertEqual(trigger.find("t:Repetition/t:StopAtDurationEnd", ns).text, "false")
+            self.assertIsNone(trigger.find("t:Repetition/t:Duration", ns))
+            self.assertEqual(trigger.find("t:Enabled", ns).text, "true")
+        self.assertEqual(logon_trigger.find("t:UserId", ns).text, args[7])
+        start_text = time_trigger.find("t:StartBoundary", ns).text
+        self.assertRegex(start_text, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+        start = datetime.fromisoformat(start_text)
+        self.assertIsNone(start.tzinfo)
+        self.assertGreaterEqual(start, before_render - timedelta(minutes=5, seconds=1))
+        self.assertLessEqual(start, after_render - timedelta(minutes=5))
         self.assertEqual(root.find(".//t:MultipleInstancesPolicy", ns).text, "IgnoreNew")
         self.assertEqual(root.find(".//t:ExecutionTimeLimit", ns).text, "PT0S")
         self.assertIn('-X utf8 -B -m slack_dispatch.service --config "',

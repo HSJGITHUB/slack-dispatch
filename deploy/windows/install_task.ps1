@@ -13,8 +13,9 @@ foreach ($value in @($Python, $Workdir, $Config, $User, $TaskName, $OutputDirect
     if ($value -match '["\r\n]') { throw 'Quotes and newlines are not supported in parameters.' }
 }
 $rendered = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'task_template.xml'), [Text.Encoding]::UTF8)
-$values = @{ python = $Python; workdir = $Workdir; config = $Config; user = $User }
-$rendered = [regex]::Replace($rendered, '\{(python|workdir|config|user)\}', {
+$start = (Get-Date).AddMinutes(-5).ToString("yyyy-MM-dd'T'HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
+$values = @{ python = $Python; workdir = $Workdir; config = $Config; user = $User; start = $start }
+$rendered = [regex]::Replace($rendered, '\{(python|workdir|config|user|start)\}', {
     param($match)
     [Security.SecurityElement]::Escape($values[$match.Groups[1].Value])
 })

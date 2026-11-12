@@ -6,6 +6,7 @@ This project follows Semantic Versioning while remaining pre-alpha.
 ## [Unreleased]
 
 ### Fixed
+- Add an indefinite one-minute time trigger with an install-time start boundary so stopped services restart without another logon.
 - Render Task Scheduler XML as UTF-16 LE with BOM and a matching UTF-16 declaration.
 
 ## [0.1.0] - 2026-11-12
