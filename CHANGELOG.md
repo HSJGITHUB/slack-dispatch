@@ -25,6 +25,11 @@ This project follows Semantic Versioning while remaining pre-alpha.
 - Explicit body storage configuration, source construction, synthetic fixtures,
   offline intake tests, and ingestion documentation.
 
+### Fixed
+- Compute deployment SHA-256 hashes with disposed .NET file streams without Get-FileHash.
+- Preserve the full parent environment and optional overrides in PowerShell runtime tests.
+- Verify deployment manifest hashes against Python for text, empty and nested binary files.
+
 ## [0.0.1] - 2026-11-11
 
 ### Added

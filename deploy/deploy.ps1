@@ -28,7 +28,20 @@ if ($PSCmdlet.ShouldProcess($destination, 'Extract tagged checkout and write dep
     $hashes = [ordered]@{}
     Get-ChildItem -LiteralPath $destination -File -Recurse -Force | Sort-Object FullName | ForEach-Object {
         $relative = $_.FullName.Substring($destination.TrimEnd('\', '/').Length + 1).Replace('\', '/')
-        $hashes[$relative] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $stream = [IO.File]::OpenRead($_.FullName)
+            try {
+                $digest = $sha256.ComputeHash($stream)
+                $hashes[$relative] = [BitConverter]::ToString($digest).Replace('-', '').ToLowerInvariant()
+            }
+            finally {
+                $stream.Dispose()
+            }
+        }
+        finally {
+            $sha256.Dispose()
+        }
     }
     $manifest = [ordered]@{ tag = $Tag; commit = $commit; sha256 = $hashes; time = [DateTimeOffset]::Now.ToString('o') }
     $json = $manifest | ConvertTo-Json -Depth 8

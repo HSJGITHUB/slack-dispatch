@@ -152,10 +152,14 @@ class RuntimeTests(unittest.TestCase):
 
 @unittest.skipUnless(POWERSHELL, "Windows PowerShell is unavailable")
 class WindowsToolTests(unittest.TestCase):
-    def run_ps(self, script, *args, expected=0):
+    def run_ps(self, script, *args, expected=0, env=None):
+        child_env = os.environ.copy()
+        if env is not None:
+            child_env.update(env)
         result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                                  "Bypass", "-File", str(script), *map(str, args)],
-                                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45)
+                                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45,
+                                env=child_env)
         self.assertEqual(result.returncode, expected, (result.stdout or "") + (result.stderr or ""))
         return result.stdout or ""
 
@@ -201,7 +205,10 @@ class WindowsToolTests(unittest.TestCase):
 
         git("init", "--template=")
         (checkout / "sample.txt").write_text("tagged\n", encoding="utf-8")
-        git("add", "sample.txt")
+        (checkout / "empty.bin").write_bytes(b"")
+        (checkout / "nested").mkdir()
+        (checkout / "nested" / "binary.bin").write_bytes(bytes(range(256)))
+        git("add", "sample.txt", "empty.bin", "nested/binary.bin")
         git("-c", "user.name=Dummy", "-c", "user.email=dummy@example.invalid",
             "-c", "commit.gpgsign=false", "commit", "-m", "Dummy fixture")
         git("tag", "v-test")
@@ -222,7 +229,8 @@ class WindowsToolTests(unittest.TestCase):
         self.assertEqual(manifest["commit"], commit)
         self.assertEqual((target / "sample.txt").read_text(), "tagged\n")
         self.assertEqual(manifest["sha256"], {
-            "sample.txt": hashlib.sha256((target / "sample.txt").read_bytes()).hexdigest()})
+            name: hashlib.sha256((target / name).read_bytes()).hexdigest()
+            for name in ("sample.txt", "empty.bin", "nested/binary.bin")})
         self.run_ps(script, *args, expected=1)
 
     def test_restart_waits_for_original_process_and_whatif(self):
