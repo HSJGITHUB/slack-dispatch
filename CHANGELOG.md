@@ -5,6 +5,8 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-12
+
 ### Added
 - Resident service and module entry point with locking, source lifecycle, heartbeat,
 - Service pipeline with transient routing text, root thread inheritance, followups,

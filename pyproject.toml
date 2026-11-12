@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slack-dispatch"
-version = "0.0.1"
+version = "0.1.0"
 description = "Offline-first scaffold for lane-based message dispatch"
 requires-python = ">=3.12"
 dependencies = ["slack_sdk", "pyyaml"]
