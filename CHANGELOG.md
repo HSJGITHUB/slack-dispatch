@@ -6,6 +6,11 @@ This project follows Semantic Versioning while remaining pre-alpha.
 ## [Unreleased]
 
 ### Added
+- Resident service and module entry point with locking, source lifecycle, heartbeat,
+- Service pipeline with transient routing text, root thread inheritance, followups,
+- Durable per-adapter timer receipts and thread delivery history without changing
+- Optional service configuration and kind-independent human queue adapter purposes.
+- Offline pipeline, timer and service acceptance tests and service operator guide.
 - Deterministic routing with excluded and always-human precedence and reply bindings.
 - Suggest-only optional Anthropic adapter with strict response parsing and versioning.
 - Human review queue, metadata-only JSONL exports, and manual promotion statistics.

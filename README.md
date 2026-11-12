@@ -25,27 +25,44 @@ classifier suggestion. The classifier does not assign work in this release.
 See [design](docs/DESIGN.md) and [decisions](docs/DECISIONS.md).
 
 ## Quickstart
-Requires Python 3.12+ and Windows for the environment-helper tests.
-Install dependencies in a prepared environment, then run offline tests:
+Requires Python 3.12+. Install development dependencies and run the checks:
 
 ```sh
 pip install -e .[dev]
 pytest -q
 ruff check .
-python -m slack_dispatch.inbox.cli --help
 ```
 
-If pytest is unavailable, run `python -m unittest discover -s tests`.
+The offline suite can also run with unittest in both modes:
+
+```sh
+python -B -m unittest discover -s tests -v
+python -X utf8 -B -m unittest discover -s tests -v
+python -B -m slack_dispatch.inbox.cli --help
+```
+
+Run the offline Windows PowerShell envhelper tests from the repository root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/envhelper/tests/run_tests.ps1
 ```
 
-Installation and CI dependency setup require package downloads unless cached.
-Tests themselves use fake inputs and no Slack requests. Do not start the probe
-as part of testing. All functional inbox commands and the service currently
-raise `NotImplementedError`. The sample YAML is illustrative, not deployment
-configuration. Keep real configuration and credentials outside the repository.
+Use an operator-owned configuration to run one reconcile pass or the resident:
+
+```sh
+python -B -m slack_dispatch --config dummy-config.yaml --once
+python -X utf8 -B -m slack_dispatch --config dummy-config.yaml
+python -B -m slack_dispatch --config dummy-config.yaml --once --dry-run
+```
+
+--dry-run logs notifications without calling adapters; it still runs intake and
+updates the ledger. Offline tests use fake sources, never the live probe. Keep
+state/wake.off present until ready, claim lane sessions, and configure a human
+queue adapter. See [service operation](docs/SERVICE.md) for defaults, control
+flags, timer receipts, exit codes and recovery limits. The sample YAML uses dummy
+values and is not deployment configuration. Keep real configuration and
+credentials outside the repository. The installed slack-dispatch command remains
+the inbox CLI; slack-dispatch-service and python -m slack_dispatch run the service.
 
 ## Design principles
 Single intake, one state per message, stable lane ownership, deterministic

@@ -43,6 +43,7 @@ class NotifyAdapter:
     dry_run: bool = False
     timeout: int = 60
     template: dict = field(default_factory=dict)
+    purpose: str = "lane"
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,16 @@ class Inbox:
 
 
 @dataclass(frozen=True)
+class Service:
+    state_dir: str = "state"
+    heartbeat_seconds: int = 30
+    log_dir: str = "logs"
+    log_level: str = "INFO"
+    once: bool = False
+    followup_window_seconds: int = 600
+
+
+@dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
     channel_defaults: dict[str, str | None]
@@ -103,3 +114,4 @@ class Config:
     classifier: Classifier = field(default_factory=Classifier)
     explicit_tag_pattern: str = r"\[(?P<lane>[a-z0-9-]+)\]"
     inbox: Inbox = field(default_factory=Inbox)
+    service: Service = field(default_factory=Service)

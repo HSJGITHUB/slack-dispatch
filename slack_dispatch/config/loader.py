@@ -5,7 +5,8 @@ import re
 import yaml
 
 from .schema import (
-    AlwaysHuman, Classifier, Config, Inbox, Lane, LedgerConfig, NotifyAdapter, PersonChannelRule, SourceConfig, Timers, WakePolicy,
+    AlwaysHuman, Classifier, Config, Inbox, Lane, LedgerConfig, NotifyAdapter,
+    PersonChannelRule, Service, SourceConfig, Timers, WakePolicy,
 )
 
 
@@ -131,9 +132,13 @@ def parse_config(raw):
         if not isinstance(command, list) or any(not isinstance(v, str) or not v for v in command):
             raise ConfigError("notify_adapter.command_template must be a string list")
         template = mapping(row.get("template", {"lane": "{lane}", "ids": "{ids}", "count": "{count}"}), "notify_adapter.template")
+        purpose = row.get("purpose", row.get("for", "lane"))
+        if purpose not in ("lane", "human_queue"):
+            raise ConfigError("notify_adapter.purpose must be lane or human_queue")
         adapters.append(NotifyAdapter(kind, path, tuple(command),
                                       boolean(row.get("dry_run", False), "notify_adapter.dry_run"),
-                                      positive(row.get("timeout", 60), "notify_adapter.timeout"), template))
+                                      positive(row.get("timeout", 60), "notify_adapter.timeout"),
+                                      template, purpose))
     ledger_data = mapping(get("ledger"), "ledger")
     ledger = LedgerConfig(
         string(required(ledger_data, "path", "ledger"), "ledger.path"),
@@ -193,10 +198,24 @@ def parse_config(raw):
         raise ConfigError("explicit_tag_pattern must be a valid regex") from None
     if "lane" not in compiled.groupindex:
         raise ConfigError("explicit_tag_pattern requires a named lane group")
+    service = mapping(data.get("service", {}), "service")
+    level = string(service.get("log_level", "INFO"), "service.log_level").upper()
+    if level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        raise ConfigError("service.log_level is unsupported")
+    service = Service(
+        state_dir=string(service.get("state_dir", "state"), "service.state_dir"),
+        heartbeat_seconds=positive(service.get("heartbeat_seconds", 30),
+                                   "service.heartbeat_seconds"),
+        log_dir=string(service.get("log_dir", "logs"), "service.log_dir"),
+        log_level=level,
+        once=boolean(service.get("once", False), "service.once"),
+        followup_window_seconds=positive(service.get("followup_window_seconds", 600),
+                                        "service.followup_window_seconds"),
+    )
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
-                  explicit_tag_pattern=pattern, inbox=inbox)
+                  explicit_tag_pattern=pattern, inbox=inbox, service=service)
 
 
 def load_config(path: str | Path) -> Config:

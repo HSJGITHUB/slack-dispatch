@@ -78,3 +78,11 @@ classifier:
     support: Support requests
     content: Content work
 explicit_tag_pattern: '\[(?P<lane>[a-z0-9-]+)\]'
+
+service:
+  state_dir: state
+  heartbeat_seconds: 30
+  log_dir: logs
+  log_level: INFO
+  once: false
+  followup_window_seconds: 600
