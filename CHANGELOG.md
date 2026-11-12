@@ -6,6 +6,9 @@ This project follows Semantic Versioning while remaining pre-alpha.
 ## [Unreleased]
 
 ### Added
+- Standalone runtime locks, atomic heartbeats, control flags and redacted daily logs.
+- Windows task template, print-only registration, restart and tagged deployment tools.
+- Offline runtime tests and operator documentation. Service integration remains pending.
 - Transactional SQLite ledger with versioned migrations, deduplication, routes,
   state changes, reactions, thread bindings, and per-channel cursors.
 - Redacted Slack event normalization, immediate Socket Mode ACKs, and read-only
