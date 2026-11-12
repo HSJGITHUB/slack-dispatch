@@ -176,7 +176,9 @@ class WindowsToolTests(unittest.TestCase):
         xml_files = list(directory.glob("*.xml"))
         self.assertEqual(len(xml_files), 1)
         self.assertIn(str(xml_files[0]), output)
-        rendered = xml_files[0].read_text(encoding="utf-8")
+        self.assertTrue(xml_files[0].read_bytes().startswith(b"\xff\xfe"))
+        rendered = xml_files[0].read_text(encoding="utf-16")
+        self.assertEqual(rendered.splitlines()[0], '<?xml version="1.0" encoding="UTF-16"?>')
         for name in ("python", "workdir", "config", "user"):
             self.assertNotIn("{" + name + "}", rendered)
         root = ET.fromstring(rendered)

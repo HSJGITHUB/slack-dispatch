@@ -22,7 +22,7 @@ $null = [xml]$rendered
 $output = Join-Path $OutputDirectory ('dispatch-task-' + [guid]::NewGuid().ToString('N') + '.xml')
 if ($PSCmdlet.ShouldProcess($output, 'Write rendered Task Scheduler XML')) {
     $null = [IO.Directory]::CreateDirectory($OutputDirectory)
-    [IO.File]::WriteAllText($output, $rendered, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($output, $rendered, [Text.Encoding]::Unicode)
 }
 Write-Output ('schtasks.exe /Create /TN "{0}" /XML "{1}" /F' -f $TaskName, $output)
 # Registration is always manual. No schtasks invocation occurs here.

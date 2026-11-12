@@ -68,6 +68,8 @@ access is performed by these scripts.
    unique XML and prints a schtasks.exe /Create command only. The operator
    reviews XML and manually runs the command. WhatIf prints a proposed command
    but writes no XML; that preview command is not ready to execute.
+   Rendered XML uses UTF-16 LE with BOM as required by Task Scheduler; operators can verify with `schtasks /Query /TN <name> /XML`.
+   The template stays UTF-8 on disk because it is read as text before rendering.
 4. The task runs pythonw -X utf8 -B -m slack_dispatch.service --config ... at
    logon and repeats every minute while the interactive user remains logged on.
    IgnoreNew avoids overlapping task runs; runtime locking protects manual
