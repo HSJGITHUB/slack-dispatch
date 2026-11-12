@@ -76,14 +76,14 @@ def record(message, kind=None):
             "channel": message["channel"], "ts": message["ts"],
             "thread_ts": message.get("thread_ts"),
             "followup": bool(message.get("followup")),
-            "kind": kind or ("followup" if message.get("followup") else "new")}
+            "kind": kind or ("followup" if message.get("followup") else "backfill" if message.get("origin") == "reconcile" else "new")}
 
 
 def append(root, lane, records):
     keys = ("id", "delivered_at", "channel", "ts", "thread_ts", "followup", "kind")
     clean = [{key: row[key] for key in keys} for row in records]
     for row in clean:
-        if row["kind"] not in ("new", "followup", "reroute"):
+        if row["kind"] not in ("new", "followup", "reroute", "backfill"):
             raise ValueError("Invalid inbox record kind")
         if any(not isinstance(row[k], str) or not row[k] for k in keys[:4]):
             raise ValueError("Invalid inbox record metadata")

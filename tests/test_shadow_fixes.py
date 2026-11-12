@@ -414,7 +414,7 @@ class AdditiveConfigTests(unittest.TestCase):
         store.bind_thread("slack", "CDUMMY", "1", "dummy")
         store.migrate()
         store.migrate()
-        self.assertEqual(store._rows("SELECT version FROM schema_version"), [{"version": 1}])
+        self.assertEqual(store._rows("SELECT version FROM schema_version"), [{"version": 2}])
         columns = {row["name"] for row in store._rows("PRAGMA table_info(messages)")}
         self.assertTrue({"attention", "is_bot"} <= columns)
         self.assertEqual(store.get_message("slack:CDUMMY:1")["lane"], "dummy")

@@ -1,8 +1,10 @@
 """Resident orchestration for the existing intake, ledger and notification packages."""
 import argparse
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
+import os
+import queue
 from pathlib import Path
 import sys
 import time
@@ -12,7 +14,6 @@ from slack_dispatch.config.loader import ConfigError, load_config
 from slack_dispatch.ingest import build_sources
 from slack_dispatch.ingest.slack_reconcile import SlackReconcileSource
 from slack_dispatch.ingest.slack_socket import SlackSocketSource
-from slack_dispatch.ingest.normalize import normalize_slack_event
 from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.notify import build_notifiers
 from slack_dispatch.notify.wake import WakePolicyEngine
@@ -40,33 +41,15 @@ def _is_bot(metadata, known=()):
 
 
 class _ServiceSocketSource(SlackSocketSource):
-    """Preserve bot identity before the legacy normalizer drops bot_id."""
-    def _receive(self, client, request):
-        try:
-            client.send_socket_mode_response(self._response_class(envelope_id=request.envelope_id))
-            if request.type == "disconnect":
-                self._observe(False)
-                return
-            if request.type != "events_api" or self._stopped.is_set():
-                return
-            payload = dict(request.payload)
-            retry = getattr(request, "retry_attempt", None)
-            if retry is not None:
-                payload["retry_attempt"] = retry
-            event = normalize_slack_event(payload, datetime.now().astimezone().isoformat(),
-                                          store_body=self.config.store_body)
-            if event is not None:
-                raw = payload.get("event", {})
-                if raw.get("subtype") in ("message_changed", "message_deleted"):
-                    raw = raw.get("message", raw.get("previous_message", {}))
-                event["is_bot"] = _is_bot(raw, self.known_bot_users)
-                self.on_event(event)
-        except Exception:
-            self.failures += 1
+    """Service configuration uses the shared socket normalization path."""
 
 
 class _ServiceReconcileSource(SlackReconcileSource):
     """Keep a channel-local bot map while the existing history pass normalizes."""
+    # The resident loop must keep heartbeat, stop flag, flush and timers alive
+    # while the first catch-up pass runs on the worker thread.
+    wait_for_first_pass = False
+
     def __init__(self, *args, known_bot_users=(), **kwargs):
         super().__init__(*args, **kwargs)
         self.known_bot_users = known_bot_users
@@ -75,7 +58,7 @@ class _ServiceReconcileSource(SlackReconcileSource):
         def deliver(event):
             event = dict(event, is_bot=self._bots.get(event.get("ts"),
                          _is_bot(event, self.known_bot_users)))
-            callback(event)
+            return callback(event)
         self.on_event = deliver
 
     def _call(self, method, **params):
@@ -96,6 +79,8 @@ class _ServiceReconcileSource(SlackReconcileSource):
 
 class _OnceReconcileSource(_ServiceReconcileSource):
     """Reuse startup initialization but stop before the interval thread can poll."""
+    wait_for_first_pass = True
+
     def catch_up(self):
         try:
             return super().catch_up()
@@ -131,11 +116,65 @@ def build_service_sources(config, on_event, store, *, once=False):
             source = _ServiceSocketSource(source.config, source.on_event,
                                            source.env_file, source.app_token_key)
             source.known_bot_users = config.bot_messages.known_bot_users
+        if isinstance(source, SlackReconcileSource):
+            source.owner_user = config.always_human.owner_user
         result.append(source)
     return result
 
 
-def run(config, *, once=False, dry_run=False, clock=None, sleep=None):
+class CoverageMonitor:
+    """Process socket transitions on the service thread and wake reconcile workers."""
+    def __init__(self, store, pipeline, sources, clock, threshold):
+        self.store, self.pipeline, self.sources = store, pipeline, sources
+        self.clock, self.threshold = clock, threshold
+        self.transitions = queue.SimpleQueue()
+        self.open_gaps = {}
+        self.started_at = self.stamp(clock())
+        self.last_catchup_at = None
+        self.gaps = 0
+        self.reconcilers = [source for source in sources if isinstance(source, SlackReconcileSource)]
+        for source in sources:
+            if isinstance(source, SlackSocketSource):
+                source.clock = clock
+                source.on_connection = lambda kind, at, source=source: self.transitions.put((source, kind, at))
+        for source in self.reconcilers:
+            source.on_catchup = self.caught_up
+            source.on_context = pipeline.record_context
+        if self.reconcilers:
+            pipeline.reconcile_source = self.reconcilers[0]
+        self.new_gap("service", self.started_at, self.started_at, "start")
+
+    @staticmethod
+    def stamp(value):
+        return datetime.fromtimestamp(value, timezone.utc).astimezone().isoformat()
+
+    def new_gap(self, source, detected, resumed, note):
+        gap = self.store.record_gap(source, detected, self.pipeline.last_event_at, resumed, note)
+        self.gaps += 1
+        LOG.info("Ingest gap id=%d source=%s", gap, source)
+        return gap
+
+    def caught_up(self, at):
+        self.store.complete_gaps(at)
+        self.last_catchup_at = at
+
+    def poll(self):
+        while not self.transitions.empty():
+            source, kind, at = self.transitions.get_nowait()
+            if kind == "disconnected":
+                self.open_gaps[source] = self.new_gap("slack_socket", self.stamp(at), None, "disconnect")
+            elif kind == "reconnected":
+                gap = self.open_gaps.pop(source, None)
+                if gap is not None:
+                    with self.store._transaction() as db:
+                        db.execute("UPDATE ingest_gaps SET resumed_at=? WHERE id=?", (self.stamp(at), gap))
+                for reconcile in self.reconcilers:
+                    reconcile.request_catchup()
+        return any(isinstance(source, SlackSocketSource) and source.disconnected_at is not None
+                   and self.clock() - source.disconnected_at > self.threshold for source in self.sources)
+
+
+def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_name="unknown"):
     clock, sleep = clock or time.time, sleep or time.sleep
     # The service owns the global switch; standalone package defaults stay intact.
     config = replace(config, wake_policy=replace(config.wake_policy,
@@ -150,7 +189,7 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None):
         heartbeat = HeartbeatWriter(state / "heartbeat.json",
                                     config.service.heartbeat_seconds, clock)
         sources, started = [], []
-        pipeline = sweep = None
+        pipeline = sweep = monitor = None
         shutdown_ok = True
         exit_code = 0
         start_failures = 0
@@ -167,8 +206,14 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None):
             counters = pipeline.snapshot()
             counters["failures"] += sweep.failures + sum(
                 getattr(source, "failures", 0) for source in sources)
-            heartbeat.write(ok=counters["failures"] == 0, status=status,
-                            version=__version__, counters=counters, force=force)
+            degraded = monitor.poll() if monitor else False
+            heartbeat.write(ok=counters["failures"] == 0 and not degraded,
+                            status="degraded" if status == "running" and degraded else status,
+                            version=__version__, counters=counters, force=force,
+                            started_at=monitor.started_at if monitor else None,
+                            last_event_at=pipeline.last_event_at,
+                            last_catchup_at=monitor.last_catchup_at if monitor else None,
+                            gaps=monitor.gaps if monitor else 0)
 
         try:
             Path(config.ledger.path).parent.mkdir(parents=True, exist_ok=True)
@@ -191,12 +236,15 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None):
             sweep = TimerSweep(config, store, notifiers, clock, human=pipeline.human)
             sweep.lock = pipeline.lock
             sources = build_service_sources(config, pipeline.handle_event, store, once=once)
+            monitor = CoverageMonitor(store, pipeline, sources, clock, config.service.gap_alert_seconds)
+            LOG.info("Service start version=%s config=%s pid=%d", __version__, Path(config_name).name, os.getpid())
+            attempt("heartbeat", lambda: publish(force=True))
             for source in sources:
                 started.append(source)
                 if not attempt("source_start", source.start):
                     exit_code = 1
                     start_failures += 1
-            attempt("heartbeat", publish)
+            attempt("heartbeat", lambda: publish(force=True))
             if not once and sources and start_failures == len(sources):
                 print("Source start failed, see service.log", file=sys.stderr)
                 return 1
@@ -232,6 +280,7 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None):
                 if shutdown_ok:
                     shutdown_ok = attempt("stop_acknowledge", flags.acknowledge_stop)
                 attempt("heartbeat", lambda: publish("stopped" if shutdown_ok else "stop_failed", True))
+            LOG.info("Service stop ok=%s", shutdown_ok)
             try:
                 store.close()
             finally:
@@ -258,7 +307,7 @@ def main(argv=None):
         return error.code
     try:
         config = load_config(args.config)
-        return run(config, once=args.once or config.service.once, dry_run=args.dry_run)
+        return run(config, once=args.once or config.service.once, dry_run=args.dry_run, config_name=args.config)
     except ConfigError:
         print("Invalid service configuration", file=sys.stderr)
         return 2

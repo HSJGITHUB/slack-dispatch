@@ -11,6 +11,19 @@ This project follows Semantic Versioning while remaining pre-alpha.
 - Support multiple ids and lane-scoped thread selection for ack and done.
 - Add configurable lane wake messages, origin counts and placeholder-only dry-run logs.
 
+### P7A coverage
+- Backfill thread replies with independent cursors, overlap and bound-thread coverage.
+- Track socket gaps, worker catch-up, lifecycle logs and degraded heartbeat health.
+- Flatten message blocks and file names; retain source origin through ledger v2.
+- Record owner posts/reactions and prehandled backfill without delivery.
+- Add backfill inbox kind and cached, retryable thread-root context hydration.
+- Isolate reply fetch failures per parent; roots and the root cursor never wait on replies.
+- Cap bound and ledger thread candidates with `bound_threads_max_age_days` (default 14).
+- Start the resident first catch-up without blocking the loop; write a heartbeat at startup.
+- Deliver backfill to file inboxes only, without wake or storm accounting.
+- Skip root hydration in excluded channels; abandon a root after three failed retries.
+- Update heartbeat `last_event_at` from socket events only.
+
 ### Added
 - Durable human-queue digests with channel counts, capped ids and timer receipts.
 - Optional bot traffic policies and service Event bot identity.

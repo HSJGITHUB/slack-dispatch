@@ -147,3 +147,28 @@ Tests exercise the consumed LedgerStore API through an in-memory fake and a fake
 classifier client. The shadow-fix tests also exercise the real SQLite store, service source wrappers,
 pipeline and timers with fake clients and clocks. No live SDK, credential, network
 or deployment validation is claimed.
+
+## P7A coverage
+
+The pipeline applies owner signals before the existing router. When
+always_human.owner_user is set, owner_signals.posts=record (the default) stores
+owner-authored messages as done with owner_post reason/note, preserving body
+policy and bindings without classification or notification. posts=route keeps
+normal routing. An unset owner makes these policies inert.
+
+For remaining reconcile messages, a configured done reaction by the owner wins
+first, followed by a later owner reply in the fetched thread. Both result in
+prehandled done rows without routing, classification, delivery or human notices.
+Reconcile marks older non-owner replies and the parent using fetched owner-reply
+evidence; a later owner reply already present in the ledger also qualifies.
+Prehandled increments its own counter, not routed. Socket messages do
+not apply the backfill filter. Existing router precedence follows these checks.
+A backfill message that the router assigns is written to the lane file inbox
+with kind backfill and does not reach the wake engine (see INGEST.md).
+
+An owner reaction_added on a known row can mark new/assigned/acked/human_pending
+as done for reactions_done (default white_check_mark, heavy_check_mark), or an
+assigned row as acked for reactions_ack (default eyes). The note is
+owner_reaction:<emoji>. Removed reactions and other actors do not change state;
+reaction records remain available. Done matching takes precedence over ack if
+an emoji appears in both lists.

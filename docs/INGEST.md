@@ -31,8 +31,8 @@ The caller must also avoid logging normalized events containing opt-in text.
 
 Open enables foreign keys and requests WAL (SQLite in-memory databases use their
 native memory journal). Migrations and all production mutations use
-`BEGIN IMMEDIATE` under a per-store lock. Version 1 includes the scaffold and
-additive columns/tables; migration also upgrades an unversioned scaffold.
+`BEGIN IMMEDIATE` under a per-store lock. Version 2 includes the scaffold and
+additive columns/tables; migration upgrades version 1 and an unversioned scaffold.
 Repeated migrations are idempotent. Unknown schema versions are rejected.
 The database parent directory must already exist; deployment owns its creation.
 
@@ -64,8 +64,9 @@ requests. `stop()` closes the client. ACK precedes durable storage, so an event
 handler failure can lose real-time delivery; reconciliation covers history
 messages but does not reconstruct every event type.
 
-At startup, reconcile attempts one synchronous pass before starting the interval
-thread. A startup catch-up failure increments `failures` and still starts the
+At startup, reconcile performs a worker-thread pass. A standalone source
+(`wait_for_first_pass = True`) waits for it before start returns; the resident
+service source does not wait (see SERVICE.md). A startup catch-up failure increments `failures` and still starts the
 interval loop. Channel failures increment `failures` and do not skip other channels. It reads every channel from the additive `store.list_channels(source)`
 helper: channel metadata, messages, and cursors contribute known channels. A
 fresh empty ledger has no channels to query; Socket events or explicit cursor
@@ -82,12 +83,11 @@ precision. Poll intervals use `interval_seconds`, falling back to the existing
 `reconcile_seconds` configuration field.
 
 Only `conversations.history`, `conversations.replies`, `conversations.info`, and
-`auth.test` pass the call-time allowlist; only history is currently invoked.
+`auth.test` pass the call-time allowlist; history, replies and optional discovery are invoked.
 HTTP 429 uses `Retry-After` and an injectable, interruptible sleep. A stopped
 source does not retry. Other request failures leave cursors unchanged.
 History polling does not recover edits to older messages, reactions, deletions,
-or replies absent from history under old roots. Thread reply backfill remains
-outside this implementation; live visibility must be measured before rollout.
+or every historical event. Thread reply backfill is described under P7A coverage.
 
 Credentials are loaded only at source startup. The parser handles KEY=VALUE,
 CRLF, blank lines, and hash comments, without interpolation or quote stripping.
@@ -107,3 +107,55 @@ From the repository root, run `python -m unittest discover -s tests -v`.
 Set `PYTHONDONTWRITEBYTECODE=1` to avoid bytecode files. If installed, run
 `ruff check .` with `RUFF_NO_CACHE=1`. Tests use in-memory SQLite, synthetic JSON
 fixtures, and fake SDK clients. No network or real credential files are needed.
+
+## P7A coverage
+
+Reconcile now fetches roots and replies on its worker thread at startup, after
+socket reconnect requests, and periodically. Optional source keys are
+`replies: true`, `replies_lookback_days` (defaults to `lookback_days`),
+`replies_overlap_seconds: 120`, `bound_threads: true` and
+`bound_threads_max_age_days: 14` (positive integer). History pages are
+shared across the root and reply lookback windows. Root delivery waits until
+candidate reply pages have been fetched, allowing owner-reply evidence
+to suppress already handled roots. Root delivery and the root cursor never
+depend on the replies step: each parent is fetched in its own guard, a failed
+parent is skipped with one WARNING line (channel, parent ts, exception class,
+Slack error code) and counted in the pass `failures`, and a root whose replies
+could not be fetched routes without reply-based evidence. The separate
+`slack_replies` cursor advances to pass start only when every parent of the
+channel succeeded and every reply callback returned; otherwise it is kept.
+Overlap is deduplicated by deterministic event ids and message identity.
+
+Reply parents include recent history parents with newer replies, channel
+bindings (when `bound_threads` is true) and threads referenced by recent ledger
+messages. Binding and ledger candidates are checked only when their thread
+activity, max(thread_ts, newest ledger message ts in that thread), is within
+`bound_threads_max_age_days` of the pass start. Excluded channels are never
+scanned. The pass summary reports `thread_candidates` and `thread_skipped_age`.
+Replies are paginated and delivered in timestamp order. Origins are `socket`,
+`reconcile`, and `hydrate`. Initial inbox delivery from reconcile uses `backfill`;
+explicit reroute and followup kinds retain precedence.
+
+Backfill does not wake sessions. A routed message of origin `reconcile` is
+written only to `file_inbox` adapters with purpose `lane`; the wake engine
+(`offer`) and its storm accounting are skipped, so session_message, file_drop
+and assistant_dm lane adapters are not called for it. Human-queue notices for
+attention flags are unchanged. The pass summary ends with
+`backfill delivered N (no wake)`. Hydrated context rows are never delivered.
+
+With body storage enabled, supported rich-text blocks flatten into text, mentions,
+URLs, emoji and line breaks. Unknown elements are skipped; empty supported block
+text falls back to top-level text, then file names/titles. Edits use the nested
+message object. Raw blocks, file contents and envelopes are never stored.
+
+Missing thread roots are fetched through the reconcile client with a ten-second
+wait budget, recorded as done context rows and never routed or delivered.
+Successful hydration is cached for the process lifetime; failed or outstanding
+requests are retried or collected on a later catch-up pass, at most three
+retries per root after the first failure. After that the root is abandoned for
+the process lifetime with one INFO line naming the root id. Roots in
+`excluded_channels` are never fetched. No reconcile source means no hydration. Reconcile does not reconstruct historic edit/delete events.
+
+Owner signals default to posts=record, reactions_done=[white_check_mark,
+heavy_check_mark], reactions_ack=[eyes], under `owner_signals`. See ROUTING.md.
+Service gap health uses `service.gap_alert_seconds: 300`; see SERVICE.md.

@@ -60,13 +60,13 @@ class LedgerStore:
                     db.execute(statement)
                     statement = ""
             versions = [r[0] for r in db.execute("SELECT version FROM schema_version")]
-            if any(version != 1 for version in versions):
+            if any(version not in (1, 2) for version in versions):
                 raise RuntimeError("Unsupported ledger schema version")
             columns = {r[1] for r in db.execute("PRAGMA table_info(messages)")}
             additions = {"event_id": "TEXT", "channel_type": "TEXT",
                          "has_files": "INTEGER NOT NULL DEFAULT 0", "edited_at": "TEXT",
                          "note": "TEXT", "suggestion_reason": "TEXT",
-                         "attention": "TEXT", "is_bot": "INTEGER NOT NULL DEFAULT 0"}
+                         "attention": "TEXT", "is_bot": "INTEGER NOT NULL DEFAULT 0", "origin": "TEXT"}
             for name, declaration in additions.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE messages ADD COLUMN {name} {declaration}")
@@ -75,7 +75,9 @@ class LedgerStore:
                 if name not in seen_columns:
                     db.execute(f"ALTER TABLE events_seen ADD COLUMN {name} TEXT")
             if not versions:
-                db.execute("INSERT INTO schema_version(version) VALUES (1)")
+                db.execute("INSERT INTO schema_version(version) VALUES (2)")
+            elif versions == [1]:
+                db.execute("UPDATE schema_version SET version=2 WHERE version=1")
 
     def close(self):
         with self._lock:
@@ -121,13 +123,13 @@ class LedgerStore:
                 else:
                     db.execute("""INSERT INTO messages
                         (id, source, channel, ts, thread_ts, author, is_thread_reply,
-                         received_at, state, body, event_id, channel_type, has_files, is_bot)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?)""",
+                         received_at, state, body, event_id, channel_type, has_files, is_bot, origin)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)""",
                                (mid, source, channel, ts, event.get("thread_ts"), event.get("user"),
                                 bool(event.get("is_thread_reply")), received,
                                 event.get("text") if self.store_body else None,
                                 event_id, event.get("channel_type"), bool(event.get("has_files")),
-                                bool(event.get("is_bot") or event.get("bot_id") or not event.get("user"))))
+                                bool(event.get("is_bot") or event.get("bot_id") or not event.get("user")), event.get("origin")))
                     created = True
             elif kind in ("reaction_added", "reaction_removed") and mid:
                 user, reaction = event.get("user"), event.get("reaction")
@@ -252,8 +254,20 @@ class LedgerStore:
     def list_channels(self, source="slack"):
         return [row["channel"] for row in self._rows("""SELECT channel FROM events_seen WHERE source=? AND channel IS NOT NULL
             UNION SELECT channel FROM messages WHERE source=?
-            UNION SELECT channel FROM cursors WHERE source=? ORDER BY channel""", (source,) * 3)]
+            UNION SELECT channel FROM cursors WHERE source=?
+            UNION SELECT channel FROM bindings WHERE source=? ORDER BY channel""", (source,) * 4)]
 
     def list_reactions(self, message_id):
         return self._rows("SELECT * FROM reactions WHERE message_id=? ORDER BY user, reaction",
                           (message_id,))
+
+    def record_gap(self, source, detected_at, last_event_at=None, resumed_at=None, note=None):
+        with self._transaction() as db:
+            return db.execute("INSERT INTO ingest_gaps "
+                              "(source, detected_at, last_event_at, resumed_at, note) VALUES (?, ?, ?, ?, ?)",
+                              (source, detected_at, last_event_at, resumed_at, note)).lastrowid
+
+    def complete_gaps(self, at):
+        with self._transaction() as db:
+            db.execute("UPDATE ingest_gaps SET catchup_at=? WHERE catchup_at IS NULL "
+                       "AND resumed_at IS NOT NULL AND resumed_at<=?", (at, at))

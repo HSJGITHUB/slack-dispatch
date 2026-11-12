@@ -17,7 +17,8 @@ python -B -m slack_dispatch.service --config dummy-config.yaml --once --dry-run
 load config -> acquire state/service.lock -> configure logging
   -> open/migrate ledger -> register configured lanes
   -> build suggester, adapters, wake engine, pipeline, timers and sources
-  -> start sources (reconcile performs its startup catch-up)
+  -> publish heartbeat immediately
+  -> start sources (reconcile starts its first catch-up on its worker thread)
   -> publish heartbeat
   -> repeat every second:
        inspect stop.flag
@@ -92,7 +93,7 @@ configured pause settings are applied on startup.
 ## Once, dry run and exit codes
 
 --once, or service.once=true, starts enabled reconcile sources only. Each runs
-one synchronous catch-up pass. A service-only subclass closes its interval gate
+one worker-thread catch-up pass, waiting for completion. A service-only subclass closes its interval gate
 after that pass, so the inherited interval thread performs no second poll.
 The service performs one timer sweep and a due flush before exiting. There is
 no local event-inbox format in the source API: "pending" means history after the
@@ -140,8 +141,8 @@ timer_events identifies the originating timer.
 
 The ledger adds timer_events and human_notices through idempotent v1 migration.
 The service also creates service_deliveries through the existing store transaction
-lock. The ledger schema version remains 1, including the attention and is_bot
-column additions. Timer receipts are per item, threshold and adapter configuration
+lock. P7A upgrades the ledger to schema version 2, preserving attention and
+is_bot while adding origin and ingest_gaps. Timer receipts are per item, threshold and adapter configuration
 position. Keep adapter order stable for receipt identity. An adapter failure is
 retried on the next sweep without repeating successful adapters. Session notices
 blocked by wake.off, pause or an absent claim do not consume receipts.
@@ -204,3 +205,36 @@ in memory for that source lifetime and unioned with known ledger channels.
 Excluded channels are removed before any history fetch, including known channels.
 Failed discovery is retried on the next pass and does not prevent known-channel
 scans. No join, invite, message send, or other write API is introduced.
+
+## P7A coverage
+
+`service.gap_alert_seconds` defaults to 300 seconds. Socket transitions enqueue
+metadata only; the service loop records disconnect gaps and wakes the reconcile
+worker on reconnect. Startup records a gap and each reconcile source starts an
+immediate worker-thread pass. The resident loop does not wait for it: heartbeat,
+stop flag, flush and timers run during the first pass. Only --once waits for the
+pass to finish. A heartbeat is written right after startup, before sources
+start. A source without a
+reconcile peer still reports connectivity health, but cannot fill the gap.
+
+Service heartbeat adds started_at, last_event_at, last_catchup_at and process-local
+gaps. last_event_at changes only for events of origin socket, so backfill cannot
+mask a live intake gap. Standalone writer calls without started_at retain their original key set.
+Counters add duplicates, prehandled and hydrated. Disconnection beyond the
+threshold makes ok=false and status=degraded until reconnection. Existing
+failure counters remain cumulative and may independently keep ok=false.
+Only a successful full catch-up marks resumed gap rows with catchup_at.
+
+INFO logs include service version/config basename/pid at start, socket
+transitions, one record per gap, channel failures (exception class and validated
+Slack error code), reconcile counts and stop. Pipeline failures include the
+operation and class. Logs never include source text or exception messages.
+Existing daily log rotation and redaction are retained.
+
+Optional reconcile source keys: replies=true, replies_lookback_days=lookback_days,
+replies_overlap_seconds=120, bound_threads=true, bound_threads_max_age_days=14. The optional owner_signals map
+has posts=record (or route), reactions_done=[white_check_mark, heavy_check_mark]
+and reactions_ack=[eyes]. The owner is always_human.owner_user. Root hydration
+uses the first configured reconcile source and no source when none is configured.
+Backfill (origin reconcile) reaches file inboxes only and never wakes a session;
+see INGEST.md.

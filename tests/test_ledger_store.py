@@ -24,7 +24,7 @@ class LedgerTests(unittest.TestCase):
 
     def test_migrate_twice_and_foreign_keys(self):
         self.store.migrate()
-        self.assertEqual(self.store._rows("SELECT version FROM schema_version"), [{"version": 1}])
+        self.assertEqual(self.store._rows("SELECT version FROM schema_version"), [{"version": 2}])
         self.assertEqual(self.store._rows("PRAGMA foreign_keys")[0]["foreign_keys"], 1)
         self.assertIn("body", {r["name"] for r in self.store._rows("PRAGMA table_info(messages)")})
 
@@ -36,7 +36,7 @@ class LedgerTests(unittest.TestCase):
         self.store.migrate()
         result = self.store.record_event(event())
         self.assertTrue(result.created)
-        self.store._db.execute("UPDATE schema_version SET version=2")
+        self.store._db.execute("UPDATE schema_version SET version=3")
         with self.assertRaisesRegex(RuntimeError, "Unsupported"):
             self.store.migrate()
         self.assertFalse(self.store._db.in_transaction)

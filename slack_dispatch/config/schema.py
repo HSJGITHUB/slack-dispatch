@@ -59,6 +59,11 @@ class SourceConfig:
     store_body: bool = False
     discover_channels: bool = False
     excluded_channels: tuple[str, ...] = ()
+    replies: bool = True
+    replies_lookback_days: int | None = None
+    replies_overlap_seconds: int = 120
+    bound_threads: bool = True
+    bound_threads_max_age_days: int = 14
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,7 @@ class Service:
     log_level: str = "INFO"
     once: bool = False
     followup_window_seconds: int = 600
+    gap_alert_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -110,6 +116,13 @@ class HumanQueue:
 class BotMessages:
     policy: str = "route_or_exclude"
     known_bot_users: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class OwnerSignals:
+    posts: str = "record"
+    reactions_done: tuple[str, ...] = ("white_check_mark", "heavy_check_mark")
+    reactions_ack: tuple[str, ...] = ("eyes",)
 
 
 @dataclass(frozen=True)
@@ -132,3 +145,4 @@ class Config:
     service: Service = field(default_factory=Service)
     human_queue: HumanQueue = field(default_factory=HumanQueue)
     bot_messages: BotMessages = field(default_factory=BotMessages)
+    owner_signals: OwnerSignals = field(default_factory=OwnerSignals)

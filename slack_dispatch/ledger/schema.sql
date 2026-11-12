@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS messages (
     suggestion_reason TEXT,
     attention TEXT,
     is_bot INTEGER NOT NULL DEFAULT 0,
+    origin TEXT,
     UNIQUE (source, channel, ts)
 );
 CREATE TABLE IF NOT EXISTS bindings (
@@ -88,4 +89,14 @@ CREATE TABLE IF NOT EXISTS timer_events (
     adapter INTEGER NOT NULL,
     sent_at REAL NOT NULL,
     PRIMARY KEY (message_id, timer, adapter)
+);
+
+CREATE TABLE IF NOT EXISTS ingest_gaps (
+    id INTEGER PRIMARY KEY,
+    source TEXT,
+    detected_at TEXT,
+    last_event_at TEXT,
+    resumed_at TEXT,
+    catchup_at TEXT,
+    note TEXT
 );

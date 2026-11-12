@@ -1,9 +1,11 @@
 """Service orchestration with transient routing text and metadata-only delivery."""
 from dataclasses import dataclass
+from decimal import Decimal
 from collections import Counter
 import logging
 from pathlib import Path
 import threading
+import sys
 
 from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import notify_human
@@ -95,9 +97,9 @@ class HumanQueueDelivery:
             self.delivered += len({row["message_id"] for row in rows
                                    if row["kind"] not in ("unassigned", "reassign")})
             return len(rows)
-        except Exception:
+        except Exception as error:
             self.failures += 1
-            LOG.error("Human queue notification failed")
+            LOG.error("Pipeline exception operation=human_notify class=%s", type(error).__name__)
             return 0
 
     def flush(self, now, *, immediate_only=False):
@@ -141,6 +143,7 @@ class HandleResult:
     duplicate: bool = False
     state: str | None = None
     lane: str | None = None
+    backfill: bool = False
 
 
 class Pipeline:
@@ -149,7 +152,10 @@ class Pipeline:
         self.notifiers = list(notifiers)
         self.wake_engine, self.clock = wake_engine, clock
         self.lock = threading.RLock()
-        self.counters = dict(events=0, routed=0, human_pending=0, delivered=0, failures=0)
+        self.counters = dict(events=0, routed=0, human_pending=0, delivered=0, failures=0,
+                             duplicates=0, prehandled=0, hydrated=0)
+        self.reconcile_source = None
+        self.last_event_at = None
         self._missing_human_logged = False
         self._retry = {}
         self._export_pending = False
@@ -164,7 +170,9 @@ class Pipeline:
     def failure(self, operation):
         with self.lock:
             self.counters["failures"] += 1
-            LOG.error("Service operation failed: %s", operation)
+            error = sys.exc_info()[1]
+            LOG.error("Pipeline exception operation=%s class=%s", operation,
+                      type(error).__name__ if error else "Unknown")
 
     def snapshot(self):
         with self.lock:
@@ -225,6 +233,7 @@ class Pipeline:
             self.counters["delivered"] += len(ids)
             if purpose == "lane":
                 self._record_delivery(lane, ids)
+        return sent
 
     def _export_queue(self):
         self._export_pending = True
@@ -240,6 +249,9 @@ class Pipeline:
     def handle_event(self, event) -> HandleResult:
         with self.lock:
             self.counters["events"] += 1
+            if event.get("origin") == "socket":
+                # Gap detection measures live intake only; backfill must not mask a gap.
+                self.last_event_at = event.get("received_at")
             try:
                 return self._handle(event)
             except Exception:
@@ -252,17 +264,45 @@ class Pipeline:
                      or not event.get("user") or event.get("user") in self.config.bot_messages.known_bot_users))
         recorded = self.store.record_event(event)
         mid = recorded.message_id
+        if recorded.duplicate:
+            self.counters["duplicates"] += 1
+        if not recorded.duplicate and recorded.kind == "reaction_added":
+            self._owner_reaction(event, mid)
         if recorded.duplicate or recorded.kind != "message":
             return HandleResult(mid, recorded.kind, recorded.duplicate)
         message = self.store.get_message(mid) if mid else None
         if message is None or event.get("subtype") == "message_deleted":
             return HandleResult(mid, recorded.kind)
+        self._hydrate(event)
+        owner = self.config.always_human.owner_user
+        note = None
+        if owner and event.get("user") == owner and self.config.owner_signals.posts == "record":
+            note = "owner_post"
+        elif owner and event.get("origin") == "reconcile":
+            for reaction in event.get("reactions", []) or []:
+                if (reaction.get("name") in self.config.owner_signals.reactions_done
+                        and owner in reaction.get("users", [])):
+                    note = "prehandled:reaction:" + reaction["name"]
+                    break
+            if note is None:
+                later_owner = any(Decimal(row["ts"]) > Decimal(event["ts"]) for row in self.store._rows(
+                    "SELECT ts FROM messages WHERE source=? AND channel=? AND author=? AND thread_ts=?",
+                    (event["source"], event["channel"], owner, event.get("thread_ts") or event["ts"])))
+                if (event.get("prehandled_by") or "").startswith("owner_reply:") or later_owner:
+                    note = "prehandled:owner_reply"
+        if note:
+            self.store.set_route(mid, message.get("lane"), "owner_post" if note == "owner_post" else "prehandled", state="done")
+            self.store.set_state(mid, "done", note=note)
+            if note.startswith("prehandled:"):
+                self.counters["prehandled"] += 1
+            return HandleResult(mid, recorded.kind, state="done", lane=message.get("lane"))
         if "text" in event:
             message["text"] = event["text"]
         message["is_bot"] = event["is_bot"]
         decision = route(message, self.config, self.store.lookup_binding)
         outcome = apply_decision(self.store, mid, decision, self.suggester)
         self.counters["routed"] += 1
+        backfill = False
         if outcome.state == "assigned":
             lane = outcome.lane
             # The router binds replies only. Bind new roots for later inheritance.
@@ -275,20 +315,62 @@ class Pipeline:
                 self.store.mark_followup(mid)
                 message["followup"] = True
             # Durable inboxes must survive disabled, deferred and batched wakes.
-            self._send("lane", lane, [mid], inbox=True)
-            wake = self.wake_engine.offer(lane, message, message.get("author"))
-            if isinstance(wake, Deliver):
-                self._send("lane", lane, [mid], inbox=False)
-            if getattr(wake, "notice", None) is not None:
-                self._human_notice(mid, kind="storm")
-                self.wake_engine.notices.clear()
+            inboxed = self._send("lane", lane, [mid], inbox=True)
+            if event.get("origin") == "reconcile":
+                # Backfill fills durable inboxes only: no session wake, no storm accounting.
+                backfill = inboxed
+            else:
+                wake = self.wake_engine.offer(lane, message, message.get("author"))
+                if isinstance(wake, Deliver):
+                    self._send("lane", lane, [mid], inbox=False)
+                if getattr(wake, "notice", None) is not None:
+                    self._human_notice(mid, kind="storm")
+                    self.wake_engine.notices.clear()
         elif outcome.state == "human_pending":
             self.counters["human_pending"] += 1
             self._export_queue()
             self._human_notice(mid, attention=decision.attention)
         if outcome.state == "assigned" and decision.attention:
             self._human_notice(mid, attention=decision.attention)
-        return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane)
+        return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane, backfill=backfill)
+
+    def _owner_reaction(self, event, mid):
+        owner = self.config.always_human.owner_user
+        row = self.store.get_message(mid) if mid else None
+        if not owner or event.get("user") != owner or not row:
+            return
+        emoji, state = event.get("reaction"), row["state"]
+        if emoji in self.config.owner_signals.reactions_done and state in ("new", "assigned", "acked", "human_pending"):
+            self.store.set_state(mid, "done", note="owner_reaction:" + emoji)
+        elif emoji in self.config.owner_signals.reactions_ack and state == "assigned":
+            self.store.set_state(mid, "acked", note="owner_reaction:" + emoji)
+
+    def record_context(self, event):
+        with self.lock:
+            result = self.store.record_event(event)
+            if result.created:
+                self.store.set_route(result.message_id, None, "context:root", state="done")
+                self.store.set_state(result.message_id, "done", note="context")
+                self.counters["hydrated"] += 1
+            return result
+
+    def _hydrate(self, event):
+        source = self.reconcile_source
+        thread = event.get("thread_ts")
+        if source is None or not thread or thread == event.get("ts"):
+            return
+        if event["channel"] in self.config.excluded_channels:
+            return
+        if self.store.get_message(f"slack:{event['channel']}:{thread}"):
+            return
+        if (event["channel"], thread) in source.pending_roots:
+            return
+        try:
+            root = source.hydrate_root(event["channel"], thread)
+            if root:
+                self.record_context(root)
+        except Exception:
+            self.failure("hydrate_root")
 
     def _human_notice(self, mid, kind="message", attention=None):
         row = self.store.get_message(mid)

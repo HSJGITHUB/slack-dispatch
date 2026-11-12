@@ -18,6 +18,7 @@ def build_sources(config, on_event, store) -> list[Source]:
         elif entry.kind == "slack_reconcile":
             sources.append(SlackReconcileSource(entry, on_event, entry.env_file,
                                                  entry.user_token_key, store))
+            sources[-1].owner_user = config.always_human.owner_user
         else:
             raise ValueError("Unsupported source kind")
     return sources

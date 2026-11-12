@@ -72,7 +72,7 @@ invoke a suggester. See ROUTING.md for the full precedence table.
 
 ## 5. Inbox record (per-lane JSONL, `inbox/<lane>.jsonl`)
 
-`{"id": message_id, "delivered_at": iso, "channel": str, "ts": str, "thread_ts": str | None, "followup": bool, "kind": "new" | "followup" | "reroute"}`. No body. Writers hold `inbox/<lane>.lock` while appending.
+`{"id": message_id, "delivered_at": iso, "channel": str, "ts": str, "thread_ts": str | None, "followup": bool, "kind": "new" | "followup" | "reroute" | "backfill"}`. No body. Writers hold `inbox/<lane>.lock` while appending.
 
 ## 6. Notifier contract (package `slack_dispatch.notify`)
 
@@ -97,8 +97,7 @@ Loader changes must keep the existing sample config loading and add the new keys
 - The service source wrappers preserve raw bot evidence before legacy
   normalization discards bot_id. Every Event they deliver has boolean is_bot.
   Pipeline callers may supply is_bot or bot_id; missing users and configured bot
-  users are also recognized. The standalone normalize_slack_event function is
-  unchanged because its file is outside this packet's allowlist.
+  users are also recognized. P7A also preserves bot_id in shared normalization.
 - Ledger v1 migration idempotently adds messages.attention (nullable TEXT),
   messages.is_bot, human_notices, and timer_events. Existing v1 data and the
   schema_version value remain intact. set_attention(id, value) accepts None,
@@ -114,3 +113,31 @@ Loader changes must keep the existing sample config loading and add the new keys
   Custom adapters implementing only notify receive the capped ids list.
 - Global wake controls apply to lane wakes only. Human queue delivery retains
   adapter dry-run and session availability/pause checks.
+
+## P7A coverage
+
+Event adds optional origin (`socket`, `reconcile`, `hydrate`), prehandled_by
+(`owner_reply:<ts>`), normalized bot_id and reaction summaries (`name`, `users`).
+Body text is flattened from supported blocks when requested. Raw blocks and
+file contents are not copied into the Event. File projections keep id and, only
+when source body access is enabled, name/title. File-only text uses file names or
+titles. Hydrated context roots are done with route_reason=context:root and
+note=context. They do not count as events routed or delivered.
+
+Ledger schema version 2 idempotently upgrades version 1, preserving existing
+rows and adding nullable messages.origin (old rows stay null) and ingest_gaps:
+`id INTEGER PRIMARY KEY, source TEXT, detected_at TEXT, last_event_at TEXT,
+resumed_at TEXT, catchup_at TEXT, note TEXT`. Unknown future versions fail.
+The new cursor source is slack_replies, keyed by channel independently of slack.
+
+Inbox kind additionally accepts `backfill`. files.record derives it from
+origin=reconcile only when no explicit kind and no followup marker are present.
+FileInboxNotifier retains the origin through its existing row lookup. The read
+signature and output keys are unchanged; consumers can treat kind as opaque.
+Pipeline HandleResult adds `backfill: bool = False`, true when a reconcile
+message reached a file inbox without a wake.
+
+Owner posts under record policy have state=done, route_reason=owner_post and
+note=owner_post. Prehandled items have state=done, route_reason=prehandled and
+note=prehandled:reaction:<emoji> or prehandled:owner_reply. Neither path changes
+thread bindings, invokes a classifier or sends notifications.

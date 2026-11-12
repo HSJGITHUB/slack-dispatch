@@ -31,7 +31,7 @@ class HeartbeatWriter:
         self._last = None
 
     def write(self, *, ok=True, status="running", version="unknown", counters=None,
-              force=False):
+              force=False, started_at=None, last_event_at=None, last_catchup_at=None, gaps=0):
         now = _seconds(self.clock())
         if not math.isfinite(now):
             raise ValueError("clock must return a finite timestamp")
@@ -41,6 +41,9 @@ class HeartbeatWriter:
         payload = dict(schema=SCHEMA, ts=datetime.fromtimestamp(now, timezone.utc).astimezone().isoformat(),
                        pid=os.getpid(), ok=bool(ok), status=str(status),
                        version=str(version), counters=dict(counters or {}))
+        if started_at is not None:
+            payload.update(started_at=started_at, last_event_at=last_event_at,
+                           last_catchup_at=last_catchup_at, gaps=gaps)
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp",

@@ -245,19 +245,25 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual([event["channel"] for event in self.events], ["C0000000002"])
 
     def test_startup_failure_still_runs_periodic_pass(self):
+        import threading
+        calls = []
+        done = threading.Event()
+        def catch_up():
+            calls.append(threading.current_thread())
+            if len(calls) == 1:
+                raise RuntimeError("synthetic failure")
+            done.set()
         with patch.dict(sys.modules, sdk_modules(web_class=lambda **kwargs: object())), patch(
-                "slack_dispatch.ingest.slack_reconcile.load_token", return_value="xoxp-FAKE-example"), patch(
-                "slack_dispatch.ingest.slack_reconcile.threading.Thread") as thread, patch.object(
-                self.source, "catch_up", side_effect=[RuntimeError("synthetic failure"), None]) as catch_up:
+                "slack_dispatch.ingest.slack_reconcile.load_token", return_value="dummy"), patch.object(
+                self.source, "catch_up", side_effect=catch_up):
             self.source.start()
             try:
                 self.assertEqual(self.source.failures, 1)
-                self.assertEqual(catch_up.call_count, 1)
-                thread.return_value.start.assert_called_once_with()
-                with patch.object(self.source._stop, "wait", side_effect=[False, True]):
-                    thread.call_args.kwargs["target"]()
-                self.assertEqual(catch_up.call_count, 2)
-                self.assertEqual(self.source.failures, 1)
+                self.assertEqual(len(calls), 1)
+                self.source.request_catchup()
+                self.assertTrue(done.wait(2))
+                self.assertEqual(len(calls), 2)
+                self.assertTrue(all(thread is self.source._thread for thread in calls))
             finally:
                 self.source.stop()
 
@@ -265,6 +271,7 @@ class ReconcileTests(unittest.TestCase):
         self.store.record_event(normalize_slack_event(FIXTURES[7], STAMP))
         self.store._db.execute("DELETE FROM cursors")
         calls = self.calls
+        self.source.clock = lambda: 1000000
 
         class FakeWeb:
             def __init__(self, **kwargs):

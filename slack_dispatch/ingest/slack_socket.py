@@ -1,9 +1,13 @@
 """Socket Mode is primary intake. ACK precedes normalization and callbacks."""
 from datetime import datetime
 import threading
+import logging
+import time
 
 from .normalize import normalize_slack_event
 from .tokens import load_token, quiet_logger
+
+LOG = logging.getLogger(__name__)
 
 
 class SlackSocketSource:
@@ -18,14 +22,32 @@ class SlackSocketSource:
         self._counts_lock = threading.Lock()
         self._opened = False
         self._down = False
+        self.reconnects = 0
+        self.disconnected_at = None
+        self.on_connection = None
+        self.clock = time.time
+        self.known_bot_users = ()
 
     def _observe(self, connected):
+        transition = None
         with self._counts_lock:
             if connected:
+                if self._down:
+                    transition = "reconnected"
+                    self.reconnects += 1
+                elif not self._opened:
+                    transition = "connected"
                 self._opened, self._down = True, False
+                self.disconnected_at = None
             elif self._opened and not self._down:
                 self.disconnects += 1
                 self._down = True
+                self.disconnected_at = self.clock()
+                transition = "disconnected"
+        if transition:
+            LOG.info("Socket %s", transition)
+            if self.on_connection:
+                self.on_connection(transition, self.clock())
 
     def _receive(self, client, request):
         try:
@@ -42,8 +64,12 @@ class SlackSocketSource:
             event = normalize_slack_event(payload, datetime.now().astimezone().isoformat(),
                                           store_body=self.config.store_body)
             if event is not None:
+                event["origin"] = "socket"
+                event["is_bot"] = bool(event.get("bot_id") or not event.get("user")
+                                       or event.get("user") in self.known_bot_users)
                 self.on_event(event)
-        except Exception:
+        except Exception as error:
+            LOG.error("Socket callback class=%s operation=receive", type(error).__name__)
             # No exception text: it may contain tokens or message bodies.
             self.failures += 1
 

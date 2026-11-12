@@ -61,7 +61,7 @@ class ServiceTests(unittest.TestCase):
         heartbeat = read_heartbeat(self.root / "state/heartbeat.json")
         self.assertEqual(heartbeat["status"], "stopped")
         self.assertEqual(set(heartbeat["counters"]),
-                         {"events", "routed", "human_pending", "delivered", "failures"})
+                         {"events", "routed", "human_pending", "delivered", "failures", "duplicates", "prehandled", "hydrated"})
         self.assertEqual(heartbeat["counters"]["events"], 2)
         self.assertEqual(heartbeat["counters"]["routed"], 2)
         self.assertEqual(heartbeat["counters"]["failures"], 0)
@@ -213,6 +213,40 @@ class ServiceTests(unittest.TestCase):
                 catch.assert_called_once()
             finally:
                 source.stop()
+
+    def test_resident_heartbeat_does_not_wait_for_first_reconcile_pass(self):
+        import sys
+        import threading
+        from types import SimpleNamespace
+        from slack_dispatch.ingest import build_sources
+        self.config = replace(self.config, sources=(self.config.sources[-1],))
+        heartbeat = self.root / "state/heartbeat.json"
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        seen = {}
+        def slow_pass(source):
+            seen["heartbeat_at_entry"] = heartbeat.exists()
+            entered.set()
+            release.wait(5)
+            finished.set()
+        observations = []
+        def tick(_):
+            self.now += 1
+            observations.append((entered.wait(2), finished.is_set(), read_heartbeat(heartbeat)))
+            release.set()
+            (self.root / "state/stop.flag").touch()
+        with patch.dict(sys.modules, {"slack_sdk": SimpleNamespace(WebClient=Mock())}), \
+             patch("slack_dispatch.ingest.slack_reconcile.load_token", return_value="dummy"), \
+             patch.object(service.SlackReconcileSource, "catch_up", slow_pass):
+            self.assertEqual(self.invoke(factory=build_sources, sleep=tick), 0)
+        self.assertTrue(seen["heartbeat_at_entry"])
+        self.assertEqual(len(observations), 1)
+        was_entered, was_finished, beat = observations[0]
+        self.assertTrue(was_entered)
+        self.assertFalse(was_finished)
+        self.assertEqual((beat["status"], beat["ok"]), ("running", True))
+        self.assertTrue(finished.is_set())
+        self.assertFalse(service._ServiceReconcileSource.wait_for_first_pass)
+        self.assertTrue(service._OnceReconcileSource.wait_for_first_pass)
 
     def test_resident_all_sources_fail_exits_without_entering_loop(self):
         def factory(config, on_event, store):

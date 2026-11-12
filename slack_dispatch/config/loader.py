@@ -6,7 +6,7 @@ import yaml
 
 from .schema import (
     AlwaysHuman, BotMessages, Classifier, Config, HumanQueue, Inbox, Lane, LedgerConfig, NotifyAdapter,
-    PersonChannelRule, Service, SourceConfig, Timers, WakePolicy,
+    OwnerSignals, PersonChannelRule, Service, SourceConfig, Timers, WakePolicy,
 )
 
 
@@ -159,7 +159,13 @@ def parse_config(raw):
                                     positive(row.get("lookback_days", 7), "source.lookback_days"),
                                     ledger.store_body,
                                     boolean(row.get("discover_channels", False), "source.discover_channels"),
-                                    excluded))
+                                    excluded,
+                                    replies=boolean(row.get("replies", True), "source.replies"),
+                                    replies_lookback_days=positive(row.get("replies_lookback_days", row.get("lookback_days", 7)), "source.replies_lookback_days"),
+                                    replies_overlap_seconds=positive(row.get("replies_overlap_seconds", 120), "source.replies_overlap_seconds"),
+                                    bound_threads=boolean(row.get("bound_threads", True), "source.bound_threads"),
+                                    bound_threads_max_age_days=positive(row.get("bound_threads_max_age_days", 14),
+                                                                        "source.bound_threads_max_age_days")))
     human = mapping(data.get("always_human", {}), "always_human")
     def user_ids(key):
         values = human.get(key, [])
@@ -205,6 +211,7 @@ def parse_config(raw):
     if level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
         raise ConfigError("service.log_level is unsupported")
     service = Service(
+        gap_alert_seconds=positive(service.get("gap_alert_seconds", 300), "service.gap_alert_seconds"),
         state_dir=string(service.get("state_dir", "state"), "service.state_dir"),
         heartbeat_seconds=positive(service.get("heartbeat_seconds", 30),
                                    "service.heartbeat_seconds"),
@@ -231,11 +238,23 @@ def parse_config(raw):
     if not isinstance(known, list):
         raise ConfigError("bot_messages.known_bot_users must be a list")
     bots = BotMessages(policy, tuple(string(value, "bot_messages.known_bot_users") for value in known))
+    signals = mapping(data.get("owner_signals", {}), "owner_signals")
+    posts = signals.get("posts", "record")
+    if posts not in ("record", "route"):
+        raise ConfigError("owner_signals.posts must be record or route")
+    def reactions(key, default):
+        values = signals.get(key, default)
+        if not isinstance(values, list) or any(not isinstance(value, str) or
+                not re.fullmatch(r"[A-Za-z0-9_+\-]{1,100}", value) for value in values):
+            raise ConfigError("owner_signals reactions must be emoji name lists")
+        return tuple(values)
+    signals = OwnerSignals(posts, reactions("reactions_done", ["white_check_mark", "heavy_check_mark"]),
+                           reactions("reactions_ack", ["eyes"]))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
                   explicit_tag_pattern=pattern, inbox=inbox, service=service,
-                  human_queue=queue, bot_messages=bots)
+                  human_queue=queue, bot_messages=bots, owner_signals=signals)
 
 
 def load_config(path: str | Path) -> Config:

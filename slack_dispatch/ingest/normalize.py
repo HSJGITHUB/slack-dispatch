@@ -18,6 +18,41 @@ def mapping(value):
     return value if isinstance(value, dict) else {}
 
 
+def message_body(message):
+    """Flatten supported rich text without retaining opaque block payloads."""
+    def walk(node):
+        if not isinstance(node, dict):
+            return ""
+        kind = node.get("type")
+        if kind == "text":
+            return node.get("text") if isinstance(node.get("text"), str) else ""
+        if kind == "user":
+            return "<@" + str(node.get("user_id", "")) + ">"
+        if kind == "channel":
+            return "<#" + str(node.get("channel_id", "")) + ">"
+        if kind == "link":
+            return node.get("url") if isinstance(node.get("url"), str) else ""
+        if kind == "emoji":
+            return ":" + str(node.get("name", "")) + ":"
+        if kind in ("line_break", "newline"):
+            return "\n"
+        if kind in ("rich_text", "rich_text_list"):
+            return "\n".join(walk(child) for child in node.get("elements", []))
+        if kind in ("rich_text_section", "rich_text_quote", "rich_text_preformatted"):
+            return "".join(walk(child) for child in node.get("elements", []))
+        return ""
+
+    body = "\n".join(filter(None, (walk(block) for block in message.get("blocks", []) or [])))
+    if body:
+        return body
+    if isinstance(message.get("text"), str) and message["text"]:
+        return message["text"]
+    files = ["[file] " + str(item.get("name") or item.get("title"))
+             for item in message.get("files", []) or []
+             if isinstance(item, dict) and (item.get("name") or item.get("title"))]
+    return "\n".join(files) if files else message.get("text")
+
+
 def normalize_slack_event(envelope_payload: dict, received_at: str, *, store_body=False) -> Event | None:
     payload = mapping(envelope_payload)
     event = mapping(payload.get("event"))
@@ -53,7 +88,19 @@ def normalize_slack_event(envelope_payload: dict, received_at: str, *, store_bod
     for key in ("event_time", "retry_attempt"):
         value = payload.get(key)
         result[key] = value if type(value) is int and value >= 0 else None
+    result["bot_id"] = safe(metadata.get("bot_id"), IDENTIFIER)
+    result["reactions"] = [dict(name=item.get("name"), users=item.get("users", []))
+                           for item in metadata.get("reactions", []) or [] if isinstance(item, dict)]
+    if isinstance(metadata.get("files"), list):
+        result["files"] = []
+        for item in metadata["files"]:
+            if not isinstance(item, dict):
+                continue
+            file = {"id": safe(item.get("id"), IDENTIFIER)}
+            if store_body:
+                file.update({key: item[key] for key in ("name", "title") if isinstance(item.get(key), str)})
+            result["files"].append(file)
     if store_body and kind == "message" and subtype != "message_deleted":
-        text = metadata.get("text")
+        text = message_body(metadata)
         result["text"] = text if isinstance(text, str) else None
     return result

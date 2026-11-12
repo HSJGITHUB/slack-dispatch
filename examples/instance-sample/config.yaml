@@ -71,6 +71,11 @@ sources:
     interval_seconds: 3600
     lookback_days: 7
     discover_channels: false
+    replies: true
+    replies_lookback_days: 7
+    replies_overlap_seconds: 120
+    bound_threads: true
+    bound_threads_max_age_days: 14
 
 always_human:
   users: [U0000000091]
@@ -95,6 +100,7 @@ service:
   log_level: INFO
   once: false
   followup_window_seconds: 600
+  gap_alert_seconds: 300
 
 human_queue:
   mode: digest
@@ -103,3 +109,8 @@ human_queue:
 bot_messages:
   policy: route_or_exclude
   known_bot_users: []
+
+owner_signals:
+  posts: record
+  reactions_done: [white_check_mark, heavy_check_mark]
+  reactions_ack: [eyes]
