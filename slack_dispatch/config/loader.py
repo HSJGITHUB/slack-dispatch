@@ -5,8 +5,8 @@ import re
 import yaml
 
 from .schema import (
-    AlwaysHuman, BotMessages, Classifier, Config, HumanQueue, Inbox, Lane, LedgerConfig, NotifyAdapter,
-    OwnerSignals, PersonChannelRule, Service, SourceConfig, Timers, WakePolicy,
+    AlwaysHuman, BotMessages, Classifier, Config, Console, HumanQueue, Inbox, Lane, LedgerConfig,
+    NotifyAdapter, OwnerSignals, PersonChannelRule, Service, SourceConfig, Timers, WakePolicy,
 )
 
 
@@ -257,12 +257,43 @@ def parse_config(raw):
     people = {string(key, "people key"): string(value, "people name")
               for key, value in mapping(data.get("people", {}), "people").items()}
     zone = timezone_name(data.get("display_timezone", Config.display_timezone))
+    console = console_section(data.get("console", {}), ids)
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
                   explicit_tag_pattern=pattern, inbox=inbox, service=service,
                   human_queue=queue, bot_messages=bots, owner_signals=signals,
-                  sessions_dir=sessions_dir, people=people, display_timezone=zone)
+                  sessions_dir=sessions_dir, people=people, display_timezone=zone,
+                  console=console)
+
+
+def console_section(value, lane_ids):
+    """Optional `console` map (P10). Every key is optional; omitted keys keep defaults."""
+    data = mapping({} if value is None else value, "console")
+    host = string(data.get("host", Console.host), "console.host")
+    port = data.get("port", Console.port)
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ConfigError("console.port must be an integer from 1 to 65535")
+    base_url = data.get("base_url")
+    if base_url is not None:
+        string(base_url, "console.base_url")
+        if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", base_url):
+            raise ConfigError("console.base_url must be an http or https URL without query or fragment")
+        base_url = base_url.rstrip("/")
+    page_size = positive(data.get("page_size", Console.page_size), "console.page_size")
+    if page_size > 500:
+        raise ConfigError("console.page_size must not exceed 500")
+    hint = boolean(data.get("lane_hint_people", Console.lane_hint_people), "console.lane_hint_people")
+    direct = Console.direct_lane
+    if "direct_lane" in data:
+        # An explicit direct lane must be configured; the default is used only when it is.
+        direct = string(data["direct_lane"], "console.direct_lane")
+        if direct not in lane_ids:
+            raise ConfigError("console.direct_lane must reference a configured lane")
+    channels = {string(key, "console.channels key"): string(name, "console.channels name")
+                for key, name in mapping(data.get("channels", {}) or {}, "console.channels").items()}
+    return Console(host=host, port=port, base_url=base_url, page_size=page_size,
+                   lane_hint_people=hint, direct_lane=direct, channels=channels)
 
 
 def timezone_name(value):

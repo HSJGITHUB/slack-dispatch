@@ -5,6 +5,26 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P10 console
+- Add the optional operator console `python -m slack_dispatch.console --config PATH`
+  (FastAPI and uvicorn through the new `console` extra), bound to 127.0.0.1 by default,
+  without login, with `Cache-Control: no-store` and Host/Origin checks on every request.
+- Triage view of `human_pending` items, newest first, with body, thread root and context,
+  classifier suggestion, attention, origin, age and author lane hints; one-click and bulk
+  assign, direct, exclude (`excluded`, note `human:console`) and done, recorded with
+  `human:console` exactly where the CLI records `human:cli`.
+- Lanes view (session liveness through the session resolver, pause, today's counts, oldest
+  unacknowledged age, last delivery and reminder, inbox size) with the CLI thread view and
+  ack, done and reroute per item; read-only service view (heartbeat, reconcile passes,
+  warnings, ingest gaps, wake switch, adapter dry-run flags); ledger search.
+- New optional `console` config section (`host`, `port`, `base_url`, `page_size`,
+  `lane_hint_people`, `direct_lane`, `channels`). With `console.base_url`, human-queue
+  digests shrink to per-channel counts plus `Open: <base_url>/`, and immediate notices end
+  with `Open: <base_url>/#msg=<id>`; without it the notice text is unchanged.
+- Additive LedgerStore read helpers for the console; no schema change.
+- Windows Task Scheduler template and installer for the console
+  (`deploy/windows/task_template_console.xml`, `install_console_task.ps1`).
+
 ### P9 shadow follow-ups
 - Human-queue session adapters target `template.target` (default `operator`) with no lane
   lookup, claim, session resolution or pause; the human_queue pseudo-lane is no longer needed.

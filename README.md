@@ -64,6 +64,14 @@ values and is not deployment configuration. Keep real configuration and
 credentials outside the repository. The installed slack-dispatch command remains
 the inbox CLI; slack-dispatch-service and python -m slack_dispatch run the service.
 
+The optional operator console (`pip install -e .[console]`) is a local web page for the
+human queue: `python -m slack_dispatch.console --config dummy-config.yaml` serves it on
+http://127.0.0.1:8811/ by default. It shows each waiting item with its body, thread
+context and classifier suggestion, assigns, excludes or completes it with one click
+through the same ledger calls as the inbox CLI, and adds lane inbox, service and search
+views. It has no login, so keep the default loopback bind. See
+[operator console](docs/CONSOLE.md).
+
 ## Design principles
 Single intake, one state per message, stable lane ownership, deterministic
 routing first, human approval for outbound messages, and identifier-only wake

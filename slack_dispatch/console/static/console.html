@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title></title>
+<link rel="stylesheet" href="/static/console.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand" data-text="title"></div>
+  <nav class="tabs" data-aria="navLabel">
+    <a href="/" data-view="queue" data-text="tabQueue"></a>
+    <a href="/lanes" data-view="lanes" data-text="tabLanes"></a>
+    <a href="/service" data-view="service" data-text="tabService"></a>
+  </nav>
+  <form class="search" id="search-form" role="search">
+    <input id="search-input" type="search" autocomplete="off" maxlength="200" data-placeholder="searchPlaceholder">
+    <button type="submit" data-text="searchButton"></button>
+  </form>
+</header>
+<div id="status" class="status" role="status" aria-live="polite"></div>
+<main>
+  <section id="view-queue" class="view" hidden></section>
+  <section id="view-lanes" class="view" hidden></section>
+  <section id="view-service" class="view" hidden></section>
+  <section id="view-search" class="view" hidden></section>
+</main>
+<script src="/static/console.js"></script>
+</body>
+</html>

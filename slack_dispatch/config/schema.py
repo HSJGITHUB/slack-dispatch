@@ -128,6 +128,20 @@ class OwnerSignals:
 
 
 @dataclass(frozen=True)
+class Console:
+    """Optional operator console settings (P10). The service reads base_url for notice links."""
+    host: str = "127.0.0.1"
+    port: int = 8811
+    base_url: str | None = None
+    page_size: int = 50
+    lane_hint_people: bool = True
+    # Lane used by the console `direct` action; the action is offered only when configured.
+    direct_lane: str = "owner-direct"
+    # Optional channel id -> display name map for console listings.
+    channels: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
     channel_defaults: dict[str, str | None]
@@ -154,3 +168,5 @@ class Config:
     people: dict[str, str] = field(default_factory=dict)
     # IANA time zone name for the inbox CLI `when` column.
     display_timezone: str = "UTC"
+    # Optional operator console section (P10).
+    console: Console = field(default_factory=Console)

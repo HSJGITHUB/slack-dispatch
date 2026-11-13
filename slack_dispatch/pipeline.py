@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import threading
 import sys
+from urllib.parse import quote
 
 from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
@@ -16,6 +17,12 @@ from slack_dispatch.router.engine import route
 
 LOG = logging.getLogger(__name__)
 HUMAN_QUEUE = "human_queue"
+
+
+def console_base_url(config):
+    """The operator console base URL without a trailing slash, or None when unset (P10)."""
+    base = getattr(getattr(config, "console", None), "base_url", None)
+    return base.rstrip("/") if isinstance(base, str) and base.strip() else None
 
 
 def adapter_entries(config, notifiers, purpose):
@@ -107,6 +114,18 @@ class HumanQueueDelivery:
                    + "; ids: " + ", ".join(ids) + ". " + "; ".join(assigned)
                    + ("; timers: " + timer_summary if timer_summary else "")
                    + "\n" + commands + ("\n" + lanes if lanes else ""))
+        base_url = console_base_url(self.config)
+        if base_url and digest:
+            # P10: with a console, digests carry per-channel counts and the console link only.
+            summary = (f"{title}: {len(messages)} item(s); channels: "
+                       + ", ".join(f"{channel}={count}" for channel, count in counts.items())
+                       + (". " + "; ".join(assigned) if assigned else "")
+                       + ("; timers: " + timer_summary if timer_summary else "")
+                       + "\nOpen: " + base_url + "/")
+        elif base_url:
+            # Immediate notices keep their text and end with a link to the message.
+            target = "#msg=" + quote(ids[0], safe=":._-") if len(ids) == 1 else ""
+            summary += "\nOpen: " + base_url + "/" + target
         metadata = dict(count=len(messages), channels=counts, ids=ids, summary=summary,
                         timer_counts=timer_counts,
                         timers=sorted({row["kind"] for row in rows

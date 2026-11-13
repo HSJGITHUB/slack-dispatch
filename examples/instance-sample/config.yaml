@@ -134,3 +134,19 @@ owner_signals:
   posts: record
   reactions_done: [white_check_mark, heavy_check_mark]
   reactions_ack: [eyes]
+
+# Optional operator console: python -m slack_dispatch.console --config PATH.
+# Every key is optional. host defaults to 127.0.0.1 (a local tool without login).
+# base_url adds an "Open:" link to human-queue notices and shortens digests to
+# per-channel counts. direct_lane names the lane behind the Direct button; when set
+# it must be a configured lane. channels maps channel ids to console display names.
+console:
+  host: 127.0.0.1
+  port: 8811
+  base_url: null
+  page_size: 50
+  lane_hint_people: true
+  direct_lane: owner
+  channels:
+    C0000000001: dummy-support
+    C0000000002: dummy-general

@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import sqlite3
 import threading
@@ -284,3 +285,67 @@ class LedgerStore:
         with self._transaction() as db:
             db.execute("UPDATE ingest_gaps SET catchup_at=? WHERE catchup_at IS NULL "
                        "AND resumed_at IS NOT NULL AND resumed_at<=?", (at, at))
+
+    # Read helpers for the operator console (P10). Reads only; no schema change.
+
+    def has_table(self, name):
+        return bool(self._rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)))
+
+    def thread_messages(self, source, channel, thread_ts, *, include_body=False):
+        """The thread root (ts == thread_ts) and its replies, oldest first by numeric ts."""
+        rows = self._rows("SELECT * FROM messages WHERE source=? AND channel=? AND (ts=? OR thread_ts=?)",
+                          (source, channel, thread_ts, thread_ts))
+        for row in rows:
+            if not include_body:
+                row.pop("body", None)
+        return sorted(rows, key=lambda row: (_numeric(row["ts"]), row["id"]))
+
+    def search_messages(self, text, *, limit=200):
+        """Rows whose id contains text, whose channel or author equals text, or whose stored
+        body contains text; newest first by numeric ts. Bodies are included for display."""
+        if type(limit) is not int or limit < 0:
+            raise ValueError("limit must be a nonnegative integer")
+        escaped = text.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        pattern = "%" + escaped + "%"
+        rows = self._rows("SELECT * FROM messages WHERE id LIKE ? ESCAPE '!' OR channel=? OR author=? "
+                          "OR (body IS NOT NULL AND body LIKE ? ESCAPE '!') "
+                          "ORDER BY CAST(ts AS REAL) DESC, id DESC LIMIT ?",
+                          (pattern, text, text, pattern, limit))
+        return sorted(rows, key=lambda row: (_numeric(row["ts"]), row["id"]), reverse=True)
+
+    def lane_activity(self, lane):
+        """State and timestamp columns of every message owned by a lane (no bodies)."""
+        return self._rows("SELECT id, state, received_at, assigned_at, ack_at, done_at "
+                          "FROM messages WHERE lane=?", (lane,))
+
+    def author_lane_counts(self, author, *, limit=100, exclude_id=None):
+        """Lane counts over the author's most recent `limit` lane-owned messages."""
+        return self._rows("SELECT lane, COUNT(*) AS count FROM (SELECT lane FROM messages "
+                          "WHERE author=? AND lane IS NOT NULL AND id IS NOT ? "
+                          "ORDER BY received_at DESC LIMIT ?) GROUP BY lane ORDER BY count DESC, lane",
+                          (author, exclude_id, limit))
+
+    def last_lane_delivery(self, lane):
+        """Latest service_deliveries time (epoch seconds) for a lane, or None without the table."""
+        if not self.has_table("service_deliveries"):
+            return None
+        rows = self._rows("SELECT MAX(delivered_at) AS at FROM service_deliveries WHERE lane=?", (lane,))
+        return rows[0]["at"] if rows else None
+
+    def last_lane_reminder(self, lane):
+        """Latest unacknowledged-timer reminder (epoch seconds) sent for a lane's messages."""
+        rows = self._rows("SELECT MAX(t.sent_at) AS at FROM timer_events t JOIN messages m "
+                          "ON m.id = t.message_id WHERE t.timer='unacknowledged' AND m.lane=?", (lane,))
+        return rows[0]["at"] if rows else None
+
+    def list_gaps(self, limit=20):
+        return self._rows("SELECT * FROM ingest_gaps ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def _numeric(ts):
+    """Numeric Slack ts for ordering; unusable values sort first."""
+    try:
+        value = Decimal(str(ts))
+        return value if value.is_finite() else Decimal("-Infinity")
+    except (InvalidOperation, ValueError):
+        return Decimal("-Infinity")
