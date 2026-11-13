@@ -7,6 +7,21 @@ const UI = Object.freeze({
   tabQueue: "Triage",
   tabLanes: "Lanes",
   tabService: "Service",
+  tabProposals: "Scope",
+  proposalsTitle: (count, min) => count + " scope proposal(s); suggested after " + min + " consistent event(s)",
+  proposalsEmpty: "No open or suggested scope proposals.",
+  confirm: "Confirm",
+  reject: "Reject",
+  defer: "Defer",
+  conflict: "conflict",
+  effective: "in effect",
+  imported: "imported",
+  current: (lane, source) => lane + " (" + source + ")",
+  proposalDone: (status) => "Proposal " + status,
+  learnedTitle: "Learned scope",
+  learnedEmpty: "No confirmed scope overrides in the ledger.",
+  exportButton: "Export YAML",
+  exportHint: "Merge into the instance config; the ledger override is already in effect.",
   searchPlaceholder: "Search id, channel, author or text",
   searchButton: "Search",
   loading: "Loading...",
@@ -104,13 +119,16 @@ const UI = Object.freeze({
     purpose: "Purpose", dryRun: "Dry run", at: "At", counts: "Counts", level: "Level",
     logger: "Logger", message: "Message", source: "Source", detected: "Detected",
     lastEvent: "Last event", resumed: "Resumed", catchup: "Caught up", key: "Field", value: "Value",
+    scopeKey: "Key", name: "Name", evidence: "Evidence", firstSeen: "First seen", lastSeen: "Last seen",
+    status: "Status", lanes: "Lanes", current: "Current default", actions: "Actions", by: "By",
+    inConfig: "In config",
   },
   yes: "yes",
   no: "no",
   units: { s: "s", m: "m", h: "h", d: "d", bytes: "B", kib: "KiB", mib: "MiB" },
 });
 
-const VIEWS = { "/": "queue", "/lanes": "lanes", "/service": "service" };
+const VIEWS = { "/": "queue", "/lanes": "lanes", "/service": "service", "/proposals": "proposals" };
 const state = {
   config: null,
   view: "queue",
@@ -240,6 +258,7 @@ function refresh() {
   if (state.view === "queue") return loadQueue();
   if (state.view === "lanes") return state.lane ? loadLaneInbox() : loadLanes();
   if (state.view === "service") return loadService();
+  if (state.view === "proposals") return loadProposals();
   return null;
 }
 
@@ -669,6 +688,80 @@ async function loadService() {
       ? table([c.id, c.source, c.detected, c.lastEvent, c.resumed, c.catchup, c.note], data.gaps.map((row) =>
         [row.id, row.source, row.detected_at, row.last_event_at, row.resumed_at, row.catchup_at, row.note]))
       : el("div", { className: "muted", text: UI.noGaps })));
+}
+
+// ---------- scope proposals (P13) ----------
+
+async function loadProposals() {
+  let data;
+  try {
+    data = await api("/api/proposals");
+  } catch (error) {
+    status(error.message, true);
+    return;
+  }
+  const c = UI.columns;
+  const section = clear(document.getElementById("view-proposals"));
+  section.append(el("div", { className: "toolbar" },
+    el("strong", { text: UI.proposalsTitle(data.proposals.length, data.min_evidence) }),
+    el("span", { className: "muted small", text: UI.refreshed(nowText()) }),
+    el("span", { className: "spacer" }),
+    el("button", { text: UI.refresh, onclick: () => loadProposals() })));
+  const list = el("article", { className: "card" });
+  if (!data.proposals.length) {
+    list.append(el("div", { className: "muted", text: UI.proposalsEmpty }));
+  } else {
+    list.append(table([c.kind, c.scopeKey, c.name, c.lane, c.evidence, c.status, c.lanes, c.current,
+      c.firstSeen, c.lastSeen, c.actions], data.proposals.map((row) => [
+      row.kind, el("span", { className: "mono", text: row.key }), row.name, row.lane, row.evidence_count,
+      el("span", {}, row.status,
+        row.conflict ? el("span", { className: "badge bad", text: UI.conflict }) : null,
+        row.effective ? el("span", { className: "badge ok", text: UI.effective }) : null,
+        row.imported ? el("span", { className: "badge", text: UI.imported }) : null),
+      row.lanes.map((item) => item.lane + " " + item.evidence_count).join(", "),
+      row.current ? UI.current(row.current.lane === null ? UI.none : row.current.lane, row.current.source) : UI.none,
+      row.first_seen, row.last_seen,
+      el("span", {}, ["confirm", "reject", "defer"].map((action) =>
+        el("button", { text: UI[action], onclick: () => proposalAction(action, row) })))])));
+  }
+  section.append(list);
+  const learned = el("article", { className: "card" }, el("h2", { text: UI.learnedTitle }));
+  if (!data.learned.length) {
+    learned.append(el("div", { className: "muted", text: UI.learnedEmpty }));
+  } else {
+    learned.append(table([c.kind, c.scopeKey, c.name, c.lane, c.by, c.at, c.inConfig], data.learned.map((row) =>
+      [row.kind, el("span", { className: "mono", text: row.key }), row.name, row.lane, row.confirmed_by,
+        row.confirmed_at, yesNo(row.in_config)])));
+  }
+  const output = el("pre", { className: "mono", hidden: true });
+  learned.append(el("div", { className: "toolbar" },
+    el("button", { text: UI.exportButton, onclick: () => exportScope(output) }),
+    el("span", { className: "muted small", text: UI.exportHint })), output);
+  section.append(learned);
+}
+
+async function proposalAction(action, row) {
+  let data;
+  try {
+    data = await api("/api/proposals/actions", { action, kind: row.kind, key: row.key, lane: row.lane });
+  } catch (error) {
+    status(error.message, true);
+    return;
+  }
+  status(UI.proposalDone(data.status));
+  loadProposals();
+}
+
+async function exportScope(output) {
+  let data;
+  try {
+    data = await api("/api/proposals/export");
+  } catch (error) {
+    status(error.message, true);
+    return;
+  }
+  output.textContent = data.yaml;
+  output.hidden = false;
 }
 
 // ---------- search ----------

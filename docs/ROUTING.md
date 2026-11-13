@@ -10,11 +10,12 @@ mutate the message, call a classifier, or write to the ledger.
 | 2 | Bot with route_or_exclude | Channel/DM default only, otherwise excluded:bot |
 | 3 | Protected author or configured exact mention | Set attention, continue routing |
 | 4 | Existing reply thread binding | Assign inherited lane |
-| 5 | First recognized explicit tag | Assign tagged lane |
-| 6 | Non-null channel or DM default | Assign default lane |
-| 7 | First person-channel rule | Assign rule lane |
-| 8 | No lane with attention | Human pending, no classifier |
-| 9 | No lane without attention | Human pending, optional classifier suggestion |
+| 5 | Confirmed scope claim in the ledger (P13 ScopeClaim) | Assign claimed lane |
+| 6 | First recognized explicit tag | Assign tagged lane |
+| 7 | Non-null channel or DM default | Assign default lane |
+| 8 | First person-channel rule | Assign rule lane |
+| 9 | No lane with attention | Human pending, no classifier |
+| 10 | No lane without attention | Human pending, optional classifier suggestion |
 
 The optional bot policy route_all uses the complete normal routing path, including
 human review and the optional classifier. The default route_or_exclude never
@@ -172,3 +173,32 @@ assigned row as acked for reactions_ack (default eyes). The note is
 owner_reaction:<emoji>. Removed reactions and other actors do not change state;
 reaction records remain available. Done matching takes precedence over ack if
 an emoji appears in both lists.
+
+## P13 ScopeClaim
+
+`ScopeClaim` runs after `ThreadInherit` and before `ExplicitTag`. It routes only on
+claims in the ledger table `scope_claims` with status `confirmed` and no `removed_at`
+(the ledger-backed overrides written by the console `confirm` button or by `scope:auto`).
+Proposals (`scope_proposals`) never route.
+
+- The conversation id is looked up as a `dm` and as a `channel` claim (dm first in a
+  direct conversation: channel type `im` or `mpim`, or a `D` id).
+- A `person` claim matches the author only in a direct conversation; it never overrides
+  routing in a shared channel.
+- Claims naming a lane that is not configured are ignored.
+- The reason is `scope:auto` for a claim applied automatically by `scope add`, else
+  `scope_claim`; the decision rule is `scope_claim` in both cases.
+- Excluded channels stay excluded. For bots under `route_or_exclude`, confirmed channel
+  and dm claims act like channel defaults (checked before the config defaults).
+- A confirmed claim wins over the config `channel_defaults` and `dm_defaults`. After
+  pasting an exported fragment into the config the claim can stay; `scope remove` drops
+  it when the config should be the only source again.
+
+`route(message, config, lookup_binding, lookup_scope=None)`: without `lookup_scope` the
+engine uses `lookup_scope_claim` of the store behind a bound `store.lookup_binding`, so
+the pipeline call is unchanged. Plain callables and test fakes have no such store, so
+ScopeClaim is inactive for them.
+
+`assign` and `reroute` (CLI, console and card decisions) point the message's thread
+binding (thread_ts, else ts) at the new lane, overriding an earlier binding, so later
+replies follow the item (first-day defect, 2026-11-13).

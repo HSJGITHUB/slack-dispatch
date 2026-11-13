@@ -17,13 +17,14 @@ from pydantic import BaseModel, Field
 
 from slack_dispatch import __version__
 from slack_dispatch.console import actions, queries
+from slack_dispatch.ledger.store import ProposalStateError
 from slack_dispatch.notify.session_resolve import SessionResolver
 
 LOG = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
 POLL_SECONDS = 20
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
-PAGES = ("/", "/lanes", "/service")
+PAGES = ("/", "/lanes", "/service", "/proposals")
 
 
 class QueueActionRequest(BaseModel):
@@ -31,6 +32,14 @@ class QueueActionRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=actions.MAX_IDS)
     lane: str | None = Field(default=None, max_length=100)
     note: str | None = Field(default=None, max_length=2000)
+
+
+class ProposalActionRequest(BaseModel):
+    """P13 proposal decision: confirm, reject or defer one (kind, key, lane) proposal."""
+    action: Literal["confirm", "reject", "defer"]
+    kind: Literal["channel", "dm", "person"]
+    key: str = Field(min_length=1, max_length=100)
+    lane: str = Field(min_length=1, max_length=100)
 
 
 class LaneActionRequest(BaseModel):
@@ -118,6 +127,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
     root = queries.inbox_root(config)
     resolver = resolver or SessionResolver(config.sessions_dir)
     lanes = queries.lane_ids(config)
+    threshold = config.scope_learning.min_evidence
     app.state.config, app.state.store, app.state.view = config, store, view
 
     def checked_lane(lane, *, registered=True):
@@ -167,7 +177,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
             checked_lane(lane)
         note = (request.note or "").strip() or None
         results = actions.apply(store, root, request.action, request.ids, lane=lane, note=note,
-                                guard=actions.queue_guard)
+                                guard=actions.queue_guard, min_evidence=threshold)
         return summary(results, lane)
 
     @app.get("/api/lanes")
@@ -189,7 +199,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
             target = checked_lane(request.lane)
         note = (request.note or "").strip() or None
         results = actions.apply(store, root, request.action, request.ids, lane=target, note=note,
-                                guard=actions.lane_guard(lane))
+                                guard=actions.lane_guard(lane), min_evidence=threshold)
         return summary(results, target)
 
     @app.get("/api/service")
@@ -202,6 +212,28 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
         if len(query) < 2:
             raise HTTPException(400, "Query needs at least 2 characters")
         return queries.search(store, view, query)
+
+    @app.get("/api/proposals")
+    def proposal_list():
+        return queries.proposals(store, config, view)
+
+    @app.post("/api/proposals/actions")
+    def proposal_action(request: ProposalActionRequest):
+        if request.action == "confirm":
+            # A confirmed claim becomes routing input, so its lane must exist everywhere.
+            checked_lane(request.lane)
+        try:
+            row = store.decide_scope_proposal(request.kind, request.key, request.lane, request.action,
+                                              by="console", min_evidence=threshold)
+        except KeyError:
+            raise HTTPException(404, "Proposal not found") from None
+        except ProposalStateError as error:
+            raise HTTPException(409, "Proposal is " + str(error)) from None
+        return {"kind": row["kind"], "key": row["key"], "lane": row["lane"], "status": row["status"]}
+
+    @app.get("/api/proposals/export")
+    def proposal_export():
+        return {"yaml": queries.export_yaml(store, config, view)}
 
     app.add_middleware(ConsoleMiddleware, hosts=allowed_hosts(config, host))
     return app

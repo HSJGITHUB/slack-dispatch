@@ -100,3 +100,44 @@ CREATE TABLE IF NOT EXISTS ingest_gaps (
     catchup_at TEXT,
     note TEXT
 );
+
+-- P13: lane scope claims, learned scope proposals and recorded sends (additive).
+-- Claims with status `confirmed` and no removed_at are the ledger-backed routing overrides.
+CREATE TABLE IF NOT EXISTS scope_claims (
+    id INTEGER PRIMARY KEY,
+    lane TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('channel', 'dm', 'person', 'thread')),
+    key TEXT NOT NULL,
+    note TEXT,
+    claimed_at TEXT NOT NULL,
+    claimed_by TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'claimed' CHECK (status IN ('claimed', 'confirmed')),
+    confirmed_at TEXT,
+    confirmed_by TEXT,
+    removed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS scope_claims_key ON scope_claims (kind, key);
+CREATE TABLE IF NOT EXISTS scope_proposals (
+    kind TEXT NOT NULL CHECK (kind IN ('channel', 'dm', 'person')),
+    key TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'suggested', 'confirmed', 'rejected', 'deferred', 'superseded')),
+    conflict INTEGER NOT NULL DEFAULT 0,
+    last_evidence TEXT,
+    imported INTEGER NOT NULL DEFAULT 0,
+    decided_at TEXT,
+    PRIMARY KEY (kind, key, lane)
+);
+CREATE TABLE IF NOT EXISTS sends (
+    channel TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    thread_ts TEXT,
+    lane TEXT NOT NULL,
+    kind TEXT,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (channel, ts)
+);

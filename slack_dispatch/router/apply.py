@@ -1,7 +1,38 @@
 """Apply decisions exclusively through the ledger contract."""
 from dataclasses import dataclass
+import logging
 
-from .rules import is_reply
+from .rules import is_dm, is_reply
+
+LOG = logging.getLogger(__name__)
+DEFAULT_MIN_EVIDENCE = 2
+
+
+def scope_key(message):
+    """The (kind, key) a routing event is evidence for: dm or channel, by conversation."""
+    channel = message.get("channel")
+    if not channel:
+        return None
+    return ("dm" if is_dm(message) else "channel"), channel
+
+
+def record_scope_proposal(store, message, lane, source, *, min_evidence=None):
+    """Count one learning event (P13): a reroute, or a human assignment of a queued item.
+
+    Writes a `scope_proposals` row only; routing never reads proposals. Stores without
+    `record_scope_evidence` (test fakes) skip it. Learning is advisory: a failure is
+    logged by class name and never fails the action. Returns the proposal row or None.
+    """
+    record = getattr(store, "record_scope_evidence", None)
+    key = scope_key(message)
+    if not callable(record) or key is None or not lane:
+        return None
+    try:
+        return record(*key, lane, source,
+                      min_evidence=DEFAULT_MIN_EVIDENCE if min_evidence is None else min_evidence)
+    except Exception as error:
+        LOG.warning("Scope learning skipped class=%s", type(error).__name__)
+        return None
 
 
 @dataclass(frozen=True)

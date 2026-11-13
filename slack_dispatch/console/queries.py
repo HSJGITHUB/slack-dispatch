@@ -375,3 +375,89 @@ def search(store, view, query, *, limit=SEARCH_LIMIT):
                        "note": row.get("note"), "suggestion": row.get("classifier_suggestion"),
                        "snippet": snippet, "truncated": truncated})
     return {"query": query, "rows": result, "truncated": len(rows) > limit}
+
+
+# P13 scope learning: proposals tab and learned scope overrides.
+
+PROPOSAL_ORDER = {"suggested": 0, "open": 1}
+LIVE_STATUSES = ("open", "suggested", "confirmed")
+
+
+def scope_name(view, kind, key):
+    """Display name of a scope key: console channel names, people names for persons."""
+    return (view.people if kind == "person" else view.channels).get(key)
+
+
+def current_default(store, config, kind, key):
+    """The lane that routes this key today: a ledger override first, then the config."""
+    claim = store.lookup_scope_claim(kind, key)
+    if claim:
+        source = "scope:auto" if claim.get("confirmed_by") == "scope:auto" else "ledger"
+        return {"lane": claim["lane"], "source": source}
+    table = {"channel": config.channel_defaults, "dm": config.dm_defaults}.get(kind, {})
+    if key in table:
+        return {"lane": table[key], "source": "config"}
+    return None
+
+
+def proposals(store, config, view):
+    """Open and suggested proposals with evidence, the lanes involved per key, the current
+    default, plus the learned scope panel (active confirmed claims)."""
+    every = store.list_scope_proposals()
+    involved = {}
+    for row in every:
+        if row["status"] in LIVE_STATUSES:
+            involved.setdefault((row["kind"], row["key"]), []).append(
+                {"lane": row["lane"], "evidence_count": row["evidence_count"], "status": row["status"]})
+    items = []
+    for row in every:
+        if row["status"] not in PROPOSAL_ORDER:
+            continue
+        current = current_default(store, config, row["kind"], row["key"])
+        items.append({"kind": row["kind"], "key": row["key"],
+                      "name": scope_name(view, row["kind"], row["key"]), "lane": row["lane"],
+                      "evidence_count": row["evidence_count"], "first_seen": row["first_seen"],
+                      "last_seen": row["last_seen"], "status": row["status"],
+                      "conflict": bool(row["conflict"]), "last_evidence": row["last_evidence"],
+                      "imported": bool(row["imported"]),
+                      "lanes": involved.get((row["kind"], row["key"]), []), "current": current,
+                      "effective": bool(current and current["source"] != "config"
+                                        and current["lane"] == row["lane"])})
+    items.sort(key=lambda item: (PROPOSAL_ORDER[item["status"]], -item["evidence_count"],
+                                 item["kind"], item["key"], item["lane"]))
+    return {"min_evidence": config.scope_learning.min_evidence, "proposals": items,
+            "learned": learned_scope(store, config, view)}
+
+
+def learned_scope(store, config, view):
+    rows = []
+    for claim in store.confirmed_scope_claims():
+        table = {"channel": config.channel_defaults, "dm": config.dm_defaults}.get(claim["kind"], {})
+        rows.append({"kind": claim["kind"], "key": claim["key"], "lane": claim["lane"],
+                     "name": scope_name(view, claim["kind"], claim["key"]),
+                     "confirmed_by": claim["confirmed_by"], "confirmed_at": claim["confirmed_at"],
+                     "in_config": claim["key"] in table and table[claim["key"]] == claim["lane"]})
+    return rows
+
+
+def export_yaml(store, config, view):
+    """The learned overrides as a YAML fragment to merge into the instance config."""
+    rows = learned_scope(store, config, view)
+    lines = ["# slack-dispatch learned scope (ledger overrides, P13).",
+             "# Merge these entries into the matching sections of the instance config."]
+    for kind, section in (("channel", "channel_defaults"), ("dm", "dm_defaults")):
+        entries = [row for row in rows if row["kind"] == kind]
+        if entries:
+            lines.append(section + ":")
+            for row in entries:
+                notes = [note for note in ("scope:auto" if row["confirmed_by"] == "scope:auto" else None,
+                                           "same as config" if row["in_config"] else None) if note]
+                lines.append(f"  {row['key']}: {{default: {row['lane']}}}"
+                             + (f"  # {', '.join(notes)}" if notes else ""))
+    persons = [row for row in rows if row["kind"] == "person"]
+    if persons:
+        lines.append("# Person claims route direct messages from a person; no YAML key exists:")
+        lines.extend(f"#   {row['key']}: {row['lane']}" for row in persons)
+    if not rows:
+        lines.append("# No learned scope overrides.")
+    return "\n".join(lines) + "\n"

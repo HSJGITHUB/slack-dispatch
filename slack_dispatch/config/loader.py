@@ -6,8 +6,8 @@ import yaml
 
 from .schema import (
     AlwaysHuman, BotMessages, Classifier, Config, Console, Decisions, HumanQueue, Inbox, Lane,
-    LedgerConfig, NotifyAdapter, OwnerSignals, PersonChannelRule, Service, SourceConfig, Timers,
-    WakePolicy,
+    LedgerConfig, NotifyAdapter, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
+    SourceConfig, Timers, WakePolicy,
 )
 
 
@@ -263,13 +263,21 @@ def parse_config(raw):
     zone = timezone_name(data.get("display_timezone", Config.display_timezone))
     console = console_section(data.get("console", {}), ids)
     decisions = decisions_section(data.get("decisions", {}))
+    learning = scope_learning_section(data.get("scope_learning", {}))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
                   explicit_tag_pattern=pattern, inbox=inbox, service=service,
                   human_queue=queue, bot_messages=bots, owner_signals=signals,
                   sessions_dir=sessions_dir, people=people, display_timezone=zone,
-                  console=console, decisions=decisions)
+                  console=console, decisions=decisions, scope_learning=learning)
+
+
+def scope_learning_section(value):
+    """Optional `scope_learning` map (P13). `min_evidence` is a positive integer, default 2."""
+    data = mapping({} if value is None else value, "scope_learning")
+    return ScopeLearning(min_evidence=positive(data.get("min_evidence", ScopeLearning.min_evidence),
+                                               "scope_learning.min_evidence"))
 
 
 def card_options(row, kind, purpose):

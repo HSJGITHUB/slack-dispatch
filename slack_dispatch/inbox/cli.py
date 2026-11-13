@@ -1,14 +1,17 @@
 """Plain-text inbox commands against the shared LedgerStore API."""
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 from slack_dispatch.console import actions
 from slack_dispatch.console.actions import inbox_refusal
+from slack_dispatch.router.apply import DEFAULT_MIN_EVIDENCE
 
 from .files import append, read, record, validate_lane
 
@@ -18,6 +21,18 @@ CUTOVER_NOTE = "seen by the lane before cutover"
 # are not lane session activity, so lane_last_seen ignores those rows.
 SYSTEM_NOTES = ("cutover:", "owner_reaction:", "owner_post", "prehandled", "context",
                 "message_deleted", "human:")
+# P13 scope: `scope add` and `scope remove` flags, and the key forms each one accepts.
+SCOPE_FLAGS = (("channel", "channels"), ("thread", "threads"), ("dm", "dms"), ("person", "persons"))
+CONVERSATION = re.compile(r"[CDG][A-Z0-9]{2,}")
+PERSON = re.compile(r"[UW][A-Z0-9]{2,}")
+SLACK_TS = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,9})?")
+SCOPE_PREFIXES = {"channel": "CG", "dm": "DCG"}
+# Harvest proposal YAML sections read by `scope import`.
+PROPOSAL_SECTIONS = (("channel_defaults_add", "channel"), ("channel_defaults_change", "channel"),
+                     ("dm_defaults_add", "dm"), ("dm_defaults_change", "dm"),
+                     ("person_rules_add", "person"), ("person_lane_candidates", "person"))
+BINDING_SECTIONS = (("thread_bindings_add", False), ("thread_bindings_rebind", True))
+LIVE_PROPOSALS = ("open", "suggested", "confirmed")
 
 
 class BadInput(ValueError):
@@ -82,6 +97,36 @@ def build_parser():
     sub.add_argument("--seen-before", metavar="TS")
     sub.add_argument("--note")
     sub.add_argument("--apply", action="store_true")
+    # P13: lane scope registration and recorded sends.
+    sub = commands.add_parser("scope")
+    options(sub)
+    scope = sub.add_subparsers(dest="scope_command", required=True)
+    target = scope.add_parser("add")
+    options(target)
+    target.add_argument("lane")
+    for flag, dest in SCOPE_FLAGS:
+        target.add_argument("--" + flag, action="append", default=[], dest=dest)
+    target.add_argument("--note")
+    target = scope.add_parser("list")
+    options(target)
+    target.add_argument("lane", nargs="?")
+    target = scope.add_parser("remove")
+    options(target)
+    target.add_argument("lane")
+    group = target.add_mutually_exclusive_group(required=True)
+    for flag, _ in SCOPE_FLAGS:
+        group.add_argument("--" + flag, dest="remove_" + flag)
+    target = scope.add_parser("import")
+    options(target)
+    target.add_argument("path")
+    target.add_argument("--dry-run", action="store_true")
+    sub = commands.add_parser("sent")
+    options(sub)
+    sub.add_argument("channel")
+    sub.add_argument("ts")
+    sub.add_argument("--lane", required=True)
+    sub.add_argument("--thread", dest="root_ts", metavar="ROOT_TS")
+    sub.add_argument("--kind", choices=("reply", "root", "dm"))
     return parser
 
 
@@ -410,6 +455,36 @@ def stamp(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat()
 
 
+def unconsumed_backfill(root, lane, store, ids):
+    """Ids (of `ids`) with a `backfill` record in the lane inbox that is still unconsumed:
+    the message is open, owned by the lane (or by none) and was not done after the
+    record was written. Acked items stay pending until done, as in the inbox view.
+
+    The service's own first delivery of a reconcile message is also kind `backfill`; it is
+    not a cutover redelivery and does not count, so a first cutover still delivers it.
+    """
+    found = set()
+    if not ids:
+        return found
+    first = {}
+    for row in read(root, lane, include_done=True):
+        if row.get("id") not in ids:
+            continue
+        initial = first.setdefault(row["id"], row) is row
+        if row.get("kind") != "backfill" or row["id"] in found:
+            continue
+        message = store.get_message(row["id"]) or {}
+        if initial and message.get("origin") == "reconcile":
+            continue
+        if message.get("state") == "done" or message.get("lane") not in (None, lane):
+            continue
+        done, written = epoch(message.get("done_at")), epoch(row.get("delivered_at"))
+        if done is not None and written is not None and done >= written:
+            continue
+        found.add(row["id"])
+    return found
+
+
 def cutover(args, root, store, stdout, stderr):
     """Close only what the lane demonstrably saw; re-deliver the rest as backfill."""
     if store.get_lane(args.lane) is None:
@@ -437,13 +512,17 @@ def cutover(args, root, store, stdout, stderr):
         else:
             keep.append(row)
     attention = sum(bool(row.get("attention")) for row in keep)
+    # P13: a rerun must not append the same open items again; an unconsumed backfill
+    # record of the lane already carries them.
+    pending = unconsumed_backfill(root, args.lane, store, {row["id"] for row in keep})
+    deliver = [row for row in keep if row["id"] not in pending]
     redelivered = 0
     if args.apply:
         note = "cutover: " + (args.note or CUTOVER_NOTE)
         for row in close:
             store.set_state(row["id"], "done", note=note)
         records = []
-        for row in keep:
+        for row in deliver:
             message = store.get_message(row["id"]) or row
             records.append(record(dict(message, id=row["id"]), "backfill"))
         if records:
@@ -454,8 +533,11 @@ def cutover(args, root, store, stdout, stderr):
     print(f"cutover {args.lane} mode={mode} lane_last_seen={stamp(last_seen)} basis={basis}",
           file=stdout)
     print(f"closed={len(close)} kept_open={len(keep)} "
-          f"redelivered={redelivered if args.apply else len(keep)} attention_kept={attention} "
+          f"redelivered={redelivered if args.apply else len(deliver)} attention_kept={attention} "
           f"refused={len(refused)}", file=stdout)
+    if pending:
+        print(f"already_backfilled={len(pending)} (unconsumed backfill record in the inbox; "
+              "not appended again)", file=stdout)
     for row in keep:
         print(row["id"], "kept_open", "attention=" + (row.get("attention") or "-"), file=stdout)
     if not args.apply:
@@ -463,6 +545,258 @@ def cutover(args, root, store, stdout, stderr):
     for line in refused:
         print(line, file=stderr)
     return 2 if refused else 0
+
+
+def claimant():
+    """Who records a scope claim: SLACK_DISPATCH_SESSION, CLAUDE_SESSION_ID, else `cli`."""
+    return os.environ.get("SLACK_DISPATCH_SESSION") or os.environ.get("CLAUDE_SESSION_ID") or "cli"
+
+
+def optional_config(args, *, strict=True):
+    """The config from --config or SLACK_DISPATCH_CONFIG, else None. An unreadable config
+    raises (exit 2) when strict, and is ignored otherwise."""
+    path = args.config or os.environ.get("SLACK_DISPATCH_CONFIG")
+    if not path:
+        return None
+    from slack_dispatch.config.loader import load_config
+    try:
+        return load_config(path)
+    except ValueError:
+        if strict:
+            raise
+        return None
+
+
+def min_evidence(config):
+    return config.scope_learning.min_evidence if config is not None else DEFAULT_MIN_EVIDENCE
+
+
+def scope_key(kind, value):
+    """Validate a claim key; thread keys are `CHANNEL:TS` (a `slack:` prefix is accepted)."""
+    if not isinstance(value, str):
+        raise BadInput("Invalid scope key")
+    if kind == "thread":
+        parts = value.split(":")
+        if len(parts) == 3 and parts[0] == "slack":
+            parts = parts[1:]
+        if (len(parts) != 2 or not CONVERSATION.fullmatch(parts[0])
+                or not SLACK_TS.fullmatch(parts[1])):
+            raise BadInput("Invalid thread key")
+        return parts[0] + ":" + parts[1]
+    if kind == "person":
+        if not PERSON.fullmatch(value):
+            raise BadInput("Invalid person id")
+        return value
+    if not CONVERSATION.fullmatch(value) or value[0] not in SCOPE_PREFIXES[kind]:
+        raise BadInput("Invalid conversation id")
+    return value
+
+
+def auto_default(store, config, channel, lane):
+    """scope:auto applies a channel claim as the channel default only when the channel has
+    no default (config or ledger) and no other lane ever claimed or was learned for it."""
+    if config is None or channel in config.excluded_channels:
+        return False
+    if channel in config.channel_defaults or channel in config.dm_defaults:
+        return False
+    if store.lookup_scope_claim("channel", channel) or store.lookup_scope_claim("dm", channel):
+        return False
+    if store.scope_claim_lanes("channel", channel) != {lane}:
+        return False
+    return not any(row["kind"] == "channel" and row["key"] == channel and row["lane"] != lane
+                   for row in store.list_scope_proposals(LIVE_PROPOSALS))
+
+
+def scope_add(args, store, config, stdout, stderr):
+    claims = [(kind, scope_key(kind, value)) for kind, dest in SCOPE_FLAGS
+              for value in getattr(args, dest)]
+    if not claims:
+        raise BadInput("Supply at least one claim")
+    if store.get_lane(args.lane) is None:
+        print("Lane not found", file=stderr)
+        return 3
+    lane, by, threshold = args.lane, claimant(), min_evidence(config)
+    if config is None and any(kind == "channel" for kind, _ in claims):
+        print("note: without --config scope:auto is not applied; channel claims stay proposals",
+              file=stderr)
+    for kind, key in dict.fromkeys(claims):
+        if kind == "thread":
+            channel, ts = key.split(":")
+            previous = store.lookup_binding("slack", channel, ts)
+            store.bind_thread("slack", channel, ts, lane)
+            store.add_scope_claim(lane, "thread", key, note=args.note, claimed_by=by,
+                                  confirmed_by="binding")
+            moved = f" (was {previous})" if previous not in (None, lane) else ""
+            print(f"thread {key} {lane} bound{moved}", file=stdout)
+            continue
+        created = store.add_scope_claim(lane, kind, key, note=args.note, claimed_by=by)
+        if created:
+            store.record_scope_evidence(kind, key, lane, "scope", min_evidence=threshold)
+        status = "claimed" if created else "refreshed"
+        if kind == "channel" and auto_default(store, config, key, lane):
+            store.confirm_scope_claim(lane, "channel", key, by="scope:auto")
+            status = "auto-applied (scope:auto)"
+        print(f"{kind} {key} {lane} {status}", file=stdout)
+    return 0
+
+
+def scope_list(args, store, stdout):
+    print("lane kind key status confirmed_by claimed_by claimed_at note", file=stdout)
+    for row in store.list_scope_claims(args.lane):
+        print(row["lane"], row["kind"], row["key"], row["status"], row["confirmed_by"] or "-",
+              row["claimed_by"], row["claimed_at"], row["note"] or "-", file=stdout)
+    return 0
+
+
+def scope_remove(args, store, stdout, stderr):
+    kind, value = next((kind, getattr(args, "remove_" + kind)) for kind, _ in SCOPE_FLAGS
+                       if getattr(args, "remove_" + kind) is not None)
+    key = scope_key(kind, value)
+    if not store.remove_scope_claim(args.lane, kind, key):
+        print("Claim not found", file=stderr)
+        return 3
+    print(f"{kind} {key} {args.lane} removed", file=stdout)
+    return 0
+
+
+def harvest_lane(entry):
+    """Lane of a harvest entry: `{default: LANE}`, `{lane: LANE}`, a bare lane or null."""
+    lane = entry.get("default", entry.get("lane")) if isinstance(entry, dict) else entry
+    if lane is not None:
+        validate_lane(lane)
+    return lane
+
+
+def parse_harvest(path):
+    """Validate the whole harvest proposal YAML before anything is written."""
+    import yaml
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raise BadInput("Cannot read the proposal file") from None
+    data = {} if data is None else data
+    if not isinstance(data, dict):
+        raise BadInput("The proposal file must be a mapping")
+    proposals, bindings = [], []
+    for section, kind in PROPOSAL_SECTIONS:
+        value = data.get(section) or {}
+        if isinstance(value, list):
+            items = []
+            for row in value:
+                if not isinstance(row, dict):
+                    raise BadInput("Invalid proposal row")
+                items.append((row.get("person", row.get("id")), row))
+        elif isinstance(value, dict):
+            items = list(value.items())
+        else:
+            raise BadInput("Invalid proposal section")
+        for key, entry in items:
+            proposals.append((kind, scope_key(kind, key), harvest_lane(entry)))
+    for section, replace in BINDING_SECTIONS:
+        value = data.get(section) or []
+        if not isinstance(value, list):
+            raise BadInput("Invalid binding section")
+        for row in value:
+            if not isinstance(row, dict) or any(
+                    not isinstance(row.get(key), str) or not row[key].strip()
+                    for key in ("source", "channel", "thread_ts", "lane")):
+                raise BadInput("Invalid binding row")
+            scope_key("thread", row["channel"] + ":" + row["thread_ts"])
+            validate_lane(row["lane"])
+            bindings.append((row, replace))
+    conflicts = data.get("conflicts") or []
+    unused = data.get("unused_in_config") or []
+    if not isinstance(conflicts, list) or not isinstance(unused, list):
+        raise BadInput("Invalid conflicts section")
+    return proposals, bindings, conflicts, unused
+
+
+def scope_import(args, store, config, stdout):
+    proposals, bindings, conflicts, unused = parse_harvest(args.path)
+    write, threshold = not args.dry_run, min_evidence(config)
+    counts, unknown, keys = Counter(), set(), {}
+    for kind, key, lane in proposals:
+        if lane is None:
+            counts["skipped_null"] += 1
+            continue
+        if store.get_lane(lane) is None:
+            counts["proposal_unknown"] += 1
+            unknown.add(lane)
+            continue
+        keys.setdefault((kind, key), set()).add(lane)
+        if write:
+            result = store.import_scope_proposal(kind, key, lane, min_evidence=threshold)
+        else:
+            row = store.get_scope_proposal(kind, key, lane)
+            kept = row is not None and (row["imported"] or row["status"] in ("confirmed", "rejected"))
+            result = "kept" if kept else "added"
+        counts["proposal_" + result] += 1
+    for row, replace in bindings:
+        lane = row["lane"]
+        if store.get_lane(lane) is None:
+            counts["binding_unknown"] += 1
+            unknown.add(lane)
+            continue
+        key = (row["source"], row["channel"], row["thread_ts"])
+        current = store.lookup_binding(*key)
+        if current == lane or (current is not None and not replace):
+            counts["binding_kept"] += 1
+            continue
+        if write:
+            store.bind_thread(*key, lane)
+        counts["binding_added" if current is None else "binding_rebound"] += 1
+    print(f"proposals added={counts['proposal_added']} kept={counts['proposal_kept']} "
+          f"skipped_null={counts['skipped_null']} skipped_unknown_lane={counts['proposal_unknown']}",
+          file=stdout)
+    print(f"bindings added={counts['binding_added']} rebound={counts['binding_rebound']} "
+          f"kept={counts['binding_kept']} skipped_unknown_lane={counts['binding_unknown']}", file=stdout)
+    if unknown:
+        print("Unknown lanes: " + ", ".join(sorted(unknown)), file=stdout)
+    live = store.list_scope_proposals(LIVE_PROPOSALS)
+    for (kind, key), lanes in sorted(keys.items()):
+        lanes = lanes | {row["lane"] for row in live if row["kind"] == kind and row["key"] == key}
+        if len(lanes) > 1:
+            print(f"conflict {kind} {key} lanes={','.join(sorted(lanes))}", file=stdout)
+    print(f"file_conflicts={len(conflicts)} (not imported)", file=stdout)
+    for item in conflicts:
+        item = item if isinstance(item, dict) else {}
+        print("file_conflict", item.get("kind") or "-", item.get("id") or "-",
+              "suggested=" + str(item.get("suggested") or "-"), file=stdout)
+    if unused:
+        print(f"unused_in_config={len(unused)} (ignored)", file=stdout)
+    if not write:
+        print("dry run: nothing changed; rerun without --dry-run", file=stdout)
+    return 0
+
+
+def sent(args, store, config, stdout, stderr):
+    """Record a lane's own post: sends row, thread binding, and a dm claim for DMs."""
+    channel, ts, root = args.channel, args.ts, args.root_ts
+    if not CONVERSATION.fullmatch(channel) or not SLACK_TS.fullmatch(ts):
+        raise BadInput("Invalid channel or ts")
+    if root is not None and not SLACK_TS.fullmatch(root):
+        raise BadInput("Invalid thread ts")
+    if root == ts:
+        root = None
+    kind = args.kind or ("reply" if root else "dm" if channel.startswith("D") else "root")
+    if (kind == "reply") != (root is not None) and not (kind == "dm" and root is not None):
+        raise BadInput("A reply needs --thread ROOT_TS; a root has none")
+    if store.get_lane(args.lane) is None:
+        print("Lane not found", file=stderr)
+        return 3
+    lane = args.lane
+    created, previous = store.record_send(channel, ts, root, lane, kind)
+    thread = f"slack:{channel}:{root or ts}"
+    if not created:
+        print(f"sent {channel} {ts} already recorded", file=stdout)
+        return 0
+    moved = f" (was {previous})" if previous not in (None, lane) else ""
+    print(f"sent {channel} {ts} {lane} bound {thread}{moved}", file=stdout)
+    if channel.startswith("D") or kind == "dm":
+        claimed = store.add_scope_claim(lane, "dm", channel, claimed_by=claimant())
+        store.record_scope_evidence("dm", channel, lane, "sent", min_evidence=min_evidence(config))
+        print(f"dm {channel} {lane} {'claimed' if claimed else 'refreshed'}", file=stdout)
+    return 0
 
 
 def configured_session(config_path, lane):
@@ -505,6 +839,13 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 # Optional display settings: people names and display_timezone.
                 people, zone = display_settings(args.config or os.environ.get("SLACK_DISPATCH_CONFIG"),
                                                 stderr)
+            # P13: scope and sent read the optional config strictly (scope:auto, min_evidence);
+            # assign and reroute only borrow min_evidence and never fail on the config.
+            config = None
+            if args.command in ("scope", "sent"):
+                config = optional_config(args)
+            elif args.command in ("assign", "reroute"):
+                config = optional_config(args, strict=False)
             if store is None:
                 path = args.ledger or os.environ.get("SLACK_DISPATCH_LEDGER")
                 if not path:
@@ -551,6 +892,19 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                     print("Unknown lanes: " + ", ".join(sorted(unknown)), file=stdout)
             elif args.command == "inbox":
                 show_inbox(args, root, store, stdout, people, zone)
+            elif args.command in ("scope", "sent"):
+                if args.command == "sent":
+                    code = sent(args, store, config, stdout, stderr)
+                elif args.scope_command == "add":
+                    code = scope_add(args, store, config, stdout, stderr)
+                elif args.scope_command == "list":
+                    code = scope_list(args, store, stdout)
+                elif args.scope_command == "remove":
+                    code = scope_remove(args, store, stdout, stderr)
+                else:
+                    code = scope_import(args, store, config, stdout)
+                error_reported = code != 0
+                return code
             elif args.command == "cutover":
                 code = cutover(args, root, store, stdout, stderr)
                 error_reported = code != 0
@@ -607,9 +961,10 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 # One code path with the console: route, inbox append and a wake request.
                 if args.command == "assign":
                     actions.assign(store, root, args.id, args.lane, note=getattr(args, "note", None),
-                                   reason="human:cli")
+                                   reason="human:cli", min_evidence=min_evidence(config))
                 else:
-                    actions.reroute(store, root, args.id, args.lane, source="cli")
+                    actions.reroute(store, root, args.id, args.lane, source="cli",
+                                    min_evidence=min_evidence(config))
                 print(args.id, args.lane, file=stdout)
             return 0
         except AmbiguousLane as exc:

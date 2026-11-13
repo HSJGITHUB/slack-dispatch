@@ -5,6 +5,22 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P13 scope learning
+- Add `scope add|list|remove|import` and `sent` to the inbox CLI: lanes register channels,
+  threads, DMs and people; thread claims and sends bind threads at once; DM sends add dm
+  claims; the harvest proposal YAML loads as suggested proposals and thread bindings.
+- Add ledger tables `scope_claims`, `scope_proposals` and `sends`, the router rule
+  `ScopeClaim` (confirmed claims only, after thread inheritance and before explicit tags)
+  and `scope:auto` for a brand new channel claimed by a single lane.
+- Learn from behaviour: reroutes and human assignments of queued items count as evidence;
+  proposals become `suggested` after `scope_learning.min_evidence` (default 2) events, with
+  conflicts flagged. Nothing routes until the operator confirms.
+- Console Scope tab (`/proposals`): confirm, reject or defer proposals; confirmed claims
+  take effect without a YAML edit; the Learned scope panel exports a YAML fragment.
+- Fix: `assign` and `reroute` (CLI, console, card decisions) move the thread binding to
+  the new lane; a `cutover --apply` rerun no longer appends items that already have an
+  unconsumed backfill record.
+
 ### P12 cutover and cards
 - Add `cutover LANE [--seen-before TS] [--note TEXT] [--apply]` (dry run by default):
   close only lane items delivered before the lane's last own ack or done, keep later

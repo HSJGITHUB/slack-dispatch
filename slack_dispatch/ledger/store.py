@@ -16,6 +16,10 @@ class RecordResult:
     kind: str
 
 
+class ProposalStateError(Exception):
+    """A scope proposal decision needs an open or suggested proposal (P13)."""
+
+
 def now():
     return datetime.now().astimezone().isoformat()
 
@@ -384,6 +388,198 @@ class LedgerStore:
             for request_id in ids:
                 db.execute("UPDATE wake_requests SET consumed_at=? WHERE id=? AND consumed_at IS NULL",
                            (stamp, request_id))
+
+    # P13 lane scope: claims, learned proposals and recorded sends.
+
+    @staticmethod
+    def _active_claim(db, lane, kind, key):
+        return db.execute("SELECT * FROM scope_claims WHERE lane=? AND kind=? AND key=? "
+                          "AND removed_at IS NULL ORDER BY id DESC LIMIT 1", (lane, kind, key)).fetchone()
+
+    def add_scope_claim(self, lane, kind, key, *, note=None, claimed_by="cli", confirmed_by=None):
+        """Record the lane's claim, or refresh its note and claimed_at when it is already active.
+
+        Returns True when a new claim row was created. `confirmed_by` creates the claim as
+        confirmed (thread claims, whose binding is written at the same time).
+        """
+        stamp = now()
+        with self._transaction() as db:
+            row = self._active_claim(db, lane, kind, key)
+            if row is not None:
+                db.execute("UPDATE scope_claims SET note=COALESCE(?, note), claimed_at=? WHERE id=?",
+                           (note, stamp, row["id"]))
+                return False
+            db.execute("INSERT INTO scope_claims (lane, kind, key, note, claimed_at, claimed_by, status, "
+                       "confirmed_at, confirmed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (lane, kind, key, note, stamp, claimed_by,
+                        "confirmed" if confirmed_by else "claimed",
+                        stamp if confirmed_by else None, confirmed_by))
+            return True
+
+    def remove_scope_claim(self, lane, kind, key):
+        """Mark the lane's active claim removed (rows are never deleted). False when none."""
+        with self._transaction() as db:
+            return db.execute("UPDATE scope_claims SET removed_at=? WHERE lane=? AND kind=? AND key=? "
+                              "AND removed_at IS NULL", (now(), lane, kind, key)).rowcount > 0
+
+    def list_scope_claims(self, lane=None, *, include_removed=False):
+        query = "SELECT * FROM scope_claims WHERE (? IS NULL OR lane=?)"
+        if not include_removed:
+            query += " AND removed_at IS NULL"
+        return self._rows(query + " ORDER BY lane, kind, key, id", (lane, lane))
+
+    def scope_claim_lanes(self, kind, key):
+        """Every lane that ever claimed (kind, key), removed claims included."""
+        return {row["lane"] for row in self._rows(
+            "SELECT DISTINCT lane FROM scope_claims WHERE kind=? AND key=?", (kind, key))}
+
+    def lookup_scope_claim(self, kind, key):
+        """The confirmed, active claim for (kind, key) that routing uses, or None."""
+        rows = self._rows("SELECT lane, kind, key, confirmed_by, confirmed_at FROM scope_claims "
+                          "WHERE kind=? AND key=? AND status='confirmed' AND removed_at IS NULL "
+                          "ORDER BY confirmed_at DESC, id DESC LIMIT 1", (kind, key))
+        return rows[0] if rows else None
+
+    def confirmed_scope_claims(self):
+        """Active confirmed channel, dm and person claims: the learned routing overrides."""
+        return self._rows("SELECT * FROM scope_claims WHERE status='confirmed' AND removed_at IS NULL "
+                          "AND kind IN ('channel', 'dm', 'person') ORDER BY kind, key, id")
+
+    @classmethod
+    def _confirm_claim(cls, db, lane, kind, key, by, stamp, note=None):
+        db.execute("UPDATE scope_claims SET status='claimed' WHERE kind=? AND key=? AND lane!=? "
+                   "AND status='confirmed' AND removed_at IS NULL", (kind, key, lane))
+        row = cls._active_claim(db, lane, kind, key)
+        if row is None:
+            db.execute("INSERT INTO scope_claims (lane, kind, key, note, claimed_at, claimed_by, status, "
+                       "confirmed_at, confirmed_by) VALUES (?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)",
+                       (lane, kind, key, note, stamp, by, stamp, by))
+        else:
+            db.execute("UPDATE scope_claims SET status='confirmed', confirmed_at=?, confirmed_by=? "
+                       "WHERE id=?", (stamp, by, row["id"]))
+
+    def confirm_scope_claim(self, lane, kind, key, *, by, note=None):
+        """Make the lane's claim the routing override for (kind, key); confirmed claims of
+        other lanes for the same key return to `claimed`. Creates the claim when missing."""
+        with self._transaction() as db:
+            self._confirm_claim(db, lane, kind, key, by, now(), note)
+
+    @staticmethod
+    def _refresh_proposals(db, kind, key, min_evidence):
+        """Recompute conflict flags and the open or suggested status for one key."""
+        rows = [dict(row) for row in db.execute(
+            "SELECT * FROM scope_proposals WHERE kind=? AND key=?", (kind, key))]
+        live = {row["lane"] for row in rows if row["status"] in ("open", "suggested", "confirmed")}
+        for row in rows:
+            conflict = row["status"] in ("open", "suggested", "confirmed") and bool(live - {row["lane"]})
+            status = row["status"]
+            if status in ("open", "suggested"):
+                ready = row["evidence_count"] >= min_evidence or bool(row["imported"])
+                status = "suggested" if ready and not conflict else "open"
+            db.execute("UPDATE scope_proposals SET status=?, conflict=? WHERE kind=? AND key=? AND lane=?",
+                       (status, int(conflict), kind, key, row["lane"]))
+
+    def get_scope_proposal(self, kind, key, lane):
+        rows = self._rows("SELECT * FROM scope_proposals WHERE kind=? AND key=? AND lane=?",
+                          (kind, key, lane))
+        return rows[0] if rows else None
+
+    def list_scope_proposals(self, statuses=None):
+        rows = self._rows("SELECT * FROM scope_proposals ORDER BY kind, key, lane")
+        return [row for row in rows if statuses is None or row["status"] in statuses]
+
+    def record_scope_evidence(self, kind, key, lane, source, *, min_evidence=2):
+        """Count one event for (kind, key, lane) and return the proposal row.
+
+        Deferred and superseded proposals reopen on new evidence; rejected and confirmed
+        ones keep their status. Routing never reads proposals.
+        """
+        stamp = now()
+        with self._transaction() as db:
+            db.execute("INSERT INTO scope_proposals (kind, key, lane, evidence_count, first_seen, "
+                       "last_seen, last_evidence) VALUES (?, ?, ?, 1, ?, ?, ?) "
+                       "ON CONFLICT(kind, key, lane) DO UPDATE SET "
+                       "evidence_count=evidence_count+1, last_seen=excluded.last_seen, "
+                       "last_evidence=excluded.last_evidence, status=CASE WHEN status IN "
+                       "('deferred', 'superseded') THEN 'open' ELSE status END",
+                       (kind, key, lane, stamp, stamp, source))
+            self._refresh_proposals(db, kind, key, min_evidence)
+            return dict(db.execute("SELECT * FROM scope_proposals WHERE kind=? AND key=? AND lane=?",
+                                   (kind, key, lane)).fetchone())
+
+    def import_scope_proposal(self, kind, key, lane, *, min_evidence=2):
+        """Load one harvested proposal as `suggested` (open while in conflict). Returns `added`,
+        or `kept` when it was already imported, confirmed or rejected."""
+        stamp = now()
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM scope_proposals WHERE kind=? AND key=? AND lane=?",
+                             (kind, key, lane)).fetchone()
+            if row is not None and (row["imported"] or row["status"] in ("confirmed", "rejected")):
+                return "kept"
+            if row is None:
+                db.execute("INSERT INTO scope_proposals (kind, key, lane, evidence_count, first_seen, "
+                           "last_seen, last_evidence, imported) VALUES (?, ?, ?, 1, ?, ?, 'import', 1)",
+                           (kind, key, lane, stamp, stamp))
+            else:
+                db.execute("UPDATE scope_proposals SET imported=1, evidence_count=evidence_count+1, "
+                           "last_seen=?, last_evidence='import', status=CASE WHEN status IN "
+                           "('deferred', 'superseded') THEN 'open' ELSE status END "
+                           "WHERE kind=? AND key=? AND lane=?", (stamp, kind, key, lane))
+            self._refresh_proposals(db, kind, key, min_evidence)
+            return "added"
+
+    def decide_scope_proposal(self, kind, key, lane, decision, *, by="console", min_evidence=2):
+        """Operator decision on an open or suggested proposal: confirm, reject or defer.
+
+        confirm writes the confirmed claim (the routing override) and supersedes any other
+        confirmed proposal for the key; reject returns the lane's confirmed claim (for
+        example a scope:auto one) to `claimed`. Raises KeyError for an unknown proposal and
+        ProposalStateError when it is not open or suggested. Returns the updated row.
+        """
+        status = {"confirm": "confirmed", "reject": "rejected", "defer": "deferred"}.get(decision)
+        if status is None:
+            raise ValueError("Unsupported proposal decision")
+        stamp = now()
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM scope_proposals WHERE kind=? AND key=? AND lane=?",
+                             (kind, key, lane)).fetchone()
+            if row is None:
+                raise KeyError(key)
+            if row["status"] not in ("open", "suggested"):
+                raise ProposalStateError(row["status"])
+            if decision == "confirm":
+                db.execute("UPDATE scope_proposals SET status='superseded', decided_at=? WHERE kind=? "
+                           "AND key=? AND lane!=? AND status='confirmed'", (stamp, kind, key, lane))
+                self._confirm_claim(db, lane, kind, key, by, stamp, note="confirmed proposal")
+            elif decision == "reject":
+                db.execute("UPDATE scope_claims SET status='claimed' WHERE lane=? AND kind=? AND key=? "
+                           "AND status='confirmed' AND removed_at IS NULL", (lane, kind, key))
+            db.execute("UPDATE scope_proposals SET status=?, decided_at=? WHERE kind=? AND key=? AND lane=?",
+                       (status, stamp, kind, key, lane))
+            self._refresh_proposals(db, kind, key, min_evidence)
+            return dict(db.execute("SELECT * FROM scope_proposals WHERE kind=? AND key=? AND lane=?",
+                                   (kind, key, lane)).fetchone())
+
+    def record_send(self, channel, ts, thread_ts, lane, kind=None, *, source="slack"):
+        """Record a lane's own post and bind its thread (thread_ts, else ts) to the lane in one
+        transaction. A repeated (channel, ts) changes nothing. Returns (created, previous lane)."""
+        root = thread_ts or ts
+        with self._transaction() as db:
+            created = db.execute("INSERT OR IGNORE INTO sends (channel, ts, thread_ts, lane, kind, "
+                                 "recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                 (channel, ts, thread_ts, lane, kind, now())).rowcount > 0
+            previous = db.execute("SELECT lane FROM bindings WHERE source=? AND channel=? AND thread_ts=?",
+                                  (source, channel, root)).fetchone()
+            previous = previous["lane"] if previous else None
+            if created:
+                db.execute("""INSERT INTO bindings VALUES (?, ?, ?, ?)
+                    ON CONFLICT(source, channel, thread_ts) DO UPDATE SET lane=excluded.lane""",
+                           (source, channel, root, lane))
+            return created, previous
+
+    def list_sends(self, lane=None):
+        return self._rows("SELECT * FROM sends WHERE (? IS NULL OR lane=?) "
+                          "ORDER BY recorded_at, channel, ts", (lane, lane))
 
 
 def _numeric(ts):

@@ -199,6 +199,33 @@ All additive.
   `workspace_domain: str | None`), and an optional `decisions` section
   (`dir: str | None`, `poll_seconds: int = 5`, `hmac_key_file: str | None`).
 
+## P13 scope learning
+
+All additive; the schema version stays 2.
+
+- Ledger tables created by `migrate()`: `scope_claims(id, lane, kind channel|dm|person|thread,
+  key, note, claimed_at, claimed_by, status claimed|confirmed, confirmed_at, confirmed_by,
+  removed_at)`; `scope_proposals(kind channel|dm|person, key, lane, evidence_count,
+  first_seen, last_seen, status open|suggested|confirmed|rejected|deferred|superseded,
+  conflict, last_evidence, imported, decided_at)` keyed by (kind, key, lane); and
+  `sends(channel, ts, thread_ts, lane, kind, recorded_at)` keyed by (channel, ts).
+- `LedgerStore` adds `add_scope_claim`, `remove_scope_claim`, `list_scope_claims`,
+  `scope_claim_lanes`, `lookup_scope_claim(kind, key)`, `confirmed_scope_claims`,
+  `confirm_scope_claim`, `get_scope_proposal`, `list_scope_proposals`,
+  `record_scope_evidence(kind, key, lane, source, *, min_evidence=2)`,
+  `import_scope_proposal`, `decide_scope_proposal(kind, key, lane, decision, *, by,
+  min_evidence)` (raises KeyError or `ProposalStateError`), `record_send` and `list_sends`.
+- Router: rule `ScopeClaim` after ThreadInherit (decision rule `scope_claim`, reasons
+  `scope_claim` and `scope:auto`); `Route` gains an optional `rule`; `route()` gains an
+  optional `lookup_scope`. `router.apply.record_scope_proposal(store, message, lane,
+  source, *, min_evidence=None)` is the shared learning hook.
+- `console.actions.assign`, `reroute` and `apply` gain `min_evidence`; `assign` and
+  `reroute` bind the message thread to the lane.
+- Inbox CLI: `scope add|list|remove|import` and `sent`; `cutover` skips unconsumed backfill.
+- Config: optional `scope_learning: {min_evidence: 2}` (positive integer).
+- Console: page `/proposals`, `GET /api/proposals`, `POST /api/proposals/actions`,
+  `GET /api/proposals/export`.
+
 ### Card request `dispatch_card/1` (dispatcher writes, Jarvis reads)
 
 `<dir>/cards/<message_id_safe>.json`, `message_id_safe = message_id` with `:` and `.`

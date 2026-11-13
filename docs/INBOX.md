@@ -49,6 +49,8 @@ store. This CLI consumes the shared LedgerStore API.
   queue a wake request (P12).
 - `cutover support [--seen-before TS] [--note TEXT] [--apply]`: switch a lane from
   manual sweeps to the dispatcher (P12, below).
+- `scope add|list|remove|import` and `sent`: lane scope registration and recorded sends
+  (P13, below).
 
 A session first claims its stable lane, then reads its inbox. An operator reads
 `queue` and explicitly uses `assign` to accept or override a suggestion. A suggestion
@@ -313,3 +315,78 @@ older inbox record names them. The thread view still shows them as the root or a
 (`slack_dispatch.console.actions`): route, inbox append and one row in the ledger table
 `wake_requests` (source `cli`). The resident service turns the row into a lane wake
 within about five seconds (see SERVICE.md).
+
+## P13 scope registration and recorded sends
+
+`assign` and `reroute` also set the thread binding of the message (thread_ts, else ts)
+to the new lane, so later replies follow it. They record scope learning evidence: every
+`reroute` to another lane, and an `assign` of an item that was `human_pending`, adds one
+event for (`channel` or `dm`, conversation id, lane) in `scope_proposals`. With a config
+the threshold is `scope_learning.min_evidence`; an unreadable config is ignored here.
+Learning is advisory and never fails the command.
+
+### `scope add LANE [--channel C...] [--thread C...:TS] [--dm D...] [--person U...] [--note TEXT]`
+
+Flags repeat. Writes `scope_claims` rows (`claimed_by` = `SLACK_DISPATCH_SESSION`, then
+`CLAUDE_SESSION_ID`, else `cli`). A thread claim (`C...:TS`; `slack:C...:TS` is accepted)
+binds the thread at once and prints `(was <lane>)` when it moved. Channel, dm and person
+claims are proposals: a new claim adds one evidence event; re-adding an active claim
+refreshes its note and time only. Exception `scope:auto`: with a config (`--config` or
+`SLACK_DISPATCH_CONFIG`) a channel claim is applied as the channel default when the
+channel has no config default, no ledger override, is not excluded, no other lane ever
+claimed it and no other lane has a live proposal for it. Without a config a note is
+printed and channel claims stay proposals. dm and person claims are never applied
+automatically. Output lines look like `channel C0000000021 support auto-applied
+(scope:auto)`, `dm D0000000021 support claimed` and `thread C0000000021:1000.000100
+support bound`.
+
+### `scope list [LANE]` and `scope remove LANE --channel|--thread|--dm|--person KEY`
+
+`list` prints `lane kind key status confirmed_by claimed_by claimed_at note` for active
+claims. `remove` sets `removed_at` (rows are never deleted; a thread binding stays) and
+returns 3 when there is no active claim.
+
+### `scope import PATH [--dry-run]`
+
+Reads the one-off harvest YAML. `channel_defaults_add` and `channel_defaults_change`
+(kind channel), `dm_defaults_add` and `dm_defaults_change` (kind dm), and
+`person_rules_add` or `person_lane_candidates` (kind person; a list of `{person, lane}` or
+a map) become proposals with status `suggested` (open while another lane has a live
+proposal for the key). Entries take `{default: LANE}`, `{lane: LANE}` or a bare lane; a
+null default is skipped. `thread_bindings_add` binds threads that have no binding (as
+`import-bindings` does); `thread_bindings_rebind` replaces existing bindings. `conflicts`
+are printed, not imported; `unused_in_config` is counted and ignored. The whole file is
+validated before anything is written; unknown lanes are skipped and listed. A rerun keeps
+what it already imported. `--dry-run` prints the same counts and writes nothing.
+
+```text
+proposals added=5 kept=0 skipped_null=1 skipped_unknown_lane=1
+bindings added=1 rebound=1 kept=1 skipped_unknown_lane=0
+Unknown lanes: unknown-lane
+conflict channel C0000000002 lanes=content,support
+file_conflicts=1 (not imported)
+file_conflict ch_add_conflict C0000000019 suggested=support
+unused_in_config=1 (ignored)
+```
+
+### `sent CHANNEL TS --lane LANE [--thread ROOT_TS] [--kind reply|root|dm]`
+
+Run once after posting (draft, operator approval, post, then `sent`). Records
+`sends(channel, ts, thread_ts, lane, kind, recorded_at)` and binds the thread (ROOT_TS,
+else TS) to the lane, overriding an earlier binding. In a DM (`D...` or `--kind dm`) it
+also adds a `dm` claim for the lane and one evidence event per new send. A repeated
+(channel, ts) prints `already recorded` and changes nothing. The kind defaults to `reply`
+with `--thread`, `dm` for a D conversation, else `root`; `reply` without `--thread` and
+`root` with a different `--thread` return 2. The owner's own post arriving through the
+socket is still recorded as `owner_post` and stays done.
+
+Exit codes for `scope` and `sent`: 0 success, 2 invalid input or an unreadable config, 3
+unknown lane or missing claim, 1 unexpected error.
+
+### Cutover rerun
+
+`cutover --apply` no longer appends an item again when the lane inbox already holds an
+unconsumed `backfill` record for it (the message is open, still the lane's, and was not
+done after that record). Such items print `already_backfilled=N` and are not counted in
+`redelivered`. The service's own first `backfill` delivery of a reconcile message does
+not count, so a first cutover still delivers it once.

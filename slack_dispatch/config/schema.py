@@ -153,6 +153,12 @@ class Decisions:
 
 
 @dataclass(frozen=True)
+class ScopeLearning:
+    """Scope learning (P13): proposals become `suggested` after this many consistent events."""
+    min_evidence: int = 2
+
+
+@dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
     channel_defaults: dict[str, str | None]
@@ -183,3 +189,5 @@ class Config:
     console: Console = field(default_factory=Console)
     # Optional card decision consumer section (P12).
     decisions: Decisions = field(default_factory=Decisions)
+    # Optional scope learning section (P13).
+    scope_learning: ScopeLearning = field(default_factory=ScopeLearning)

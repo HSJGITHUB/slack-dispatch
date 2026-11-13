@@ -166,3 +166,8 @@ decisions:
   dir: null
   poll_seconds: 5
   hmac_key_file: null
+# Optional scope learning (P13). Reroutes, human assignments of queued items, lane scope
+# claims and DM sends become proposals in the console Scope tab; a proposal is
+# suggested after min_evidence consistent events. Nothing is promoted automatically.
+scope_learning:
+  min_evidence: 2

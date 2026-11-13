@@ -132,6 +132,35 @@ first); the last 20 `ingest_gaps` rows; whether `wake.off` is present
 interval; and every notification adapter with its purpose and `dry_run` flag. There
 are no controls.
 
+### Scope (`/proposals`, P13)
+
+`GET /api/proposals` returns `min_evidence`, the open and suggested proposals (suggested
+first, then by evidence) and the `learned` panel. Each proposal has kind (`channel`, `dm`
+or `person`), key, name (`console.channels` for conversations, `people` for persons),
+lane, evidence count, first and last seen, status, `conflict`, the last evidence source,
+`imported`, the lanes involved for the key with their counts, the current default
+(`{lane, source}` with source `ledger`, `scope:auto` or `config`) and `effective` (this
+lane is the current ledger override, for example a `scope:auto` claim to confirm).
+
+`POST /api/proposals/actions` takes `{"action": "confirm" | "reject" | "defer", "kind",
+"key", "lane"}`:
+
+- `confirm` writes the confirmed claim, which the router's ScopeClaim rule reads at once
+  (no YAML edit; it survives restarts). Confirmed claims of other lanes for the key go back
+  to `claimed` and their confirmed proposals become `superseded`. The lane must be
+  configured (400) and in the ledger (404).
+- `reject` sets `rejected` (it stays rejected on new evidence) and returns the lane's
+  confirmed claim for the key, such as a `scope:auto` one, to `claimed`.
+- `defer` hides the proposal until new evidence reopens it.
+
+Unknown proposals return 404; proposals that are not open or suggested return 409. The
+`Learned scope` panel lists active confirmed channel, dm and person claims (who confirmed
+them, when, and whether the config already has the same default). `GET
+/api/proposals/export` returns `{"yaml": ...}`: `channel_defaults` and `dm_defaults`
+entries to merge into the instance config, with person claims as comments (there is no
+YAML key for them). The YAML stays the canonical place; the ledger override is what makes
+a decision effective now.
+
 ### Search
 
 `GET /api/search?q=TEXT` (2 to 200 characters) finds messages whose id contains the
@@ -152,10 +181,13 @@ same LedgerStore calls and inbox appends as the inbox CLI:
 | done [note] | `set_state(id, "done", note)`; without a note the note is `human:console` | none |
 | ack | `set_state(id, "acked")` | none |
 | reroute LANE | `set_route(id, LANE, "reroute:<old lane>")` | `reroute` in LANE |
+| assign, direct, reroute (P13) | also `bind_thread(thread of id, LANE)` and one `scope_proposals` event (a reroute to another lane, or an assign of a `human_pending` item) | as above |
 
 The CLI records `human:cli` where the console records `human:console`; `done`
 without a note is the one place the console writes a note where the CLI does not.
-Like the CLI `assign`, a console assignment does not create a thread binding.
+Since P13 `assign`, `direct` and `reroute` (console, CLI and card decisions alike) set the
+thread binding of the message to the new lane and record scope learning evidence (see
+the Scope view).
 
 `assign`, `direct` and `reroute` also insert one row into the ledger table
 `wake_requests` (P12; source `console`, `cli` for the CLI). No Slack call or session
