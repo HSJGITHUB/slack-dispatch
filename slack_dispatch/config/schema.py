@@ -142,6 +142,8 @@ class Console:
     direct_lane: str = "owner-direct"
     # Optional channel id -> display name map for console listings.
     channels: dict[str, str] = field(default_factory=dict)
+    # Console page language (P14): `en` or `ko`.
+    ui_language: str = "en"
 
 
 @dataclass(frozen=True)

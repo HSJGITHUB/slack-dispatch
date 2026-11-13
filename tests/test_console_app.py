@@ -99,7 +99,7 @@ class PageAndGuardTests(ConsoleCase):
             self.assertIn("/static/console.js", response.text)
         script = self.get("/static/console.js")
         self.assertIn("javascript", script.headers["content-type"])
-        self.assertIn("const UI = Object.freeze(", script.text)
+        self.assertIn("const UI_TEXT = Object.freeze(", script.text)
         self.get("/static/console.css")
         self.get("/static/other.js", 404)
         self.get("/api/missing", 404)

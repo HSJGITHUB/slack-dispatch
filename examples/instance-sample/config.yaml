@@ -57,7 +57,7 @@ notify_adapters:
     template:
       cli: "python -m slack_dispatch.inbox.cli --ledger dummy/state/ledger.sqlite3 --inbox-root dummy/inbox"
       message: |-
-        Lane {lane}: {count} inbox item(s) ({kinds}); attention: {attention}.
+        Lane {lane}: {count} inbox item(s) ({kinds}); attention: {attention}. Sent {sent_at}.
         IDs: {ids}
         Read thread context: {cli} inbox {lane} --thread
         Reroute lane IDs: {lanes}
@@ -148,6 +148,8 @@ owner_signals:
 # base_url adds an "Open:" link to human-queue notices and shortens digests to
 # per-channel counts. direct_lane names the lane behind the Direct button; when set
 # it must be a configured lane. channels maps channel ids to console display names.
+# ui_language picks the console page language: en (default) or ko.
+# ui_language: 콘솔 화면 언어. 운영 인스턴스는 ko로 둔다 (버튼: 배정, 내가 처리, 끝, 제외).
 console:
   host: 127.0.0.1
   port: 8811
@@ -155,6 +157,7 @@ console:
   page_size: 50
   lane_hint_people: true
   direct_lane: owner
+  ui_language: en
   channels:
     C0000000001: dummy-support
     C0000000002: dummy-general

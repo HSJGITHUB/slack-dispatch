@@ -34,6 +34,19 @@ class QueueActionRequest(BaseModel):
     note: str | None = Field(default=None, max_length=2000)
 
 
+class CommitDecision(BaseModel):
+    """One staged triage decision (P14)."""
+    id: str = Field(min_length=1, max_length=500)
+    action: Literal["assign", "direct", "exclude", "done"]
+    lane: str | None = Field(default=None, max_length=100)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class QueueCommitRequest(BaseModel):
+    """P14 GO: every staged decision, applied in order."""
+    decisions: list[CommitDecision] = Field(min_length=1, max_length=actions.MAX_IDS)
+
+
 class ProposalActionRequest(BaseModel):
     """P13 proposal decision: confirm, reject or defer one (kind, key, lane) proposal."""
     action: Literal["confirm", "reject", "defer"]
@@ -157,7 +170,8 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
                 "page_size": config.console.page_size, "poll_seconds": POLL_SECONDS,
                 "display_timezone": config.display_timezone,
                 "timezone_warning": view.zone_warning, "store_body": config.ledger.store_body,
-                "lane_hint_people": config.console.lane_hint_people}
+                "lane_hint_people": config.console.lane_hint_people,
+                "ui_language": config.console.ui_language}
 
     @app.get("/api/queue")
     def queue(offset: int = Query(0, ge=0), limit: int | None = Query(None, ge=1, le=500)):
@@ -178,7 +192,67 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
         note = (request.note or "").strip() or None
         results = actions.apply(store, root, request.action, request.ids, lane=lane, note=note,
                                 guard=actions.queue_guard, min_evidence=threshold)
+        if request.action == "exclude":
+            for result in results:
+                add_channel_hint(result, result["ok"])
         return summary(results, lane)
+
+    def add_channel_hint(row, applied):
+        """P14: flag an applied exclude whose channel has no lane default."""
+        message = store.get_message(row["id"]) if applied else None
+        row["channel_hint"] = bool(message) and queries.channel_hint(store, config, message)
+        if row["channel_hint"]:
+            row["channel"] = view.channel(message["channel"])
+
+    def decision_lane(action, lane):
+        """(destination lane, None) for a staged decision, or (None, error detail)."""
+        if action == "assign":
+            if not lane:
+                return None, "lane is required"
+            if lane not in lanes:
+                return None, "unknown lane"
+        elif action == "direct":
+            lane = queries.direct_lane(config)
+            if lane is None:
+                return None, "direct lane is not configured"
+        else:
+            return None, None
+        if store.get_lane(lane) is None:
+            return None, "lane not found in ledger"
+        return lane, None
+
+    @app.post("/api/queue/commit")
+    def queue_commit(request: QueueCommitRequest):
+        """P14 GO: apply each staged decision in order through the same action functions.
+
+        One result per decision, in request order: applied, conflict (handled meanwhile),
+        not_found or error. A failure never stops the rest; ids not sent are untouched.
+        """
+        results, seen = [], set()
+        for decision in request.decisions:
+            row = {"id": decision.id, "action": decision.action, "lane": None,
+                   "status": "error", "detail": None}
+            results.append(row)
+            if decision.id in seen:
+                row["detail"] = "duplicate id"
+                continue
+            seen.add(decision.id)
+            lane, problem = decision_lane(decision.action, decision.lane)
+            if problem:
+                row["detail"] = problem
+                continue
+            note = (decision.note or "").strip() or None
+            result = actions.apply(store, root, decision.action, [decision.id], lane=lane,
+                                   note=note, guard=actions.queue_guard,
+                                   min_evidence=threshold)[0]
+            status = actions.commit_status(result)
+            row.update(lane=lane, status=status,
+                       detail=result["detail"] or (result["error"] if status == "error" else None))
+            if decision.action == "exclude":
+                add_channel_hint(row, row["status"] == "applied")
+        counts = {name: sum(row["status"] == name for row in results)
+                  for name in actions.COMMIT_STATUSES}
+        return {"results": results, "counts": counts}
 
     @app.get("/api/lanes")
     def lane_list():

@@ -222,8 +222,25 @@ def queue_page(store, config, view, now, *, offset=0, limit=None):
     rows.sort(key=lambda row: (ts_key(row["ts"]), row["id"]), reverse=True)
     page = rows[offset:offset + limit]
     hints = {}
+    # P14: every pending id (all pages), so the page can drop staged ids that left the queue.
     return {"total": len(rows), "offset": offset, "limit": limit,
+            "pending_ids": [row["id"] for row in rows],
             "items": [queue_item(store, config, view, row, now, hints) for row in page]}
+
+
+def channel_hint(store, config, message):
+    """P14: True when an excluded item's channel has no lane default (config or ledger).
+
+    The console then suggests the Scope tab; nothing here changes routing. Direct
+    messages and channels already excluded by the config never get a hint.
+    """
+    channel = (message or {}).get("channel")
+    if not channel or message.get("channel_type") in ("im", "mpim"):
+        return False
+    if channel in config.excluded_channels:
+        return False
+    current = current_default(store, config, "channel", channel)
+    return current is None or current["lane"] is None
 
 
 def session_state(resolver, lane, session):

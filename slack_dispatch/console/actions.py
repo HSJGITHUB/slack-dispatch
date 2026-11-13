@@ -23,6 +23,8 @@ MAX_IDS = 200
 
 QUEUE_ACTIONS = ("assign", "direct", "exclude", "done")
 LANE_ACTIONS = ("ack", "done", "reroute")
+# P14 staged queue decisions: one commit status per decision.
+COMMIT_STATUSES = ("applied", "conflict", "not_found", "error")
 
 
 class ActionError(Exception):
@@ -197,3 +199,12 @@ def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, m
             continue
         results.append(dict(id=message_id, ok=True, error=None, detail=None))
     return results
+
+
+def commit_status(result):
+    """Map one `apply` result to a P14 commit status: applied, conflict, not_found or error."""
+    if result["ok"]:
+        return "applied"
+    if result["error"] in ("conflict", "not_found"):
+        return result["error"]
+    return "error"

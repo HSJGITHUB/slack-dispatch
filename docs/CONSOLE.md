@@ -48,6 +48,7 @@ console:
   page_size: 50           # 1 to 500
   lane_hint_people: true
   direct_lane: owner      # default owner-direct; when set it must be a configured lane
+  ui_language: en         # en (default) or ko: the language of the page
   channels:               # channel id -> display name, console only
     C0000000001: dummy-support
 ```
@@ -61,6 +62,9 @@ console:
   lane-owned messages went to (up to five hints). Hints never assign anything.
 - `channels` maps channel ids to names for the console only. People names come from
   the top-level `people` map and times use `display_timezone`, as in the inbox CLI.
+- `ui_language` (P14) picks the page language, `en` or `ko`; any other value fails to
+  load. `GET /api/config` returns it. Every page string lives in one dictionary per
+  language in `console.js` (`UI_TEXT.en`, `UI_TEXT.ko`, same keys; a test checks that).
 
 The lane inbox directory is the path of the first `file_inbox` adapter with purpose
 `lane` (the directory the service writes), else `inbox.root`.
@@ -83,10 +87,48 @@ ledger, oldest first, each with author, when, state and the first 300 characters
 messages newer than the item are marked `after`. Bodies exist only when
 `ledger.store_body` is true; otherwise the page shows "No body stored".
 
-Each item has a button per configured lane (the `human_queue` pseudo id is never
-offered); the suggested lane is first and highlighted, hinted lanes are outlined.
-Direct, Exclude and Done (with an optional note) follow. Checkboxes select items for
-the same actions in bulk. After an action the row disappears.
+`pending_ids` (P14) lists every `human_pending` id across all pages, newest first, so
+the page can drop staged decisions whose item left the queue.
+
+Each item has a button per configured lane under the group label Assign (the
+`human_queue` pseudo id is never offered); the suggested lane is first and highlighted,
+hinted lanes are outlined. Direct, Exclude and Done (with an optional note) follow.
+
+Staged decisions (P14). A decision button does not write. It stages the decision on the
+row: the button is marked, the row gets a left border and a chip naming the decision. A
+second click on the same button unstages it; another button replaces it. A Done note
+typed in the row travels with the staged Done. The sticky bar at the top of the view
+shows `GO (N)` (N = staged rows on every page), `Cancel all`, a one-line legend and,
+after a commit, the result summary. GO sends every staged decision in one
+`POST /api/queue/commit` (in chunks of 200); undecided rows are untouched. Applied
+rows disappear; conflict and not_found rows are unstaged and show the reason; error
+rows stay staged so GO can retry them. Staged decisions live in the browser's
+localStorage (key `slack-dispatch.console.staged.v1`, by message id), so they survive
+the 20 second poll and a reload; ids that leave the queue are dropped. A poll never
+rebuilds or reorders an existing row, so staged rows keep their place and marks.
+Each row also has a secondary `Apply now` link that applies only that row's staged
+decision at once through `POST /api/queue/actions` (the pre-P14 behaviour). The bulk
+checkbox bar is gone; staging replaces it.
+
+Keys (shown in the page footer): `g` focuses GO; `Enter` on a focused row stages the
+suggested lane; `Esc` unstages the focused row.
+
+`POST /api/queue/commit` takes `{"decisions": [{"id", "action": "assign" | "direct" |
+"exclude" | "done", "lane", "note"}]}` with 1 to 200 decisions and applies them in
+order through the same action functions and guard as `POST /api/queue/actions`. It
+returns `{"results": [...], "counts": {"applied", "conflict", "not_found", "error"}}`
+with one result per decision in request order: `id`, `action`, `lane` (the destination
+for assign and direct), `status` and `detail`. `conflict` means the item is no longer in
+`human_pending` (someone handled it meanwhile; `detail` names the state). Per-decision
+problems (missing or unknown lane, lane not in the ledger, direct lane not configured, a
+repeated id) are `error` rows and never stop the batch.
+
+Exclude follow-through (P14). An applied exclude result carries `channel_hint`: true
+when the item's channel has no lane default (no config `channel_defaults` entry or a
+null one, and no confirmed ledger claim; DMs and config-excluded channels never get a
+hint), plus `channel` (`{id, name}`) when true. `POST /api/queue/actions` adds the same
+fields to its exclude results. The page then shows one line suggesting the Scope tab,
+with a link to it. Routing does not change.
 
 `POST /api/queue/actions` takes `{"action": "assign" | "direct" | "exclude" | "done",
 "ids": [...], "lane": ..., "note": ...}` with 1 to 200 ids and returns one result

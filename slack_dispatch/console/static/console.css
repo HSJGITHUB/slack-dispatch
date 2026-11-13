@@ -18,6 +18,9 @@
 
 * { box-sizing: border-box; }
 
+/* Classes that set display (badges, flex rows) must not defeat the hidden attribute. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -98,16 +101,41 @@ button.link { border: 0; padding: 0; background: none; color: var(--accent); }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 
-.bulk {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+/* P14: staged decisions with one GO. */
+.gobar {
+  position: sticky;
+  top: var(--top-height, 52px);
+  z-index: 1;
+  padding: 8px 12px;
   margin-bottom: 12px;
   background: var(--accent-soft);
+  border: 1px solid var(--line);
   border-radius: 8px;
 }
+
+.gobar-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.go-button { min-width: 90px; font-weight: 600; }
+.legend { margin-top: 4px; color: var(--muted); }
+.commit-results { margin-top: 6px; }
+.commit-line.conflict, .commit-line.not_found { color: var(--warn); }
+.commit-line.error { color: var(--bad); }
+.channel-hint { margin-top: 4px; color: var(--warn); }
+.channel-hint a { color: var(--accent); }
+
+.queue-head { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0 2px 6px; }
+.queue-head span:not(:last-child)::after { content: " /"; }
+
+.card.staged { border-left: 4px solid var(--accent); background: #fbfcff; }
+.card:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.badge.chip { background: var(--accent); color: #fff; font-weight: 600; }
+button.chosen { background: var(--ok); border-color: var(--ok); color: #fff; box-shadow: inset 0 0 0 2px #fff; }
+.actions .spacer { flex: 1; }
+.actions .group-label { margin-right: 2px; }
+button.link.apply-now { font-size: 12px; color: var(--muted); text-decoration: underline; }
+button.link.apply-now:disabled { text-decoration: none; }
+.outcome { margin-top: 6px; color: var(--warn); }
+
+.keys { padding: 0 20px 20px; max-width: 1200px; margin: 0 auto; }
 
 .card {
   margin-bottom: 12px;

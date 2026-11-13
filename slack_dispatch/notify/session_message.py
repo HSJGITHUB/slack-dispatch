@@ -1,14 +1,30 @@
 """Run a configured local CLI with metadata only and without a shell."""
+from datetime import datetime, timezone
 import logging
 import re
 import shlex
 import subprocess
+import time
 
 LOG = logging.getLogger(__name__)
 
 
 class NotifyError(RuntimeError):
     """Notification failed; durable pending work must be retained."""
+
+
+SENT_AT_FORMAT = "%m-%d %H:%M:%S"
+
+
+def sent_at_zone(name):
+    """Time zone for `{sent_at}`: the display_timezone name, UTC when unset or unavailable."""
+    if not name or name == "UTC":
+        return timezone.utc
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except (KeyError, ValueError, OSError):  # ZoneInfoNotFoundError is a KeyError
+        return timezone.utc
 
 
 def summary(lane, message_ids):
@@ -20,7 +36,8 @@ class SessionMessageNotifier:
     resolver_takes_ids = False
 
     def __init__(self, command_template, target_resolver, *, runner=subprocess.run,
-                 dry_run=False, timeout=60, template=None, lanes=(), lookup=None):
+                 dry_run=False, timeout=60, template=None, lanes=(), lookup=None,
+                 display_timezone=None, clock=time.time):
         self.command_template = command_template
         self.target_resolver = target_resolver
         self.runner = runner
@@ -29,6 +46,9 @@ class SessionMessageNotifier:
         self.template = dict(template or {})
         self.lanes = list(lanes)
         self.lookup = lookup
+        # P14: `{sent_at}` is the render time in display_timezone (MM-DD HH:MM:SS).
+        self.zone = sent_at_zone(display_timezone)
+        self.clock = clock
         for key in ("message", "cli", "target"):
             if key in self.template and not isinstance(self.template[key], str):
                 raise ValueError("Session template values must be strings")
@@ -45,9 +65,12 @@ class SessionMessageNotifier:
         values = {"lane": lane, "count": str(len(message_ids)), "ids": ", ".join(message_ids),
                   "kinds": ", ".join(f"{key} {count}" for key, count in counts.items() if count),
                   "attention": str(attention), "lanes": ", ".join(self.lanes),
-                  "cli": self.template.get("cli", "")}
+                  "cli": self.template.get("cli", ""), "sent_at": self.sent_at()}
         return re.sub(r"\{([a-zA-Z_][a-zA-Z_0-9]*)\}",
                       lambda match: values.get(match[1], match[0]), self.template["message"])
+
+    def sent_at(self):
+        return datetime.fromtimestamp(self.clock(), self.zone).strftime(SENT_AT_FORMAT)
 
     def notify(self, lane, message_ids):
         if self.resolver_takes_ids:

@@ -81,6 +81,7 @@ def build_notifiers(config, store) -> list[Notifier]:
             return None
         return resolver.resolve_target(lane, session, message_ids=message_ids)
 
+    zone = getattr(config, "display_timezone", None)  # P14 `{sent_at}` placeholder
     result = []
     for adapter in config.notify_adapters:
         if adapter.kind == "file_inbox":
@@ -92,7 +93,8 @@ def build_notifiers(config, store) -> list[Notifier]:
                                                  partial(resolve, purpose=adapter.purpose, adapter=adapter),
                                                  dry_run=adapter.dry_run, timeout=adapter.timeout,
                                                  template=adapter.template, lanes=list(lanes),
-                                                 lookup=store.get_message))
+                                                 lookup=store.get_message,
+                                                 display_timezone=zone))
             # The builder resolver accepts message ids, so skips are counted per (lane, id).
             result[-1].resolver_takes_ids = True
             # Shared resolver: the delivery gate uses it and the heartbeat sums skipped_no_session.

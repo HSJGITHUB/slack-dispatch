@@ -309,6 +309,9 @@ def decisions_section(value):
                      hmac_key_file=key_file)
 
 
+UI_LANGUAGES = ("en", "ko")
+
+
 def console_section(value, lane_ids):
     """Optional `console` map (P10). Every key is optional; omitted keys keep defaults."""
     data = mapping({} if value is None else value, "console")
@@ -334,8 +337,12 @@ def console_section(value, lane_ids):
             raise ConfigError("console.direct_lane must reference a configured lane")
     channels = {string(key, "console.channels key"): string(name, "console.channels name")
                 for key, name in mapping(data.get("channels", {}) or {}, "console.channels").items()}
+    language = string(data.get("ui_language", Console.ui_language), "console.ui_language")
+    if language not in UI_LANGUAGES:
+        raise ConfigError("console.ui_language must be one of: " + ", ".join(UI_LANGUAGES))
     return Console(host=host, port=port, base_url=base_url, page_size=page_size,
-                   lane_hint_people=hint, direct_lane=direct, channels=channels)
+                   lane_hint_people=hint, direct_lane=direct, channels=channels,
+                   ui_language=language)
 
 
 def timezone_name(value):

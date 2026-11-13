@@ -242,8 +242,10 @@ pending until done. Do not combine ids and `--thread`; that returns 2.
 
 Session adapters accept `template.message` and `template.cli` strings. Supported
 message placeholders are `{lane}`, `{count}`, `{ids}`, `{kinds}`, `{attention}`,
-`{lanes}`, and `{cli}`. Ids and lane ids are comma separated. Kinds count ledger
-origin `reconcile` as backfill and all other or absent origins as new, in new then
+`{lanes}`, `{cli}`, and `{sent_at}`. `{sent_at}` (P14) is the time the message is
+rendered, in `display_timezone` (UTC when unset or unavailable on the host), as
+`MM-DD HH:MM:SS`, so a lane session can measure delivery delay. Ids and lane ids are
+comma separated. Kinds count ledger origin `reconcile` as backfill and all other or absent origins as new, in new then
 backfill order, omitting zero counts. Attention counts ids with a set flag.
 Unset cli is empty; unknown placeholders remain literal. Substitution is a single
 pass, preserving braces in inserted values. An unset message keeps the existing

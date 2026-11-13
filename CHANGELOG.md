@@ -5,6 +5,22 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P14 console staging
+- Triage decisions are staged, not applied: a click marks the row (chip, highlighted
+  button; a second click unstages), and one sticky `GO (N)` applies every staged
+  decision through the new `POST /api/queue/commit`, with per-id results `applied`,
+  `conflict`, `not_found` or `error` in request order. Undecided rows are untouched.
+- Staged decisions persist in browser localStorage by message id, survive polling and
+  reloads, and are dropped when the id leaves the queue (`/api/queue` adds
+  `pending_ids`). `Cancel all`, a per-row `Apply now` link (the old immediate action),
+  and keys `g`, `Enter`, `Esc`. The bulk checkbox bar is removed.
+- Add `console.ui_language` (`en` default, `ko`): page strings come from one dictionary
+  per language with the same keys, including the Korean verbs and a one-line legend.
+- Session wake templates accept `{sent_at}`: render time in `display_timezone` as
+  `MM-DD HH:MM:SS`.
+- An applied exclude from a channel without a lane default returns `channel_hint` and
+  the page suggests the Scope tab. No routing change.
+
 ### P13 scope learning
 - Add `scope add|list|remove|import` and `sent` to the inbox CLI: lanes register channels,
   threads, DMs and people; thread claims and sends bind threads at once; DM sends add dm

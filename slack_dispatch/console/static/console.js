@@ -1,140 +1,316 @@
 "use strict";
 
-// Every user-visible string of the console lives in this one object.
-const UI = Object.freeze({
-  title: "Dispatch console",
-  navLabel: "Views",
-  tabQueue: "Triage",
-  tabLanes: "Lanes",
-  tabService: "Service",
-  tabProposals: "Scope",
-  proposalsTitle: (count, min) => count + " scope proposal(s); suggested after " + min + " consistent event(s)",
-  proposalsEmpty: "No open or suggested scope proposals.",
-  confirm: "Confirm",
-  reject: "Reject",
-  defer: "Defer",
-  conflict: "conflict",
-  effective: "in effect",
-  imported: "imported",
-  current: (lane, source) => lane + " (" + source + ")",
-  proposalDone: (status) => "Proposal " + status,
-  learnedTitle: "Learned scope",
-  learnedEmpty: "No confirmed scope overrides in the ledger.",
-  exportButton: "Export YAML",
-  exportHint: "Merge into the instance config; the ledger override is already in effect.",
-  searchPlaceholder: "Search id, channel, author or text",
-  searchButton: "Search",
-  loading: "Loading...",
-  loadFailed: "Could not load data from the console server.",
-  refreshed: (when) => "Updated " + when,
-  refresh: "Refresh",
-  queueTitle: (total) => total + " item(s) waiting for a lane",
-  queueEmpty: "The human queue is empty.",
-  showing: (first, last, total) => "Showing " + first + "-" + last + " of " + total,
-  previous: "Previous",
-  next: "Next",
-  selectAll: "Select all on this page",
-  selected: (count) => count + " selected",
-  assignSelected: "Assign selected to",
-  assign: "Assign",
-  direct: "Direct",
-  directTitle: (lane) => "Assign to " + lane,
-  exclude: "Exclude",
-  done: "Done",
-  notePlaceholder: "Optional note",
-  noBody: "No body stored",
-  rootLabel: "Thread root",
-  rootMissing: "Root not in ledger",
-  truncated: "(truncated)",
-  context: (shown, total) => "Thread context: last " + shown + " of " + total + " message(s)",
-  later: "later",
-  suggested: (lane, reason) => "Suggested: " + lane + (reason ? " (" + reason + ")" : ""),
-  noSuggestion: "No classifier suggestion",
-  pendingReason: (reason) => "Queued because: " + reason,
-  hints: "Hints:",
-  hintRule: (channel) => "rule for " + channel,
-  hintHistory: (count) => count + " recent",
-  attention: (flag) => "attention: " + flag,
-  origin: (value) => "origin: " + value,
-  edited: "edited",
-  files: "files",
-  bot: "bot",
-  reply: "reply",
-  age: (text) => text + " ago",
-  actionApplied: (count) => count + " item(s) updated",
-  actionFailed: (count, detail) => count + " item(s) not updated: " + detail,
-  requestFailed: (detail) => "Request failed: " + detail,
-  lanesTitle: "Lanes",
-  openInbox: "Open inbox",
-  session: "Session",
-  noSession: "no session",
-  addressedBy: (kind) => "(" + kind + ")",
-  live: "live",
-  notLive: "not live",
-  paused: "paused",
-  unregistered: "not in ledger",
-  today: "Today",
-  todayCounts: (c) => "new " + c.new + ", assigned " + c.assigned + ", acked " + c.acked + ", done " + c.done,
-  open: "Open items",
-  oldestUnacked: "Oldest unacknowledged",
-  lastDelivery: "Last delivery",
-  lastReminder: "Last reminder wake",
-  inboxFile: "Inbox file",
-  none: "-",
-  back: "Back to lanes",
-  laneInbox: (lane) => "Lane " + lane + " inbox",
-  fullRoots: "Show full root bodies",
-  laneEmpty: "No pending items in this lane.",
-  ownerReplied: (when) => "Owner replied at " + when,
-  ack: "Ack",
-  reroute: "Reroute",
-  rerouteTo: "Reroute to",
-  state: (value) => "state: " + value,
-  kind: (value) => "kind: " + value,
-  serviceTitle: "Service",
-  heartbeat: "Heartbeat",
-  noHeartbeat: "No heartbeat file found.",
-  stale: "stale",
-  fresh: "fresh",
-  counters: "Counters",
-  wake: "Wake switch",
-  wakeOff: "wake.off present: wakes are blocked",
-  wakeOn: "wake.off absent",
-  wakeConfig: (enabled) => "wake_policy.enabled: " + enabled,
-  humanQueue: "Human queue",
-  adapters: "Notification adapters",
-  reconcile: "Recent reconcile passes",
-  noReconcile: "No reconcile pass in the current log.",
-  warnings: "Recent warnings and errors",
-  noWarnings: "No warnings or errors in the current log.",
-  gaps: "Ingest gaps",
-  noGaps: "No ingest gaps recorded.",
-  searchTitle: (query) => "Search: " + query,
-  searchEmpty: "No matching messages.",
-  searchTruncated: "Showing the first 200 matches.",
-  close: "Close",
-  columns: {
-    id: "Id", when: "When", channel: "Channel", author: "Author", state: "State", lane: "Lane",
-    reason: "Route reason", note: "Note", text: "Text", index: "#", kind: "Kind",
-    purpose: "Purpose", dryRun: "Dry run", at: "At", counts: "Counts", level: "Level",
-    logger: "Logger", message: "Message", source: "Source", detected: "Detected",
-    lastEvent: "Last event", resumed: "Resumed", catchup: "Caught up", key: "Field", value: "Value",
-    scopeKey: "Key", name: "Name", evidence: "Evidence", firstSeen: "First seen", lastSeen: "Last seen",
-    status: "Status", lanes: "Lanes", current: "Current default", actions: "Actions", by: "By",
-    inConfig: "In config",
-  },
-  yes: "yes",
-  no: "no",
-  units: { s: "s", m: "m", h: "h", d: "d", bytes: "B", kib: "KiB", mib: "MiB" },
+// Every user-visible string of the console lives in one dictionary per language
+// (P14: console.ui_language, `en` or `ko`). Both dictionaries have the same keys;
+// tests/test_console_staging.py checks that. Use double-quoted strings only here.
+const UI_TEXT = Object.freeze({
+  en: Object.freeze({
+    title: "Dispatch console",
+    navLabel: "Views",
+    tabQueue: "Triage",
+    tabLanes: "Lanes",
+    tabService: "Service",
+    tabProposals: "Scope",
+    proposalsTitle: (count, min) => count + " scope proposal(s); suggested after " + min + " consistent event(s)",
+    proposalsEmpty: "No open or suggested scope proposals.",
+    confirm: "Confirm",
+    reject: "Reject",
+    defer: "Defer",
+    conflict: "conflict",
+    effective: "in effect",
+    imported: "imported",
+    current: (lane, source) => lane + " (" + source + ")",
+    proposalDone: (status) => "Proposal " + status,
+    learnedTitle: "Learned scope",
+    learnedEmpty: "No confirmed scope overrides in the ledger.",
+    exportButton: "Export YAML",
+    exportHint: "Merge into the instance config; the ledger override is already in effect.",
+    searchPlaceholder: "Search id, channel, author or text",
+    searchButton: "Search",
+    loading: "Loading...",
+    loadFailed: "Could not load data from the console server.",
+    refreshed: (when) => "Updated " + when,
+    refresh: "Refresh",
+    queueTitle: (total) => total + " item(s) waiting for a lane",
+    queueEmpty: "The human queue is empty.",
+    showing: (first, last, total) => "Showing " + first + "-" + last + " of " + total,
+    previous: "Previous",
+    next: "Next",
+    assign: "Assign",
+    direct: "Direct",
+    directTitle: (lane) => "Assign to " + lane,
+    exclude: "Exclude",
+    done: "Done",
+    notePlaceholder: "Optional note",
+    goButton: (count) => "GO (" + count + ")",
+    goTitle: "Apply every staged decision",
+    cancelAll: "Cancel all",
+    applyNow: "Apply now",
+    applyNowTitle: "Apply this row's staged decision right away",
+    legend: (direct) => "Assign = hand to a session · Direct = to the " + direct + " inbox · Done = already handled or no reply needed · Exclude = posts like this need not reach the queue",
+    stagedChip: (label) => "Staged: " + label,
+    stagedElsewhere: (count) => count + " staged item(s) on other pages",
+    committing: "Applying...",
+    commitSummary: (c) => "Applied " + c.applied + ", conflict " + c.conflict + ", not found " + c.not_found + ", error " + c.error,
+    outcome: (status, detail) => (status === "conflict" ? "Handled elsewhere meanwhile" : status === "not_found" ? "No longer in the ledger" : "Not applied") + (detail ? " (" + detail + ")" : ""),
+    channelHint: "If posts from this channel keep coming, you can propose excluding the channel in the Scope tab",
+    openScope: "Open the Scope tab",
+    noSuggestionToStage: "This item has no suggested lane",
+    keysHelp: "Keys: g = focus GO; Enter on a focused row = stage the suggested lane; Esc = unstage the focused row",
+    queueColumns: {
+      when: "When",
+      channel: "Channel",
+      author: "Author",
+      attention: "Attention",
+      suggestion: "Suggestion",
+    },
+    noBody: "No body stored",
+    rootLabel: "Thread root",
+    rootMissing: "Root not in ledger",
+    truncated: "(truncated)",
+    context: (shown, total) => "Thread context: last " + shown + " of " + total + " message(s)",
+    later: "later",
+    suggested: (lane, reason) => "Suggested: " + lane + (reason ? " (" + reason + ")" : ""),
+    noSuggestion: "No classifier suggestion",
+    pendingReason: (reason) => "Queued because: " + reason,
+    hints: "Hints:",
+    hintRule: (channel) => "rule for " + channel,
+    hintHistory: (count) => count + " recent",
+    attention: (flag) => "attention: " + flag,
+    origin: (value) => "origin: " + value,
+    edited: "edited",
+    files: "files",
+    bot: "bot",
+    reply: "reply",
+    age: (text) => text + " ago",
+    actionApplied: (count) => count + " item(s) updated",
+    actionFailed: (count, detail) => count + " item(s) not updated: " + detail,
+    requestFailed: (detail) => "Request failed: " + detail,
+    lanesTitle: "Lanes",
+    openInbox: "Open inbox",
+    session: "Session",
+    noSession: "no session",
+    addressedBy: (kind) => "(" + kind + ")",
+    live: "live",
+    notLive: "not live",
+    paused: "paused",
+    unregistered: "not in ledger",
+    today: "Today",
+    todayCounts: (c) => "new " + c.new + ", assigned " + c.assigned + ", acked " + c.acked + ", done " + c.done,
+    open: "Open items",
+    oldestUnacked: "Oldest unacknowledged",
+    lastDelivery: "Last delivery",
+    lastReminder: "Last reminder wake",
+    inboxFile: "Inbox file",
+    none: "-",
+    back: "Back to lanes",
+    laneInbox: (lane) => "Lane " + lane + " inbox",
+    fullRoots: "Show full root bodies",
+    laneEmpty: "No pending items in this lane.",
+    ownerReplied: (when) => "Owner replied at " + when,
+    ack: "Ack",
+    reroute: "Reroute",
+    rerouteTo: "Reroute to",
+    state: (value) => "state: " + value,
+    kind: (value) => "kind: " + value,
+    serviceTitle: "Service",
+    heartbeat: "Heartbeat",
+    noHeartbeat: "No heartbeat file found.",
+    stale: "stale",
+    fresh: "fresh",
+    counters: "Counters",
+    wake: "Wake switch",
+    wakeOff: "wake.off present: wakes are blocked",
+    wakeOn: "wake.off absent",
+    wakeConfig: (enabled) => "wake_policy.enabled: " + enabled,
+    humanQueue: "Human queue",
+    adapters: "Notification adapters",
+    reconcile: "Recent reconcile passes",
+    noReconcile: "No reconcile pass in the current log.",
+    warnings: "Recent warnings and errors",
+    noWarnings: "No warnings or errors in the current log.",
+    gaps: "Ingest gaps",
+    noGaps: "No ingest gaps recorded.",
+    searchTitle: (query) => "Search: " + query,
+    searchEmpty: "No matching messages.",
+    searchTruncated: "Showing the first 200 matches.",
+    close: "Close",
+    columns: {
+      id: "Id", when: "When", channel: "Channel", author: "Author", state: "State", lane: "Lane",
+      reason: "Route reason", note: "Note", text: "Text", index: "#", kind: "Kind",
+      purpose: "Purpose", dryRun: "Dry run", at: "At", counts: "Counts", level: "Level",
+      logger: "Logger", message: "Message", source: "Source", detected: "Detected",
+      lastEvent: "Last event", resumed: "Resumed", catchup: "Caught up", key: "Field", value: "Value",
+      scopeKey: "Key", name: "Name", evidence: "Evidence", firstSeen: "First seen", lastSeen: "Last seen",
+      status: "Status", lanes: "Lanes", current: "Current default", actions: "Actions", by: "By",
+      inConfig: "In config",
+    },
+    yes: "yes",
+    no: "no",
+    units: { s: "s", m: "m", h: "h", d: "d", bytes: "B", kib: "KiB", mib: "MiB" },
+  }),
+  ko: Object.freeze({
+    title: "디스패치 콘솔",
+    navLabel: "보기",
+    tabQueue: "큐",
+    tabLanes: "레인",
+    tabService: "서비스",
+    tabProposals: "범위",
+    proposalsTitle: (count, min) => "범위 제안 " + count + "건 (일관된 근거 " + min + "건부터 추천)",
+    proposalsEmpty: "열려 있거나 추천된 범위 제안이 없음.",
+    confirm: "확정",
+    reject: "거절",
+    defer: "보류",
+    conflict: "충돌",
+    effective: "적용 중",
+    imported: "가져옴",
+    current: (lane, source) => lane + " (" + source + ")",
+    proposalDone: (status) => "제안 상태: " + status,
+    learnedTitle: "학습된 범위",
+    learnedEmpty: "원장에 확정된 범위 재정의가 없음.",
+    exportButton: "YAML 내보내기",
+    exportHint: "인스턴스 설정에 병합. 원장 재정의는 이미 적용 중.",
+    searchPlaceholder: "id, 채널, 작성자, 본문 검색",
+    searchButton: "검색",
+    loading: "불러오는 중...",
+    loadFailed: "콘솔 서버에서 데이터를 불러오지 못함.",
+    refreshed: (when) => "갱신 " + when,
+    refresh: "새로고침",
+    queueTitle: (total) => "레인 배정 대기 " + total + "건",
+    queueEmpty: "사람 큐가 비어 있음.",
+    showing: (first, last, total) => total + "건 중 " + first + "-" + last,
+    previous: "이전",
+    next: "다음",
+    assign: "배정",
+    direct: "내가 처리",
+    directTitle: (lane) => lane + " 인박스로 배정",
+    exclude: "제외(큐에서 빼기)",
+    done: "끝(처리됨·답 불필요)",
+    notePlaceholder: "메모(선택)",
+    goButton: (count) => "GO (" + count + ")",
+    goTitle: "예정된 결정을 모두 적용",
+    cancelAll: "모두 취소",
+    applyNow: "즉시 적용",
+    applyNowTitle: "이 행의 예정 결정만 바로 적용",
+    legend: (direct) => "배정 = 세션에 맡김 · 내가 처리 = " + direct + " 인박스로 · 끝 = 이미 처리했거나 답 불필요 · 제외 = 이런 글은 큐에 안 와도 됨",
+    stagedChip: (label) => "예정: " + label,
+    stagedElsewhere: (count) => "다른 페이지에 예정 " + count + "건",
+    committing: "적용 중...",
+    commitSummary: (c) => "적용 " + c.applied + ", 충돌 " + c.conflict + ", 없음 " + c.not_found + ", 오류 " + c.error,
+    outcome: (status, detail) => (status === "conflict" ? "그사이 다른 곳에서 처리됨" : status === "not_found" ? "원장에 더 이상 없음" : "적용 안 됨") + (detail ? " (" + detail + ")" : ""),
+    channelHint: "이 채널 글이 계속 오면 Scope 탭에서 채널 제외를 제안할 수 있음",
+    openScope: "범위(Scope) 탭 열기",
+    noSuggestionToStage: "이 항목에는 제안 레인이 없음",
+    keysHelp: "단축키: g = GO로 이동 · 행에서 Enter = 제안 레인 배정 예정 · Esc = 행의 예정 취소",
+    queueColumns: {
+      when: "시각",
+      channel: "채널",
+      author: "작성자",
+      attention: "주의",
+      suggestion: "제안",
+    },
+    noBody: "저장된 본문 없음",
+    rootLabel: "스레드 원글",
+    rootMissing: "원글이 원장에 없음",
+    truncated: "(잘림)",
+    context: (shown, total) => "스레드 맥락: 전체 " + total + "건 중 최근 " + shown + "건",
+    later: "이후",
+    suggested: (lane, reason) => "제안: " + lane + (reason ? " (" + reason + ")" : ""),
+    noSuggestion: "분류기 제안 없음",
+    pendingReason: (reason) => "큐 사유: " + reason,
+    hints: "힌트:",
+    hintRule: (channel) => channel + " 규칙",
+    hintHistory: (count) => "최근 " + count + "건",
+    attention: (flag) => "주의: " + flag,
+    origin: (value) => "출처: " + value,
+    edited: "수정됨",
+    files: "파일",
+    bot: "봇",
+    reply: "답글",
+    age: (text) => text + " 전",
+    actionApplied: (count) => count + "건 반영",
+    actionFailed: (count, detail) => count + "건 미반영: " + detail,
+    requestFailed: (detail) => "요청 실패: " + detail,
+    lanesTitle: "레인",
+    openInbox: "인박스 열기",
+    session: "세션",
+    noSession: "세션 없음",
+    addressedBy: (kind) => "(" + kind + ")",
+    live: "살아 있음",
+    notLive: "꺼짐",
+    paused: "일시정지",
+    unregistered: "원장에 없음",
+    today: "오늘",
+    todayCounts: (c) => "신규 " + c.new + ", 배정 " + c.assigned + ", 확인 " + c.acked + ", 완료 " + c.done,
+    open: "열린 항목",
+    oldestUnacked: "가장 오래된 미확인",
+    lastDelivery: "마지막 전달",
+    lastReminder: "마지막 리마인더 깨우기",
+    inboxFile: "인박스 파일",
+    none: "-",
+    back: "레인 목록으로",
+    laneInbox: (lane) => "레인 " + lane + " 인박스",
+    fullRoots: "원글 전문 보기",
+    laneEmpty: "이 레인에 대기 항목 없음.",
+    ownerReplied: (when) => "오너 답장 " + when,
+    ack: "확인",
+    reroute: "재배정",
+    rerouteTo: "재배정 대상",
+    state: (value) => "상태: " + value,
+    kind: (value) => "종류: " + value,
+    serviceTitle: "서비스",
+    heartbeat: "하트비트",
+    noHeartbeat: "하트비트 파일 없음.",
+    stale: "오래됨",
+    fresh: "최신",
+    counters: "카운터",
+    wake: "깨우기 스위치",
+    wakeOff: "wake.off 있음: 깨우기 차단 중",
+    wakeOn: "wake.off 없음",
+    wakeConfig: (enabled) => "wake_policy.enabled: " + enabled,
+    humanQueue: "사람 큐",
+    adapters: "알림 어댑터",
+    reconcile: "최근 대사 패스",
+    noReconcile: "현재 로그에 대사 패스 없음.",
+    warnings: "최근 경고와 오류",
+    noWarnings: "현재 로그에 경고나 오류 없음.",
+    gaps: "수집 공백",
+    noGaps: "기록된 수집 공백 없음.",
+    searchTitle: (query) => "검색: " + query,
+    searchEmpty: "일치하는 메시지 없음.",
+    searchTruncated: "처음 200건만 표시.",
+    close: "닫기",
+    columns: {
+      id: "Id", when: "시각", channel: "채널", author: "작성자", state: "상태", lane: "레인",
+      reason: "라우팅 사유", note: "메모", text: "본문", index: "#", kind: "종류",
+      purpose: "용도", dryRun: "드라이런", at: "시각", counts: "개수", level: "수준",
+      logger: "로거", message: "메시지", source: "소스", detected: "감지",
+      lastEvent: "마지막 이벤트", resumed: "재개", catchup: "따라잡음", key: "항목", value: "값",
+      scopeKey: "키", name: "이름", evidence: "근거", firstSeen: "처음 확인", lastSeen: "마지막 확인",
+      status: "상태", lanes: "레인", current: "현재 기본값", actions: "작업", by: "확정자",
+      inConfig: "설정에 있음",
+    },
+    yes: "예",
+    no: "아니오",
+    units: { s: "초", m: "분", h: "시간", d: "일", bytes: "B", kib: "KiB", mib: "MiB" },
+  }),
 });
 
+// The active dictionary; start() switches it to console.ui_language.
+let UI = UI_TEXT.en;
+
 const VIEWS = { "/": "queue", "/lanes": "lanes", "/service": "service", "/proposals": "proposals" };
+const QUEUE_ACTIONS = ["assign", "direct", "exclude", "done"];
+// Staged triage decisions survive polling and reloads (P14); per-viewer browser storage.
+const STAGE_KEY = "slack-dispatch.console.staged.v1";
+const MAX_COMMIT = 200;
 const state = {
   config: null,
   view: "queue",
   queueOffset: 0,
   queueCards: new Map(),
-  selected: new Set(),
+  staged: new Map(),
+  committing: false,
   pendingMsg: null,
   lane: null,
   laneFull: false,
@@ -262,11 +438,50 @@ function refresh() {
   return null;
 }
 
-// ---------- triage queue ----------
+// ---------- triage queue (P14: staged decisions, one GO) ----------
+
+function loadStaged() {
+  const staged = new Map();
+  let raw = null;
+  try {
+    raw = JSON.parse(window.localStorage.getItem(STAGE_KEY) || "{}");
+  } catch (error) {
+    raw = null;
+  }
+  if (!raw || typeof raw !== "object") return staged;
+  for (const [id, decision] of Object.entries(raw)) {
+    if (!decision || !QUEUE_ACTIONS.includes(decision.action)) continue;
+    if (decision.action === "assign" && typeof decision.lane !== "string") continue;
+    staged.set(id, {
+      action: decision.action,
+      lane: decision.action === "assign" ? decision.lane : null,
+      note: typeof decision.note === "string" ? decision.note : "",
+    });
+  }
+  return staged;
+}
+
+function saveStaged() {
+  try {
+    window.localStorage.setItem(STAGE_KEY, JSON.stringify(Object.fromEntries(state.staged)));
+  } catch (error) {
+    // Storage can be unavailable (private window, blocked site data); staging still works in memory.
+  }
+}
+
+function sameDecision(decision, action, lane) {
+  return Boolean(decision) && decision.action === action && (action !== "assign" || decision.lane === lane);
+}
+
+function decisionLabel(decision) {
+  if (decision.action === "assign") return UI.assign + " " + decision.lane;
+  return UI[decision.action];
+}
 
 function queueRoot() {
   const section = document.getElementById("view-queue");
   if (!section.querySelector(".queue-list")) {
+    const c = UI.queueColumns;
     const header = el("div", { className: "toolbar" },
       el("strong", { className: "queue-total", text: UI.loading }),
       el("span", { className: "muted small queue-updated" }),
@@ -275,44 +490,32 @@ function queueRoot() {
       el("button", { className: "queue-prev", text: UI.previous, onclick: () => pageQueue(-1) }),
       el("button", { className: "queue-next", text: UI.next, onclick: () => pageQueue(1) }),
       el("button", { text: UI.refresh, onclick: () => loadQueue() }));
-    section.append(header, bulkBar(), el("div", { className: "queue-list" }));
+    const head = el("div", { className: "queue-head small muted" },
+      [c.when, c.channel, c.author, c.attention, c.suggestion].map((label) => el("span", { text: label })));
+    section.append(goBar(), header, head, el("div", { className: "queue-list" }));
   }
   return section;
 }
 
-function bulkBar() {
-  const laneSelect = el("select", { className: "bulk-lane" });
-  const note = el("input", { type: "text", className: "bulk-note", placeholder: UI.notePlaceholder, maxlength: "2000" });
-  const selectAll = el("input", { type: "checkbox", className: "bulk-all", title: UI.selectAll, "aria-label": UI.selectAll,
-    onchange: (event) => {
-      for (const [id, card] of state.queueCards) {
-        card.check.checked = event.target.checked;
-        if (event.target.checked) state.selected.add(id); else state.selected.delete(id);
-      }
-      updateBulk();
-    } });
-  const ids = () => Array.from(state.selected);
-  return el("div", { className: "bulk" },
-    selectAll,
-    el("span", { className: "bulk-count", text: UI.selected(0) }),
-    el("span", { text: UI.assignSelected }), laneSelect,
-    el("button", { className: "bulk-action", text: UI.assign, onclick: () => queueAction("assign", ids(), laneSelect.value) }),
-    el("button", { className: "bulk-action bulk-direct", text: UI.direct, onclick: () => queueAction("direct", ids()) }),
-    el("button", { className: "bulk-action danger", text: UI.exclude, onclick: () => queueAction("exclude", ids()) }),
-    note,
-    el("button", { className: "bulk-action", text: UI.done, onclick: () => queueAction("done", ids(), null, note.value) }));
+function goBar() {
+  return el("div", { className: "gobar" },
+    el("div", { className: "gobar-row" },
+      el("button", { className: "go-button primary", text: UI.goButton(0), title: UI.goTitle, onclick: () => commitStaged() }),
+      el("button", { className: "cancel-all", text: UI.cancelAll, onclick: () => cancelAll() }),
+      el("span", { className: "muted small gobar-elsewhere" })),
+    el("div", { className: "legend small", text: UI.legend((state.config && state.config.direct_lane) || UI.none) }),
+    el("div", { className: "commit-results small", hidden: true }));
 }
 
-function updateBulk() {
+function updateGoBar() {
   const section = queueRoot();
-  section.querySelector(".bulk-count").textContent = UI.selected(state.selected.size);
-  for (const button of section.querySelectorAll(".bulk-action")) button.disabled = state.selected.size === 0;
-  const direct = section.querySelector(".bulk-direct");
-  direct.hidden = !state.config.direct_lane;
-  if (state.config.direct_lane) direct.title = UI.directTitle(state.config.direct_lane);
-  const select = section.querySelector(".bulk-lane");
-  if (!select.options.length) for (const lane of state.config.lanes) select.append(el("option", { value: lane, text: lane }));
-  section.querySelector(".bulk-all").checked = state.queueCards.size > 0 && state.selected.size === state.queueCards.size;
+  const count = state.staged.size;
+  const go = section.querySelector(".go-button");
+  go.textContent = state.committing ? UI.committing : UI.goButton(count);
+  go.disabled = state.committing || count === 0;
+  section.querySelector(".cancel-all").disabled = state.committing || count === 0;
+  const elsewhere = Array.from(state.staged.keys()).filter((id) => !state.queueCards.has(id)).length;
+  section.querySelector(".gobar-elsewhere").textContent = elsewhere ? UI.stagedElsewhere(elsewhere) : "";
 }
 
 function pageQueue(step) {
@@ -323,6 +526,7 @@ function pageQueue(step) {
 
 async function loadQueue() {
   const section = queueRoot();
+  updateGoBar();
   let data;
   try {
     data = await api("/api/queue?offset=" + state.queueOffset + "&limit=" + state.config.page_size);
@@ -334,6 +538,7 @@ async function loadQueue() {
     state.queueOffset = Math.max(0, data.total - (data.total % data.limit || data.limit));
     return loadQueue();
   }
+  pruneStaged(data.pending_ids);
   section.querySelector(".queue-total").textContent = data.total ? UI.queueTitle(data.total) : UI.queueEmpty;
   section.querySelector(".queue-updated").textContent = UI.refreshed(nowText());
   const first = data.items.length ? data.offset + 1 : 0;
@@ -341,17 +546,32 @@ async function loadQueue() {
   section.querySelector(".queue-prev").disabled = data.offset === 0;
   section.querySelector(".queue-next").disabled = data.offset + data.items.length >= data.total;
   renderQueue(section.querySelector(".queue-list"), data.items);
-  updateBulk();
+  updateGoBar();
   focusPendingMessage();
 }
 
+function pruneStaged(pendingIds) {
+  // Drop staged ids that left the queue (handled elsewhere); pending_ids covers every page.
+  if (!Array.isArray(pendingIds) || state.committing) return;
+  const pending = new Set(pendingIds);
+  let changed = false;
+  for (const id of Array.from(state.staged.keys())) {
+    if (!pending.has(id)) {
+      state.staged.delete(id);
+      changed = true;
+    }
+  }
+  if (changed) saveStaged();
+}
+
 function renderQueue(list, items) {
+  // Existing rows keep their node (and so their staged marks, focus and typed note);
+  // only new rows are built, so a poll never rebuilds or reorders a staged row.
   const wanted = new Set(items.map((item) => item.id));
   for (const [id, card] of state.queueCards) {
     if (!wanted.has(id)) {
       card.node.remove();
       state.queueCards.delete(id);
-      state.selected.delete(id);
     }
   }
   let ref = list.firstChild;
@@ -363,6 +583,7 @@ function renderQueue(list, items) {
       card = queueCard(item);
       state.queueCards.set(item.id, card);
     }
+    paintCard(card);
     if (card.node === ref) ref = ref.nextSibling;
     else list.insertBefore(card.node, ref);
   }
@@ -375,18 +596,15 @@ function laneOrder(item) {
 }
 
 function queueCard(item) {
-  const check = el("input", { type: "checkbox", "aria-label": item.id,
-    onchange: (event) => {
-      if (event.target.checked) state.selected.add(item.id); else state.selected.delete(item.id);
-      updateBulk();
-    } });
+  const c = UI.queueColumns;
   const ageNode = el("span", { text: UI.age(age(item.age_seconds)) });
+  const chip = el("span", { className: "badge chip", hidden: true });
   const meta = el("div", { className: "meta" },
-    check,
-    el("strong", { text: item.when || item.ts }),
-    el("span", { title: item.channel.id, text: "#" + named(item.channel) }),
-    el("span", { title: item.author.id || "", text: named(item.author) }),
-    item.attention ? el("span", { className: "badge attention", text: UI.attention(item.attention) }) : null,
+    chip,
+    el("strong", { title: c.when, text: item.when || item.ts }),
+    el("span", { title: c.channel + ": " + item.channel.id, text: "#" + named(item.channel) }),
+    el("span", { title: c.author + ": " + (item.author.id || ""), text: named(item.author) }),
+    item.attention ? el("span", { className: "badge attention", title: c.attention, text: UI.attention(item.attention) }) : null,
     item.is_reply ? el("span", { className: "badge", text: UI.reply }) : null,
     item.origin ? el("span", { className: "badge", text: UI.origin(item.origin) }) : null,
     item.edited ? el("span", { className: "badge warn", text: UI.edited }) : null,
@@ -423,42 +641,188 @@ function queueCard(item) {
     item.pending_reason ? " / " + UI.pendingReason(item.pending_reason) : null,
     item.hints.length ? " / " + UI.hints + " " + item.hints.map((hint) => hint.lane + " (" +
       (hint.source === "rule" ? UI.hintRule(hint.channel) : UI.hintHistory(hint.count)) + ")").join(", ") : null));
-  const note = el("input", { type: "text", placeholder: UI.notePlaceholder, maxlength: "2000" });
+  const note = el("input", { type: "text", placeholder: UI.notePlaceholder, maxlength: "2000",
+    oninput: () => updateStagedNote(item.id, note.value) });
+  const staged = state.staged.get(item.id);
+  if (staged && staged.action === "done" && staged.note) note.value = staged.note;
+  const buttons = [];
+  const button = (action, lane, props) => {
+    const node = el("button", Object.assign({ "aria-pressed": "false",
+      onclick: () => toggleStage(item.id, action, lane) }, props));
+    buttons.push({ node, action, lane });
+    return node;
+  };
   const laneButtons = laneOrder(item).map((lane) => {
     const suggested = item.suggestion && item.suggestion.lane === lane;
     const hint = hintLanes.get(lane);
-    return el("button", { className: suggested ? "suggested" : (hint ? "hinted" : ""), text: lane,
-      onclick: () => queueAction("assign", [item.id], lane) });
+    return button("assign", lane, { className: suggested ? "suggested" : (hint ? "hinted" : null), text: lane });
   });
+  const applyNow = el("button", { className: "link apply-now", text: UI.applyNow, title: UI.applyNowTitle,
+    onclick: () => applyNowRow(item.id) });
   parts.push(el("div", { className: "actions" },
+    el("span", { className: "muted small group-label", text: UI.assign }),
     laneButtons,
-    state.config.direct_lane ? el("button", { className: "primary", text: UI.direct, title: UI.directTitle(state.config.direct_lane),
-      onclick: () => queueAction("direct", [item.id]) }) : null,
-    el("button", { className: "danger", text: UI.exclude, onclick: () => queueAction("exclude", [item.id]) }),
+    state.config.direct_lane ? button("direct", null, { text: UI.direct, title: UI.directTitle(state.config.direct_lane) }) : null,
+    button("exclude", null, { className: "danger", text: UI.exclude }),
     note,
-    el("button", { text: UI.done, onclick: () => queueAction("done", [item.id], null, note.value) })));
-  const node = el("article", { className: "card", "data-id": item.id }, parts);
-  return { node, check, age: ageNode };
+    button("done", null, { text: UI.done }),
+    el("span", { className: "spacer" }),
+    applyNow));
+  const outcome = el("div", { className: "outcome small", hidden: true });
+  parts.push(outcome);
+  const node = el("article", { className: "card", "data-id": item.id, tabindex: "0" }, parts);
+  return { node, item, age: ageNode, chip, note, buttons, applyNow, outcome };
 }
 
-async function queueAction(action, ids, lane, note) {
-  if (!ids.length) return;
+function paintCard(card) {
+  const decision = state.staged.get(card.item.id);
+  card.node.classList.toggle("staged", Boolean(decision));
+  for (const entry of card.buttons) {
+    const chosen = sameDecision(decision, entry.action, entry.lane);
+    entry.node.classList.toggle("chosen", chosen);
+    entry.node.setAttribute("aria-pressed", chosen ? "true" : "false");
+  }
+  card.chip.hidden = !decision;
+  card.chip.textContent = decision ? UI.stagedChip(decisionLabel(decision)) : "";
+  card.applyNow.disabled = !decision || state.committing;
+}
+
+function showOutcome(card, text) {
+  card.outcome.textContent = text || "";
+  card.outcome.hidden = !text;
+}
+
+function stage(id, decision) {
+  if (decision) state.staged.set(id, decision); else state.staged.delete(id);
+  saveStaged();
+  const card = state.queueCards.get(id);
+  if (card) {
+    showOutcome(card, "");
+    paintCard(card);
+  }
+  updateGoBar();
+}
+
+function toggleStage(id, action, lane) {
+  if (state.committing) return;
+  const card = state.queueCards.get(id);
+  if (sameDecision(state.staged.get(id), action, lane)) {
+    stage(id, null);
+    return;
+  }
+  stage(id, { action, lane: action === "assign" ? lane : null,
+    note: action === "done" && card ? card.note.value.trim() : "" });
+}
+
+function updateStagedNote(id, value) {
+  const decision = state.staged.get(id);
+  if (!decision || decision.action !== "done") return;
+  decision.note = value.trim();
+  saveStaged();
+}
+
+function stageSuggested(id) {
+  const card = state.queueCards.get(id);
+  const suggestion = card && card.item.suggestion;
+  if (!suggestion || !state.config.lanes.includes(suggestion.lane)) {
+    status(UI.noSuggestionToStage, true);
+    return;
+  }
+  if (!sameDecision(state.staged.get(id), "assign", suggestion.lane)) toggleStage(id, "assign", suggestion.lane);
+}
+
+function cancelAll() {
+  if (state.committing) return;
+  state.staged.clear();
+  saveStaged();
+  for (const card of state.queueCards.values()) {
+    showOutcome(card, "");
+    paintCard(card);
+  }
+  showCommitResults(null);
+  updateGoBar();
+}
+
+function stagedRequest(id, decision) {
+  return { id, action: decision.action, lane: decision.lane || null,
+    note: decision.action === "done" && decision.note ? decision.note : null };
+}
+
+async function commitStaged() {
+  if (state.committing || !state.staged.size) return;
+  const decisions = Array.from(state.staged, ([id, decision]) => stagedRequest(id, decision));
+  state.committing = true;
+  updateGoBar();
+  for (const card of state.queueCards.values()) paintCard(card);
+  const results = [];
+  try {
+    for (let start = 0; start < decisions.length; start += MAX_COMMIT) {
+      const data = await api("/api/queue/commit", { decisions: decisions.slice(start, start + MAX_COMMIT) });
+      results.push(...data.results);
+    }
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    state.committing = false;
+  }
+  settle(results);
+  loadQueue();
+}
+
+async function applyNowRow(id) {
+  const decision = state.staged.get(id);
+  if (!decision || state.committing) return;
+  const request = stagedRequest(id, decision);
   let data;
   try {
-    data = await api("/api/queue/actions", { action, ids, lane: lane || null, note: note || null });
+    data = await api("/api/queue/actions", { action: request.action, ids: [id], lane: request.lane, note: request.note });
   } catch (error) {
     status(error.message, true);
     return;
   }
-  const done = reportResults(data);
-  for (const id of done) {
-    const card = state.queueCards.get(id);
-    if (card) card.node.remove();
-    state.queueCards.delete(id);
-    state.selected.delete(id);
-  }
-  updateBulk();
+  settle(data.results.map((row) => ({ id: row.id, action: request.action, status: row.ok ? "applied"
+    : (row.error === "conflict" || row.error === "not_found" ? row.error : "error"),
+    detail: row.detail || (row.ok ? null : row.error), channel_hint: row.channel_hint, channel: row.channel })));
   loadQueue();
+}
+
+function settle(results) {
+  // applied: the row leaves; conflict and not_found: unstaged with the reason shown;
+  // error: stays staged so GO can retry it.
+  for (const row of results) {
+    const card = state.queueCards.get(row.id);
+    if (row.status !== "error") state.staged.delete(row.id);
+    if (row.status === "applied") {
+      if (card) card.node.remove();
+      state.queueCards.delete(row.id);
+    } else if (card) {
+      showOutcome(card, UI.outcome(row.status, row.detail));
+      paintCard(card);
+    }
+  }
+  saveStaged();
+  if (results.length) showCommitResults(results);
+  updateGoBar();
+}
+
+function showCommitResults(results) {
+  const box = clear(queueRoot().querySelector(".commit-results"));
+  box.hidden = !results;
+  if (!results) return;
+  const counts = { applied: 0, conflict: 0, not_found: 0, error: 0 };
+  for (const row of results) counts[row.status] = (counts[row.status] || 0) + 1;
+  box.append(el("div", { text: UI.commitSummary(counts) }));
+  for (const row of results.filter((item) => item.status !== "applied")) {
+    box.append(el("div", { className: "commit-line " + row.status },
+      el("span", { className: "mono", text: row.id }), " ", UI.outcome(row.status, row.detail)));
+  }
+  const hinted = results.filter((row) => row.status === "applied" && row.channel_hint);
+  if (hinted.length) {
+    const names = Array.from(new Set(hinted.map((row) => "#" + named(row.channel))));
+    box.append(el("div", { className: "channel-hint" },
+      UI.channelHint + " (" + names.join(", ") + ") ",
+      el("a", { href: "/proposals", text: UI.openScope, onclick: (event) => { event.preventDefault(); showView("proposals", true); } })));
+  }
 }
 
 function focusPendingMessage() {
@@ -472,6 +836,30 @@ function focusPendingMessage() {
     setTimeout(() => card.node.classList.remove("flash"), 4000);
   } else {
     runSearch(id);
+  }
+}
+
+function onQueueKey(event) {
+  if (state.view !== "queue" || event.ctrlKey || event.metaKey || event.altKey) return;
+  const target = event.target;
+  const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" || target.isContentEditable);
+  if (event.key === "g" && !typing) {
+    const go = document.querySelector(".go-button");
+    if (go) {
+      event.preventDefault();
+      go.focus();
+    }
+    return;
+  }
+  const row = target && target.closest ? target.closest("article.card[data-id]") : null;
+  if (!row || !state.queueCards.has(row.dataset.id) || state.committing) return;
+  if (event.key === "Enter" && target === row) {
+    event.preventDefault();
+    stageSuggested(row.dataset.id);
+  } else if (event.key === "Escape" && state.staged.has(row.dataset.id)) {
+    event.preventDefault();
+    stage(row.dataset.id, null);
   }
 }
 
@@ -801,6 +1189,7 @@ async function runSearch(query) {
 
 function applyStaticText() {
   document.title = UI.title;
+  document.documentElement.lang = UI === UI_TEXT.ko ? "ko" : "en";
   for (const node of document.querySelectorAll("[data-text]")) node.textContent = UI[node.dataset.text];
   for (const node of document.querySelectorAll("[data-placeholder]")) node.placeholder = UI[node.dataset.placeholder];
   for (const node of document.querySelectorAll("[data-aria]")) node.setAttribute("aria-label", UI[node.dataset.aria]);
@@ -811,15 +1200,27 @@ function readHash() {
   if (match) state.pendingMsg = decodeURIComponent(match[1]);
 }
 
+function trackTopHeight() {
+  // The GO bar sticks just below the sticky page header, whose height wraps with the width.
+  const header = document.querySelector("header.top");
+  const set = () => document.documentElement.style.setProperty("--top-height", header.offsetHeight + "px");
+  set();
+  window.addEventListener("resize", set);
+}
+
 async function start() {
-  applyStaticText();
   readHash();
   try {
     state.config = await api("/api/config");
   } catch (error) {
+    applyStaticText();
     status(error.message, true);
     return;
   }
+  UI = UI_TEXT[state.config.ui_language] || UI_TEXT.en;
+  applyStaticText();
+  state.staged = loadStaged();
+  trackTopHeight();
   if (state.config.timezone_warning) status(state.config.timezone_warning, true);
   for (const link of document.querySelectorAll(".tabs a")) {
     link.addEventListener("click", (event) => {
@@ -832,6 +1233,7 @@ async function start() {
     event.preventDefault();
     runSearch(document.getElementById("search-input").value);
   });
+  document.addEventListener("keydown", onQueueKey);
   window.addEventListener("popstate", () => showView(VIEWS[location.pathname] || "queue", false));
   window.addEventListener("hashchange", () => {
     readHash();

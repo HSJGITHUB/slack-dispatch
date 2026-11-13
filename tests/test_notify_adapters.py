@@ -88,7 +88,7 @@ class NotifierTests(unittest.TestCase):
         store.upsert_lane("support", paused=True)
         self.assertIsNone(adapters[1].target_resolver("support"))
         for field, value in (("immediate_users", "wrong"), ("owner_user", 42)):
-            raw = yaml.safe_load(SAMPLE.read_text())
+            raw = yaml.safe_load(SAMPLE.read_text(encoding="utf-8"))
             raw["wake_policy"][field] = value
             with self.assertRaises(ConfigError):
                 parse_config(raw)
@@ -217,6 +217,39 @@ class SessionTemplateTests(unittest.TestCase):
         store = FakeStore(messages=[{"id": "dummy-a", "origin": "reconcile", "attention": "always_human"}])
         notifier = build_notifiers(config, store)[1]
         self.assertEqual(notifier.message("support", ["dummy-a"]), "owner, support, content|backfill 1|1")
+
+    def test_sent_at_uses_display_timezone_and_fake_clock(self):
+        # P14: {sent_at} is the render time as MM-DD HH:MM:SS in display_timezone.
+        clock = Mock(return_value=1794528005.9)  # 2026-11-13 00:00:05 UTC
+        notifier = SessionMessageNotifier(["dummy", "{message}"], lambda lane: "dummy", clock=clock,
+                                          template={"message": "{lane} {sent_at} {sent_atx} {unknown}"})
+        self.assertEqual(notifier.message("support", ["dummy-a"]),
+                         "support 11-13 00:00:05 {sent_atx} {unknown}")
+        clock.return_value = 1794528005.9 + 3600
+        self.assertEqual(notifier.message("support", []), "support 11-13 01:00:05 {sent_atx} {unknown}")
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo("Asia/Seoul")
+        except Exception:
+            self.skipTest("no time zone database on this host")
+        seoul = SessionMessageNotifier(["dummy", "{message}"], lambda lane: "dummy",
+                                       display_timezone="Asia/Seoul", clock=lambda: 1794528005.9,
+                                       template={"message": "{sent_at}"})
+        self.assertEqual(seoul.message("support", []), "11-13 09:00:05")
+        # Without a message template the summary stays exactly as before.
+        plain = SessionMessageNotifier(["dummy", "{message}"], lambda lane: "dummy", clock=clock)
+        self.assertNotIn("{sent_at}", plain.message("support", ["dummy-a"]))
+
+    def test_builder_passes_display_timezone_for_sent_at(self):
+        raw = yaml.safe_load(SAMPLE.read_text(encoding="utf-8"))
+        self.assertIn("{sent_at}", raw["notify_adapters"][1]["template"]["message"])
+        raw["display_timezone"] = "UTC"
+        notifier = build_notifiers(parse_config(raw), FakeStore(messages=[]))[1]
+        notifier.clock = lambda: 1794528005.0
+        self.assertIn("Sent 11-13 00:00:05.", notifier.message("support", ["dummy-a"]))
+        bad = SessionMessageNotifier(["dummy"], lambda lane: "dummy", display_timezone="Dummy/Nowhere",
+                                     clock=lambda: 1794528005.0, template={"message": "{sent_at}"})
+        self.assertEqual(bad.message("support", []), "11-13 00:00:05")
 
     def test_invalid_template_value(self):
         for template in ({"message": None}, {"cli": 42}):
