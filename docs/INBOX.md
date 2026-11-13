@@ -1,8 +1,12 @@
 # Lane inbox and notifications
 
 Run `python -m slack_dispatch.inbox.cli --ledger dummy.db --inbox-root inbox COMMAND`.
-The installed entry point is `slack-dispatch`. Options can appear before or after
-COMMAND. `SLACK_DISPATCH_LEDGER` and `SLACK_DISPATCH_INBOX` supply path defaults.
+The installed entry point is `slack-dispatch`. Options (`--ledger`, `--inbox-root`,
+`--config`, `--show-body`) can appear before or after COMMAND; since P12 that includes
+`--config`. `SLACK_DISPATCH_LEDGER`, `SLACK_DISPATCH_INBOX` and `SLACK_DISPATCH_CONFIG`
+supply defaults. The recommended form for lane sessions is
+`<prefix> --config PATH inbox <lane> --thread`, where `<prefix>` is the CLI with its
+`--ledger` and `--inbox-root` options (the sample session template's `{cli}`).
 The default inbox root is `inbox`; a ledger path is required without an injected
 store. This CLI consumes the shared LedgerStore API.
 
@@ -23,8 +27,8 @@ store. This CLI consumes the shared LedgerStore API.
   page such as cp949; streams injected by a caller are left unchanged.
 - `ack slack:CDUMMY:1`: mark the message acknowledged.
 - `done slack:CDUMMY:1 --note complete`: complete the message with an optional note.
-- `reroute slack:CDUMMY:1 --to content`: route with reason `reroute:<old lane>`
-  and append a `reroute` record to the destination inbox.
+- `reroute slack:CDUMMY:1 --to content`: route with reason `reroute:<old lane>`,
+  append a `reroute` record to the destination inbox and queue a wake request (P12).
 - `claim support --session dummy-session [--config PATH]`: replace the lane's ledger
   session pointer. Without `--session`, use `SLACK_DISPATCH_SESSION`, then
   `CLAUDE_SESSION_ID`. The value is stored verbatim and may be any form described in
@@ -41,7 +45,10 @@ store. This CLI consumes the shared LedgerStore API.
   and unknown lanes as skipped unknown lane. Print unknown lane ids without
   creating lanes. Duplicate keys in separate rows are processed in file order.
 - `assign slack:CDUMMY:1 support --note reviewed`: record a human assignment with
-  reason `human:cli`, optionally save a note, and append to the destination inbox.
+  reason `human:cli`, optionally save a note, append to the destination inbox and
+  queue a wake request (P12).
+- `cutover support [--seen-before TS] [--note TEXT] [--apply]`: switch a lane from
+  manual sweeps to the dispatcher (P12, below).
 
 A session first claims its stable lane, then reads its inbox. An operator reads
 `queue` and explicitly uses `assign` to accept or override a suggestion. A suggestion
@@ -240,3 +247,69 @@ Unset cli is empty; unknown placeholders remain literal. Substitution is a singl
 pass, preserving braces in inserted values. An unset message keeps the existing
 summary. Each command template part remains one argv element and no shell runs.
 The sample wake requests thread context and preserves the session's own records.
+
+## P12 cutover and fixes
+
+### `cutover LANE [--seen-before TS] [--note TEXT] [--apply]`
+
+Closes only what the lane session has demonstrably seen and delivers the rest again.
+Without `--apply` it is a dry run that prints the plan and changes nothing.
+
+- `lane_last_seen` is the latest `ack_at` or `done_at` among the lane's messages, the
+  lane session's last demonstrable activity. Rows whose note shows that something
+  other than the lane session closed them do not count: `cutover:`, `owner_reaction:`,
+  `owner_post`, `prehandled`, `context`, `message_deleted` and `human:` (console done
+  without a note, card decisions). A rerun therefore never treats its own closures as
+  lane activity. A console `ack`, or a console `done` with a free-text note, cannot be
+  told apart from the session and does count.
+- `--seen-before TS` (ISO time, naive means local time, or a Slack ts) overrides it.
+- An item is delivered at the latest of its `received_at`, its `assigned_at` and the
+  `service_deliveries` time of its thread and lane (that table is per thread, not per
+  message). Taking the latest signal keeps an item open whenever any signal says it
+  reached the lane at or after `lane_last_seen`.
+- Items of the lane in state `assigned` or `acked` delivered before `lane_last_seen`
+  are closed: state `done`, note `cutover: <TEXT or "seen by the lane before cutover">`.
+- Items delivered at or after it, every item with `attention`, and every item when
+  the lane has no activity at all stay open and are appended to the lane inbox again
+  with kind `backfill`. Backfill records create no wake request.
+- Context rows and owner posts are refused: one `refused: <id> is ...` line each on
+  stderr; the rest of the plan still applies and the command returns 2.
+
+Output:
+
+```text
+cutover support mode=apply lane_last_seen=2026-11-13T01:00:00+00:00 basis=lane activity
+closed=4 kept_open=2 redelivered=2 attention_kept=1 refused=0
+slack:CDUMMY:1.000100 kept_open attention=-
+slack:CDUMMY:2.000100 kept_open attention=owner_mention
+```
+
+A dry run prints the planned counts and ends with `dry run: nothing changed; rerun
+with --apply`. Exit codes: 0 success, 2 invalid input (including an unusable
+`--seen-before`) or refused rows, 3 unknown lane, 1 unexpected error.
+
+### Deleted messages
+
+A `message_deleted` event sets the additive ledger column `deleted_at`, clears the body
+(never fetched or stored again) and closes an open row (`new`, `assigned`, `acked`,
+`human_pending`) with state `done` and `done_at`. The note stays `message_deleted`, the
+value the rehydrate pass and existing consumers already use. Closed rows keep their
+state. Inbox listings and thread items hide deleted messages; with `--include-done`
+they appear with state `deleted`. A deleted thread root that still has pending
+replies is shown with state `deleted` and the body `[deleted]`.
+
+### Context rows and owner posts
+
+Rows with route_reason `context:*` or note `context` (hydrated thread roots) and rows
+with route_reason or note `owner_post` are never inbox items. `assign` and `reroute`
+refuse them with exit 2 and one line `refused: <id> is a context row, not an inbox
+item` (or `an owner post`); nothing changes. Inbox listings skip such rows even when an
+older inbox record names them. The thread view still shows them as the root or as the
+`owner replied at` marker.
+
+### Wake requests
+
+`assign` and `reroute` run the same code as the console actions
+(`slack_dispatch.console.actions`): route, inbox append and one row in the ledger table
+`wake_requests` (source `cli`). The resident service turns the row into a lane wake
+within about five seconds (see SERVICE.md).

@@ -73,6 +73,14 @@ notify_adapters:
 #    purpose: human_queue
 #    command_template: [dummy-session-cli, --target, "{target}", --message, "{message}"]
 #    template: {target: dummy-operator-session}
+# A dispatch_card adapter (P12) writes Jarvis card requests for immediate human-queue
+# notices (owner mentions, always_human) to <dir>/cards/; digests never produce cards.
+# workspace_domain builds message permalinks; omit it to send cards without one.
+#  - kind: dispatch_card
+#    purpose: human_queue
+#    dir: dummy/state/dispatch_cards
+#    only_immediate: true
+#    workspace_domain: example
 ledger:
   path: state/ledger.sqlite3
   store_body: false
@@ -150,3 +158,11 @@ console:
   channels:
     C0000000001: dummy-support
     C0000000002: dummy-general
+# Optional card decision consumer (P12). dir defaults to the first dispatch_card adapter
+# dir; without either the consumer is off. hmac_key_file is the key file the Jarvis side
+# creates (one line DISPATCH_HMAC_KEY=<64 hex>); it lives outside the repository and is
+# never logged. Without a readable key, decision files stay where they are.
+decisions:
+  dir: null
+  poll_seconds: 5
+  hmac_key_file: null

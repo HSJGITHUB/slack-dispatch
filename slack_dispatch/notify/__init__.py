@@ -5,6 +5,7 @@ from functools import partial
 import shlex
 
 from .base import Notifier
+from .dispatch_card import DispatchCardNotifier
 from .file_drop import FileDropNotifier
 from .file_inbox import FileInboxNotifier
 from .session_message import NotifyError, SessionMessageNotifier
@@ -98,6 +99,11 @@ def build_notifiers(config, store) -> list[Notifier]:
             result[-1].session_resolver = resolver
         elif adapter.kind in ("file_drop", "assistant_dm"):
             result.append(FileDropNotifier(adapter.path, adapter.template))
+        elif adapter.kind == "dispatch_card":
+            # P12: Jarvis card requests for immediate human-queue notices.
+            result.append(DispatchCardNotifier(adapter.path, config, store,
+                                               only_immediate=adapter.only_immediate,
+                                               workspace_domain=adapter.workspace_domain))
         else:
             raise ValueError("Unsupported notification adapter")
     return result
@@ -105,6 +111,10 @@ def build_notifiers(config, store) -> list[Notifier]:
 
 def notify_human(notifier, ids, metadata):
     """Render generated metadata without extending the ids-only base protocol."""
+    if isinstance(notifier, DispatchCardNotifier):
+        # Only immediate notices reach a card adapter (the pipeline filters digests).
+        notifier.write(ids, metadata)
+        return
     if isinstance(notifier, FileInboxNotifier):
         # Human summaries are outbox notices, not lane inbox records.
         FileDropNotifier(Path(notifier.root) / "human_queue-notices",

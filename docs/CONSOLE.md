@@ -157,10 +157,14 @@ The CLI records `human:cli` where the console records `human:console`; `done`
 without a note is the one place the console writes a note where the CLI does not.
 Like the CLI `assign`, a console assignment does not create a thread binding.
 
-Nothing else is triggered: no Slack call, no session command and no new table. There
-is no wake request table, so a console assignment does not wake the lane session
-immediately. The record is in the lane's durable inbox, where the session finds it on
-its next `inbox` read; the service's timer sweep then sends the lane reminder after
+`assign`, `direct` and `reroute` also insert one row into the ledger table
+`wake_requests` (P12; source `console`, `cli` for the CLI). No Slack call or session
+command is made by the action itself. The resident service consumes pending wake
+requests every 5 seconds and calls the wake engine `offer` once per (lane, message id)
+still assigned to that lane, with the same debounce and storm rules as a socket
+delivery, so the lane session is woken within about five seconds. The record is also
+in the lane's durable inbox, where the session finds it on its next `inbox` read; the
+service's timer sweep still sends the lane reminder after
 `timers.unacknowledged_seconds` and a reassignment proposal after
 `timers.reassign_seconds` while the item stays unacknowledged, exactly as for a CLI
 assignment. The human queue digest drops handled items on its next flush, and

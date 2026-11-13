@@ -12,13 +12,14 @@ import time
 
 from slack_dispatch import __version__
 from slack_dispatch.config.loader import ConfigError, load_config
+from slack_dispatch.decisions import DecisionConsumer, card_dir
 from slack_dispatch.ingest import build_sources
 from slack_dispatch.ingest.normalize import TIMESTAMP, message_body, safe
 from slack_dispatch.ingest.slack_reconcile import SlackReconcileSource
 from slack_dispatch.ingest.slack_socket import SlackSocketSource
 from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.notify import DEFAULT_STATE_DIR, build_notifiers, wake_dirs_differ, wake_switch_path
-from slack_dispatch.notify.wake import WakePolicyEngine
+from slack_dispatch.notify.wake import Deliver, WakePolicyEngine
 from slack_dispatch.pipeline import Pipeline
 from slack_dispatch.router.classifier import AnthropicSuggester, NullSuggester
 from slack_dispatch.runtime import (
@@ -29,6 +30,7 @@ from slack_dispatch.timers import TimerSweep
 LOG = logging.getLogger(__name__)
 REHYDRATE_STATES = ("new", "assigned", "acked", "human_pending")
 REHYDRATE_CALLS_PER_MINUTE = 40
+WAKE_REQUEST_SECONDS = 5
 
 
 class _DryRunNotifier:
@@ -178,6 +180,34 @@ class CoverageMonitor:
                    and self.clock() - source.disconnected_at > self.threshold for source in self.sources)
 
 
+def consume_wake_requests(pipeline, store):
+    """Offer one lane wake per pending (lane, message id) wake request (P12).
+
+    Requests come from the inbox CLI (`assign`, `reroute`), the console actions and card
+    decisions. Each distinct (lane, message id) gets one `wake_engine.offer`, so the
+    socket debounce and storm rules apply; only messages still assigned to that lane are
+    offered. Every request row read is marked consumed, duplicates included.
+    """
+    rows = store.pending_wake_requests()
+    groups = {}
+    for row in rows:
+        groups.setdefault((row["lane"], row["message_id"]), []).append(row["id"])
+    offered = 0
+    with pipeline.lock:
+        for (lane, message_id), ids in groups.items():
+            message = store.get_message(message_id) if lane and message_id else None
+            if message and message.get("lane") == lane and message["state"] == "assigned":
+                wake = pipeline.wake_engine.offer(lane, message, message.get("author"))
+                if isinstance(wake, Deliver):
+                    pipeline._send("lane", lane, [message_id], inbox=False)
+                if getattr(wake, "notice", None) is not None:
+                    pipeline._human_notice(message_id, kind="storm")
+                    pipeline.wake_engine.notices.clear()
+                offered += 1
+            store.consume_wake_requests(ids)
+    return offered
+
+
 def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_name="unknown"):
     clock, sleep = clock or time.time, sleep or time.sleep
     # One wake switch for the engine, the adapter builder and the delivery gate
@@ -200,7 +230,7 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
         heartbeat = HeartbeatWriter(state / "heartbeat.json",
                                     config.service.heartbeat_seconds, clock)
         sources, started = [], []
-        pipeline = sweep = monitor = None
+        pipeline = sweep = monitor = decisions = None
         shutdown_ok = True
         exit_code = 0
         start_failures = 0
@@ -217,6 +247,9 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
             counters = pipeline.snapshot()
             counters["failures"] += sweep.failures + sum(
                 getattr(source, "failures", 0) for source in sources)
+            if decisions is not None:
+                counters.update(decisions.snapshot())
+                counters["failures"] += decisions.failures
             degraded = monitor.poll() if monitor else False
             heartbeat.write(ok=counters["failures"] == 0 and not degraded,
                             status="degraded" if status == "running" and degraded else status,
@@ -246,6 +279,10 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
             pipeline = Pipeline(config, store, suggester, notifiers, wake, clock)
             sweep = TimerSweep(config, store, notifiers, clock, human=pipeline.human)
             sweep.lock = pipeline.lock
+            directory = card_dir(config)
+            if directory and not once and not dry_run:
+                # P12: Jarvis card decisions; off without a dispatch_card dir, in --once and --dry-run.
+                decisions = DecisionConsumer(config, store, directory)
             sources = build_service_sources(config, pipeline.handle_event, store, once=once)
             monitor = CoverageMonitor(store, pipeline, sources, clock, config.service.gap_alert_seconds)
             LOG.info("Service start version=%s config=%s pid=%d", __version__, Path(config_name).name, os.getpid())
@@ -263,11 +300,23 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
                 attempt("timers", lambda: sweep.run_once(clock()))
             else:
                 last_flush = last_sweep = clock()
+                last_decisions = last_wakes = None
                 while True:
                     try:
                         if flags.should_stop():
                             break
                         now = clock()
+                        if decisions is not None and (
+                                last_decisions is None or now < last_decisions
+                                or now - last_decisions >= config.decisions.poll_seconds):
+                            def decide():
+                                with pipeline.lock:
+                                    decisions.run_once()
+                            attempt("card_decisions", decide)
+                            last_decisions = now
+                        if last_wakes is None or now < last_wakes or now - last_wakes >= WAKE_REQUEST_SECONDS:
+                            attempt("wake_requests", lambda: consume_wake_requests(pipeline, store))
+                            last_wakes = now
                         if now < last_flush or now - last_flush >= 30:
                             attempt("flush", lambda: pipeline.flush(now))
                             last_flush = now

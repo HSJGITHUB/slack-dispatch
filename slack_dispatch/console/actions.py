@@ -6,8 +6,9 @@ inbox files change exactly as they would from the CLI. Where the CLI records
 `human:cli`, the console records `human:console`. `exclude` has no CLI command; it
 uses the same call the router uses for exclusions (state `excluded`, reason in note).
 
-Nothing here wakes a session or posts anywhere. The service's existing timers act on
-the new ledger state (see docs/CONSOLE.md).
+Nothing here posts anywhere. Since P12 `assign` and `reroute` also queue one row in
+`wake_requests` per delivered message; the service consumes it and offers the lane wake
+(see docs/CONSOLE.md). The inbox CLI `assign` and `reroute` call these same functions.
 """
 from slack_dispatch.inbox.files import append, record, validate_lane
 
@@ -19,12 +20,40 @@ LANE_ACTIONS = ("ack", "done", "reroute")
 
 
 class ActionError(Exception):
-    """A per-message failure with a stable code: not_found, lane_not_found or conflict."""
+    """A per-message failure with a stable code: not_found, lane_not_found, conflict or
+    not_inbox_item (P12)."""
 
     def __init__(self, code, detail=None):
         super().__init__(code)
         self.code = code
         self.detail = detail
+
+
+def inbox_refusal(message):
+    """One-line reason when a ledger row is never an inbox item, else None.
+
+    Context rows (route_reason `context:*` or note `context`) and owner posts
+    (route_reason or note `owner_post`) are shown only as thread roots or owner-replied
+    markers; assign, reroute, cutover and card decisions refuse them.
+    """
+    reason = str(message.get("route_reason") or "")
+    note = str(message.get("note") or "")
+    if reason.startswith("context:") or note == "context":
+        return "refused: " + str(message.get("id")) + " is a context row, not an inbox item"
+    if reason == "owner_post" or note == "owner_post":
+        return "refused: " + str(message.get("id")) + " is an owner post, not an inbox item"
+    return None
+
+
+def request_wake(store, lane, message_id, source):
+    """Queue one lane wake for a delivered message (P12). Stores without the table skip it."""
+    queue = getattr(store, "request_wake", None)
+    if callable(queue):
+        queue(lane, message_id, source)
+
+
+def _source(reason):
+    return reason.split(":", 1)[1] if reason.startswith("human:") else reason
 
 
 def _message(store, message_id):
@@ -41,22 +70,32 @@ def _lane(store, lane):
 
 
 def assign(store, inbox_root, message_id, lane, *, note=None, reason=REASON):
-    """CLI `assign ID LANE [--note]`: route, optional note, append a `new` inbox record."""
+    """CLI `assign ID LANE [--note]`: route, optional note, append a `new` inbox record,
+    queue a lane wake (source = the reason without `human:`)."""
     message = _message(store, message_id)
     _lane(store, lane)
+    refusal = inbox_refusal(dict(message, id=message_id))
+    if refusal:
+        raise ActionError("not_inbox_item", refusal)
     store.set_route(message_id, lane, reason)
     if note:
         store.set_state(message_id, "assigned", note=note)
     append(inbox_root, lane, [record(dict(message, id=message_id), "new")])
+    request_wake(store, lane, message_id, _source(reason))
     return message
 
 
-def reroute(store, inbox_root, message_id, lane):
-    """CLI `reroute ID --to LANE`: reason `reroute:<old lane>`, append a `reroute` record."""
+def reroute(store, inbox_root, message_id, lane, *, source="console"):
+    """CLI `reroute ID --to LANE`: reason `reroute:<old lane>`, append a `reroute` record,
+    queue a lane wake."""
     message = _message(store, message_id)
     _lane(store, lane)
+    refusal = inbox_refusal(dict(message, id=message_id))
+    if refusal:
+        raise ActionError("not_inbox_item", refusal)
     store.set_route(message_id, lane, "reroute:" + str(message.get("lane") or "none"))
     append(inbox_root, lane, [record(dict(message, id=message_id), "reroute")])
+    request_wake(store, lane, message_id, source)
     return message
 
 

@@ -22,6 +22,8 @@ load config -> acquire state/service.lock -> configure logging
   -> publish heartbeat
   -> repeat every second:
        inspect stop.flag
+       every decisions.poll_seconds (with a card dir): apply Jarvis card decisions (P12)
+       every 5 seconds: turn pending wake requests into lane wake offers (P12)
        every 30 seconds: flush due wake batches and failed notifications
        every 60 seconds: sweep overdue ledger items
        heartbeat interval: publish counters
@@ -306,3 +308,73 @@ and reactions_ack=[eyes]. The owner is always_human.owner_user. Root hydration
 uses the first configured reconcile source and no source when none is configured.
 Backfill (origin reconcile) reaches file inboxes only and never wakes a session;
 see INGEST.md.
+
+## P12 cutover and cards
+
+### Dispatch cards
+
+A notify adapter of kind `dispatch_card` (purpose `human_queue` is required) turns
+immediate human-queue notices into Jarvis card requests:
+
+```yaml
+notify_adapters:
+  - kind: dispatch_card
+    purpose: human_queue
+    dir: dummy/state/dispatch_cards
+    only_immediate: true        # default
+    workspace_domain: example   # optional; builds permalinks
+```
+
+Only attention notices offered for immediate delivery (`human_queue.immediate_flags`)
+queue a card; with `only_immediate: false` and `human_queue.mode: immediate` every
+per-item notice does. Digests, timer notices and storm notices never produce cards
+(the ids-only `notify` of the adapter is a no-op). Each card is
+`<dir>/cards/<message_id_safe>.json` in the `dispatch_card/1` shape (CONTRACTS.md),
+written as `<dir>/cards/.tmp/<name>.part`, flushed, then renamed, so Jarvis never sees
+a partial file. A failed write leaves the human notice unsent, so the next flush
+retries it; the `.part` file stays in `.tmp` (nothing is deleted). Other human-queue
+adapters keep working alongside; remove either entry to disable it. The card body is
+never logged; the log line carries the message id and the lane count only.
+
+### Card decisions
+
+The decision consumer runs in the resident loop when `decisions.dir` or a
+dispatch_card adapter dir is configured (not with `--once` or `--dry-run`):
+
+```yaml
+decisions:
+  dir: null                 # default: the first dispatch_card adapter dir
+  poll_seconds: 5
+  hmac_key_file: dummy/keys/dispatch_hmac.env
+```
+
+Every `poll_seconds` it reads `<dir>/decisions/*.json` (top level only; `.tmp/`,
+`done/` and `rejected/` are never read) and verifies each file: the exact
+`dispatch_decision/1` keys, a file name equal to the safe message id, the SHA-256 HMAC
+over the canonical JSON without `hmac` (key from `hmac_key_file`, one line
+`DISPATCH_HMAC_KEY=<64 hex>`), `decided_by == always_human.owner_user`, no earlier
+decision for the message in `decisions/done/`, an existing message that is not a
+context row or owner post and is not `done` or `excluded`. It then applies the
+decision through the console action code: a lane id assigns with reason `human:card`
+(inbox append and a wake request, exactly like a console assign), `direct` assigns to
+`console.direct_lane` (rejected when that lane is not configured), `exclude` sets
+state `excluded` with note `human:card`. Applied files move to `decisions/done/`,
+invalid files to `decisions/rejected/` with one WARNING `Card decision rejected
+file=<name> reason=<code>`; names never overwrite (`_1`, `_2` suffixes). Unexpected
+failures leave the file in place for the next poll and count as failures. Without a
+readable key file the consumer logs one WARNING and leaves every decision file where
+it is. The key and message text are never logged. Heartbeat counters add
+`card_decisions` and `card_decisions_rejected` when the consumer runs.
+
+### Wake requests
+
+Before P12 an assignment made by the CLI or the console appended an inbox record but
+nothing woke the lane session until the next unacknowledged-timer reminder. The CLI
+(`assign`, `reroute`), the console actions and card decisions now add one row per
+delivered message to the ledger table `wake_requests` (`id`, `lane`, `message_id`,
+`requested_at`, `source` = `cli`, `console` or `card`, `consumed_at`). Every 5
+seconds the loop reads unconsumed rows and calls `wake_engine.offer` once per distinct
+(lane, message id), so the socket debounce, storm and wake switch rules apply; a
+Deliver decision wakes the lane's session adapters. Only messages still assigned to
+that lane are offered. Every row read is marked `consumed_at`, duplicates included.
+Socket, reconcile and cutover backfill deliveries create no requests.

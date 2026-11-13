@@ -174,3 +174,75 @@ human_queue session target. No existing key, default or required section changes
 - Human notices end with `Lane ids for assign: <ids>`.
 - `python -m slack_dispatch.service --config PATH --rehydrate-bodies DAYS` is a
   one-pass exclusive mode (see SERVICE.md).
+
+## P12 cutover and cards
+
+All additive.
+
+- Ledger: column `messages.deleted_at` (TEXT, set by `message_deleted`; an open row
+  also becomes `done` with `done_at`, the note stays `message_deleted`) and table
+  `wake_requests(id INTEGER PRIMARY KEY, lane TEXT, message_id TEXT, requested_at TEXT,
+  source TEXT, consumed_at TEXT)`, both created by `migrate()`; the schema version
+  stays 2.
+- `LedgerStore` adds `lane_messages(lane)`, `thread_delivery(source, channel,
+  thread_ts, lane)` (None without the service table), `request_wake(lane, message_id,
+  source)`, `pending_wake_requests(limit=500)` and `consume_wake_requests(ids, at=None)`.
+- `console.actions.assign` and `reroute` queue one wake request each (source = the
+  reason without `human:`, `cli` for the CLI); `reroute` gains `source="console"`.
+  `inbox_refusal(message)` returns the refusal line for context rows and owner posts;
+  `assign` and `reroute` raise `ActionError("not_inbox_item")` for them. Stores without
+  `request_wake` (test fakes) skip the request.
+- Inbox CLI: `cutover` command; `--config` accepted globally; route reason
+  `human:card` for card decisions; inbox kind `backfill` is also written by cutover.
+- Config: `notify_adapters[].kind == "dispatch_card"` (purpose `human_queue` required,
+  YAML `dir` stored in `NotifyAdapter.path`, `only_immediate: bool = True`,
+  `workspace_domain: str | None`), and an optional `decisions` section
+  (`dir: str | None`, `poll_seconds: int = 5`, `hmac_key_file: str | None`).
+
+### Card request `dispatch_card/1` (dispatcher writes, Jarvis reads)
+
+`<dir>/cards/<message_id_safe>.json`, `message_id_safe = message_id` with `:` and `.`
+replaced by `_`, written as `<dir>/cards/.tmp/<name>.part` and renamed. A card is
+written only for a message still in the human queue (state `human_pending`): an
+attention item the router already assigned to a lane gets its immediate FYI notice on
+the other human-queue adapters (session_message, file_drop and so on) but no card, and
+a queued card whose message has left `human_pending` before delivery is dropped.
+
+
+```json
+{"schema": "dispatch_card/1", "message_id": "slack:C0000000002:1000.000001",
+ "title": "[slack-dispatch] owner mention dummy-general", "body": "...",
+ "lanes": ["support", "content"], "suggested_lane": "support",
+ "attention": "owner_mention", "permalink": "https://example.slack.com/archives/C0000000002/p1000000001",
+ "created_at": "2026-01-01T09:00:00.000000+09:00"}
+```
+
+- `title`: `[slack-dispatch] <attention with spaces, or "human queue"> <console channel
+  name or channel id>`, at most 120 characters.
+- `body`: the first 1500 characters of the stored body, else the ids-only notice
+  summary. dispatch_card/1 has no `console_url` key and Jarvis rejects unknown keys,
+  so with `console.base_url` the last body line is `Open: <base_url>/#msg=<id>` and the
+  stored body is cut to keep the total at 1500.
+- `lanes`: 1 to 5 configured lane ids without `human_queue` and without the direct lane
+  (`console.direct_lane`, which the fixed `direct` button already covers; when no
+  configured lane is the direct lane nothing else is left out); the classifier
+  suggestion first, then the channel or DM default of the channel, then the thread
+  binding, then the rest alphabetically. Ids Jarvis does not accept (`direct`,
+  `exclude`, or not matching `[a-z0-9][a-z0-9_-]{0,29}`) are left out; with none left no
+  card is written.
+- `suggested_lane`: the classifier suggestion when it is in `lanes`, else null.
+  `attention`: `owner_mention`, `always_human` or null. `permalink`:
+  `https://<workspace_domain>.slack.com/archives/<channel>/p<ts without the dot>` or
+  null. `created_at`: local ISO time with offset.
+
+### Decision `dispatch_decision/1` (Jarvis writes, dispatcher reads)
+
+`<dir>/decisions/<message_id_safe>.json` with exactly `schema`, `message_id`, `lane`
+(a lane id, `direct` or `exclude`), `decided_by`, `decided_at`, `card_ts` and `hmac` =
+hex HMAC-SHA256 with the key bytes of `DISPATCH_HMAC_KEY=<64 hex>` over
+`json.dumps(<all keys but hmac>, sort_keys=True, ensure_ascii=False,
+separators=(",", ":"))` in UTF-8. Processed files move to `decisions/done/`, invalid
+ones to `decisions/rejected/`; rejection codes are `json`, `keys`, `schema`,
+`file_name`, `hmac`, `decided_by`, `already_decided`, `unknown_message`,
+`not_inbox_item`, `closed`, `direct_lane`, `lane` and `lane_not_found`.
+

@@ -1,0 +1,3 @@
+# gitleaks fingerprints for dummy test keys that were replaced in a later commit on this branch
+2bfff4fa528e5b1079d60041b3eb689f96dac410:tests/test_cards_wake_requests.py:generic-api-key:28
+2bfff4fa528e5b1079d60041b3eb689f96dac410:tests/test_cards_decisions.py:generic-api-key:15

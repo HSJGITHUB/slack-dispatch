@@ -5,8 +5,9 @@ import re
 import yaml
 
 from .schema import (
-    AlwaysHuman, BotMessages, Classifier, Config, Console, HumanQueue, Inbox, Lane, LedgerConfig,
-    NotifyAdapter, OwnerSignals, PersonChannelRule, Service, SourceConfig, Timers, WakePolicy,
+    AlwaysHuman, BotMessages, Classifier, Config, Console, Decisions, HumanQueue, Inbox, Lane,
+    LedgerConfig, NotifyAdapter, OwnerSignals, PersonChannelRule, Service, SourceConfig, Timers,
+    WakePolicy,
 )
 
 
@@ -123,9 +124,11 @@ def parse_config(raw):
     for row in rows("notify_adapters"):
         row = mapping(row, "notify_adapters entry")
         kind = required(row, "kind", "notify_adapter")
-        if kind not in ("file_inbox", "session_message", "assistant_dm", "file_drop"):
+        if kind not in ("file_inbox", "session_message", "assistant_dm", "file_drop", "dispatch_card"):
             raise ConfigError("notify_adapter.kind is unsupported")
         path = row.get("outbox_dir", row.get("path", inbox.root if kind == "file_inbox" else None))
+        if kind == "dispatch_card":
+            path = row.get("dir", row.get("path"))
         if kind != "session_message" or path is not None:
             string(path, "notify_adapter.path")
         command = row.get("command_template", [])
@@ -135,10 +138,11 @@ def parse_config(raw):
         purpose = row.get("purpose", row.get("for", "lane"))
         if purpose not in ("lane", "human_queue"):
             raise ConfigError("notify_adapter.purpose must be lane or human_queue")
+        only_immediate, domain = card_options(row, kind, purpose)
         adapters.append(NotifyAdapter(kind, path, tuple(command),
                                       boolean(row.get("dry_run", False), "notify_adapter.dry_run"),
                                       positive(row.get("timeout", 60), "notify_adapter.timeout"),
-                                      template, purpose))
+                                      template, purpose, only_immediate, domain))
     ledger_data = mapping(get("ledger"), "ledger")
     ledger = LedgerConfig(
         string(required(ledger_data, "path", "ledger"), "ledger.path"),
@@ -258,13 +262,43 @@ def parse_config(raw):
               for key, value in mapping(data.get("people", {}), "people").items()}
     zone = timezone_name(data.get("display_timezone", Config.display_timezone))
     console = console_section(data.get("console", {}), ids)
+    decisions = decisions_section(data.get("decisions", {}))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
                   explicit_tag_pattern=pattern, inbox=inbox, service=service,
                   human_queue=queue, bot_messages=bots, owner_signals=signals,
                   sessions_dir=sessions_dir, people=people, display_timezone=zone,
-                  console=console)
+                  console=console, decisions=decisions)
+
+
+def card_options(row, kind, purpose):
+    """P12 dispatch_card keys: purpose human_queue, `only_immediate`, `workspace_domain`."""
+    if kind != "dispatch_card":
+        return True, None
+    if purpose != "human_queue":
+        raise ConfigError("notify_adapter dispatch_card requires purpose human_queue")
+    only_immediate = boolean(row.get("only_immediate", True), "notify_adapter.only_immediate")
+    domain = row.get("workspace_domain")
+    if domain is not None and (not isinstance(domain, str)
+                               or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", domain)):
+        raise ConfigError("notify_adapter.workspace_domain must be a Slack workspace subdomain")
+    return only_immediate, domain
+
+
+def decisions_section(value):
+    """Optional `decisions` map (P12). Every key is optional."""
+    data = mapping({} if value is None else value, "decisions")
+    directory = data.get("dir")
+    if directory is not None:
+        string(directory, "decisions.dir")
+    key_file = data.get("hmac_key_file")
+    if key_file is not None:
+        string(key_file, "decisions.hmac_key_file")
+    return Decisions(dir=directory,
+                     poll_seconds=positive(data.get("poll_seconds", Decisions.poll_seconds),
+                                           "decisions.poll_seconds"),
+                     hmac_key_file=key_file)
 
 
 def console_section(value, lane_ids):

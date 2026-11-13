@@ -67,7 +67,8 @@ class LedgerStore:
             additions = {"event_id": "TEXT", "channel_type": "TEXT",
                          "has_files": "INTEGER NOT NULL DEFAULT 0", "edited_at": "TEXT",
                          "note": "TEXT", "suggestion_reason": "TEXT",
-                         "attention": "TEXT", "is_bot": "INTEGER NOT NULL DEFAULT 0", "origin": "TEXT"}
+                         "attention": "TEXT", "is_bot": "INTEGER NOT NULL DEFAULT 0", "origin": "TEXT",
+                         "deleted_at": "TEXT"}
             for name, declaration in additions.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE messages ADD COLUMN {name} {declaration}")
@@ -75,6 +76,10 @@ class LedgerStore:
             for name in ("source", "channel"):
                 if name not in seen_columns:
                     db.execute(f"ALTER TABLE events_seen ADD COLUMN {name} TEXT")
+            # P12: wake requests from the CLI, the console and card decisions (additive).
+            db.execute("""CREATE TABLE IF NOT EXISTS wake_requests (
+                id INTEGER PRIMARY KEY, lane TEXT, message_id TEXT, requested_at TEXT,
+                source TEXT, consumed_at TEXT)""")
             if not versions:
                 db.execute("INSERT INTO schema_version(version) VALUES (2)")
             elif versions == [1]:
@@ -117,8 +122,13 @@ class LedgerStore:
                     if self.store_body and "text" in event:
                         db.execute("UPDATE messages SET body=? WHERE id=?", (event["text"], mid))
                 elif subtype == "message_deleted":
+                    # P12: deleted_at marks the row; an open row is closed. Text is never kept.
                     db.execute("UPDATE messages SET body=NULL, note='message_deleted', "
-                               "followup=1, edited_at=? WHERE id=?", (received, mid))
+                               "followup=1, edited_at=?, deleted_at=? WHERE id=?",
+                               (received, received, mid))
+                    db.execute("UPDATE messages SET state='done', done_at=? WHERE id=? "
+                               "AND state IN ('new', 'assigned', 'acked', 'human_pending')",
+                               (received, mid))
                 elif exists:
                     duplicate = True
                 else:
@@ -340,6 +350,40 @@ class LedgerStore:
 
     def list_gaps(self, limit=20):
         return self._rows("SELECT * FROM ingest_gaps ORDER BY id DESC LIMIT ?", (limit,))
+
+    # P12 helpers: lane cutover reads and the wake request queue.
+
+    def lane_messages(self, lane):
+        """Metadata of every message owned by a lane (no bodies), for the cutover plan."""
+        return self._rows("SELECT id, source, channel, ts, thread_ts, state, received_at, "
+                          "assigned_at, ack_at, done_at, note, route_reason, attention, deleted_at "
+                          "FROM messages WHERE lane=? ORDER BY received_at, id", (lane,))
+
+    def thread_delivery(self, source, channel, thread_ts, lane):
+        """service_deliveries time (epoch seconds) of a thread and lane, or None."""
+        if not self.has_table("service_deliveries"):
+            return None
+        rows = self._rows("SELECT delivered_at FROM service_deliveries "
+                          "WHERE source=? AND channel=? AND thread_ts=? AND lane=?",
+                          (source, channel, thread_ts, lane))
+        return rows[0]["delivered_at"] if rows else None
+
+    def request_wake(self, lane, message_id, source):
+        """Queue one lane wake for a delivered message; the service consumes it."""
+        with self._transaction() as db:
+            return db.execute("INSERT INTO wake_requests (lane, message_id, requested_at, source) "
+                              "VALUES (?, ?, ?, ?)", (lane, message_id, now(), source)).lastrowid
+
+    def pending_wake_requests(self, limit=500):
+        return self._rows("SELECT * FROM wake_requests WHERE consumed_at IS NULL "
+                          "ORDER BY id LIMIT ?", (limit,))
+
+    def consume_wake_requests(self, ids, at=None):
+        stamp = at or now()
+        with self._transaction() as db:
+            for request_id in ids:
+                db.execute("UPDATE wake_requests SET consumed_at=? WHERE id=? AND consumed_at IS NULL",
+                           (stamp, request_id))
 
 
 def _numeric(ts):

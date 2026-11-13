@@ -44,6 +44,9 @@ class NotifyAdapter:
     timeout: int = 60
     template: dict = field(default_factory=dict)
     purpose: str = "lane"
+    # P12 dispatch_card adapters: `path` is the card directory (YAML `dir`).
+    only_immediate: bool = True
+    workspace_domain: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,14 @@ class Console:
 
 
 @dataclass(frozen=True)
+class Decisions:
+    """Card decision consumer (P12). `dir` defaults to the first dispatch_card adapter dir."""
+    dir: str | None = None
+    poll_seconds: int = 5
+    hmac_key_file: str | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
     channel_defaults: dict[str, str | None]
@@ -170,3 +181,5 @@ class Config:
     display_timezone: str = "UTC"
     # Optional operator console section (P10).
     console: Console = field(default_factory=Console)
+    # Optional card decision consumer section (P12).
+    decisions: Decisions = field(default_factory=Decisions)

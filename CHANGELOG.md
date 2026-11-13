@@ -5,6 +5,23 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P12 cutover and cards
+- Add `cutover LANE [--seen-before TS] [--note TEXT] [--apply]` (dry run by default):
+  close only lane items delivered before the lane's last own ack or done, keep later
+  items and every attention item open and deliver them again as `backfill`.
+- Add the `dispatch_card` notify adapter: immediate human-queue notices become
+  `dispatch_card/1` requests for Jarvis, written through `cards/.tmp/*.part` and a rename;
+  digests never produce cards.
+- Add the card decision consumer (`decisions` config section): HMAC-verified Jarvis
+  decisions assign (`human:card`), assign to the direct lane or exclude, then move to
+  `decisions/done/` or `decisions/rejected/`; heartbeat counters `card_decisions` and
+  `card_decisions_rejected`.
+- Add `wake_requests`: CLI `assign` and `reroute`, console actions and card decisions
+  queue a lane wake that the service offers within about five seconds.
+- Inbox CLI: `--config` before or after the subcommand; `message_deleted` sets
+  `deleted_at`, closes open rows and hides them (`deleted` marker with `--include-done`);
+  `assign`, `reroute` and `cutover` refuse context rows and owner posts with exit 2.
+
 ### P10 console
 - Add the optional operator console `python -m slack_dispatch.console --config PATH`
   (FastAPI and uvicorn through the new `console` extra), bound to 127.0.0.1 by default,

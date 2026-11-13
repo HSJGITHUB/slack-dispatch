@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
+from slack_dispatch.notify.dispatch_card import card_wanted
 from slack_dispatch.notify.session_resolve import SessionResolver
 from slack_dispatch.queue.human import export_jsonl
 from slack_dispatch.router.apply import apply_decision
@@ -83,6 +84,10 @@ class HumanQueueDelivery:
             for index, spec, _ in adapter_entries(self.config, self.notifiers, "human_queue"):
                 if adapter is not None and index != adapter:
                     continue
+                if spec.kind == "dispatch_card" and not card_wanted(
+                        spec, kind, immediate, self.config.human_queue.mode,
+                        (self.store.get_message(mid) or {}).get("state")):
+                    continue  # P12: cards follow immediate notices of human_pending items only
                 db.execute("INSERT OR IGNORE INTO human_notices "
                            "(message_id, kind, adapter, queued_at, immediate) VALUES (?, ?, ?, ?, ?)",
                            (mid, kind, index, now, immediate))
@@ -92,6 +97,8 @@ class HumanQueueDelivery:
 
     def _send(self, index, rows, now, digest):
         spec, notifier = self.config.notify_adapters[index], self.notifiers[index]
+        if digest and spec.kind == "dispatch_card":
+            return 0  # P12: digest notices never produce cards
         if not can_notify(self.config, self.store, spec, HUMAN_QUEUE, notifier):
             return 0
         messages = {row["message_id"]: self.store.get_message(row["message_id"]) for row in rows}
@@ -154,7 +161,7 @@ class HumanQueueDelivery:
 
     def flush(self, now, *, immediate_only=False):
         sent = 0
-        for index, _, _ in adapter_entries(self.config, self.notifiers, "human_queue"):
+        for index, spec, _ in adapter_entries(self.config, self.notifiers, "human_queue"):
             rows = self.store._rows("SELECT * FROM human_notices WHERE adapter=? AND sent_at IS NULL "
                                     "ORDER BY queued_at, message_id, kind", (index,))
             active = []
@@ -169,6 +176,9 @@ class HumanQueueDelivery:
                     valid = valid and message["state"] in ("new", "human_pending")
                 if row["kind"] == "reassign":
                     valid = valid and message["state"] == "assigned" and not message.get("ack_at")
+                if spec.kind == "dispatch_card":
+                    # P12: a queued card is dropped once its message left the human queue.
+                    valid = valid and message["state"] == "human_pending"
                 if valid:
                     active.append(row)
                 else:

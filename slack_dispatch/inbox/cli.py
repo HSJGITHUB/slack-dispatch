@@ -7,9 +7,17 @@ import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from slack_dispatch.console import actions
+from slack_dispatch.console.actions import inbox_refusal
+
 from .files import append, read, record, validate_lane
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+CUTOVER_NOTE = "seen by the lane before cutover"
+# Notes written by the service, the operator or cutover itself; their ack_at and done_at
+# are not lane session activity, so lane_last_seen ignores those rows.
+SYSTEM_NOTES = ("cutover:", "owner_reaction:", "owner_post", "prehandled", "context",
+                "message_deleted", "human:")
 
 
 class BadInput(ValueError):
@@ -32,6 +40,8 @@ def build_parser():
         fallback = None if defaults else argparse.SUPPRESS
         target.add_argument("--ledger", default=fallback)
         target.add_argument("--inbox-root", default=fallback)
+        # --config is accepted before and after the subcommand; SLACK_DISPATCH_CONFIG is the fallback.
+        target.add_argument("--config", default=fallback)
         target.add_argument("--show-body", action="store_true", default=False if defaults else argparse.SUPPRESS)
 
     options(parser, True)
@@ -55,9 +65,7 @@ def build_parser():
             sub.add_argument("lane")
         if command == "claim":
             sub.add_argument("--session")
-            sub.add_argument("--config")
         if command == "inbox":
-            sub.add_argument("--config")
             sub.add_argument("--include-done", action="store_true")
             sub.add_argument("--thread", action="store_true")
             sub.add_argument("--json", action="store_true")
@@ -68,6 +76,12 @@ def build_parser():
     options(sub)
     sub.add_argument("path")
     sub.add_argument("--replace", action="store_true")
+    sub = commands.add_parser("cutover")
+    options(sub)
+    sub.add_argument("lane")
+    sub.add_argument("--seen-before", metavar="TS")
+    sub.add_argument("--note")
+    sub.add_argument("--apply", action="store_true")
     return parser
 
 
@@ -131,6 +145,11 @@ def thread_id(row):
     return f"slack:{row['channel']}:{row.get('thread_ts') or row['ts']}"
 
 
+def is_deleted(message):
+    """A message_deleted event marked the row (deleted_at, or the note of older rows)."""
+    return bool(message.get("deleted_at")) or message.get("note") == "message_deleted"
+
+
 def inbox_rows(root, lane, store, include_done=False):
     """Join raw records ourselves to retain historical followup flags."""
     grouped = {}
@@ -152,7 +171,15 @@ def inbox_rows(root, lane, store, include_done=False):
         message = store.get_message(mid) or {}
         if message.get("lane") not in (None, lane):
             continue
+        # Context rows and owner posts are never inbox items (only roots or owner markers).
+        if message and inbox_refusal(dict(message, id=mid)):
+            continue
         row["state"] = message.get("state") or "unknown"
+        if is_deleted(message):
+            # Deleted messages are hidden; --include-done shows them with a `deleted` marker.
+            if not include_done:
+                continue
+            row["state"] = "deleted"
         if not include_done and row["state"] == "done":
             continue
         for key in ("channel", "ts", "thread_ts"):
@@ -170,6 +197,8 @@ def inbox_rows(root, lane, store, include_done=False):
 
 def stored_body(store, mid):
     message = store.get_message(mid, include_body=True) or {}
+    if is_deleted(message):
+        return "[deleted]"
     body = message.get("body", message.get("text"))
     return "[no body stored]" if body is None else body
 
@@ -226,7 +255,8 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc):
         root_row = {"id": root_id, "channel": pending[0]["channel"], "ts": root_ts,
                     "when": when(root_ts, zone), "author": people.get(author, author),
                     "author_id": author,
-                    "state": (message or {}).get("state") or "unknown",
+                    "state": ("deleted" if message and is_deleted(message)
+                              else (message or {}).get("state") or "unknown"),
                     "missing": message is None}
         for row in pending:
             if row["id"] == root_id:
@@ -327,6 +357,114 @@ def bulk_ids(args, root, store, stderr):
     return ids
 
 
+def epoch(value):
+    """Epoch seconds from a Slack ts, epoch number or ISO time (naive = local); None if unusable."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        number = None
+    if number is not None:
+        return float(number) if number.is_finite() else None
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.astimezone()
+    return moment.timestamp()
+
+
+def lane_last_seen(rows):
+    """Latest ack_at or done_at of the lane's own work; system-closed rows do not count."""
+    latest = None
+    for row in rows:
+        if str(row.get("note") or "").startswith(SYSTEM_NOTES):
+            continue
+        for key in ("ack_at", "done_at"):
+            value = epoch(row.get(key))
+            if value is not None and (latest is None or value > latest):
+                latest = value
+    return latest
+
+
+def delivered_epoch(store, row, lane):
+    """When the item reached the lane: the latest of received_at, assigned_at and the
+    service_deliveries time of its thread and lane (later signals keep items open)."""
+    thread = getattr(store, "thread_delivery", None)
+    signals = [epoch(row.get("received_at")), epoch(row.get("assigned_at"))]
+    if callable(thread):
+        signals.append(epoch(thread(row["source"], row["channel"],
+                                    row.get("thread_ts") or row["ts"], lane)))
+    known = [value for value in signals if value is not None]
+    return max(known) if known else None
+
+
+def stamp(value):
+    if value is None:
+        return "none"
+    return datetime.fromtimestamp(value, timezone.utc).isoformat()
+
+
+def cutover(args, root, store, stdout, stderr):
+    """Close only what the lane demonstrably saw; re-deliver the rest as backfill."""
+    if store.get_lane(args.lane) is None:
+        print("Lane not found", file=stderr)
+        return 3
+    override = None
+    if args.seen_before is not None:
+        override = epoch(args.seen_before)
+        if override is None:
+            raise BadInput("Invalid --seen-before")
+    rows = store.lane_messages(args.lane)
+    last_seen = override if override is not None else lane_last_seen(rows)
+    close, keep, refused = [], [], []
+    for row in rows:
+        if row["state"] not in ("assigned", "acked"):
+            continue
+        refusal = inbox_refusal(row)
+        if refusal:
+            refused.append(refusal)
+            continue
+        delivered = delivered_epoch(store, row, args.lane)
+        if (not row.get("attention") and last_seen is not None and delivered is not None
+                and delivered < last_seen):
+            close.append(row)
+        else:
+            keep.append(row)
+    attention = sum(bool(row.get("attention")) for row in keep)
+    redelivered = 0
+    if args.apply:
+        note = "cutover: " + (args.note or CUTOVER_NOTE)
+        for row in close:
+            store.set_state(row["id"], "done", note=note)
+        records = []
+        for row in keep:
+            message = store.get_message(row["id"]) or row
+            records.append(record(dict(message, id=row["id"]), "backfill"))
+        if records:
+            append(root, args.lane, records)
+        redelivered = len(records)
+    mode = "apply" if args.apply else "dry-run"
+    basis = "seen-before" if override is not None else "lane activity"
+    print(f"cutover {args.lane} mode={mode} lane_last_seen={stamp(last_seen)} basis={basis}",
+          file=stdout)
+    print(f"closed={len(close)} kept_open={len(keep)} "
+          f"redelivered={redelivered if args.apply else len(keep)} attention_kept={attention} "
+          f"refused={len(refused)}", file=stdout)
+    for row in keep:
+        print(row["id"], "kept_open", "attention=" + (row.get("attention") or "-"), file=stdout)
+    if not args.apply:
+        print("dry run: nothing changed; rerun with --apply", file=stdout)
+    for line in refused:
+        print(line, file=stderr)
+    return 2 if refused else 0
+
+
 def configured_session(config_path, lane):
     """Return the lane's configured session from an optional config file, else None."""
     if not config_path:
@@ -413,6 +551,10 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                     print("Unknown lanes: " + ", ".join(sorted(unknown)), file=stdout)
             elif args.command == "inbox":
                 show_inbox(args, root, store, stdout, people, zone)
+            elif args.command == "cutover":
+                code = cutover(args, root, store, stdout, stderr)
+                error_reported = code != 0
+                return code
             elif args.command == "queue":
                 for row in store.list_messages(state="human_pending"):
                     message_id = row.get("id", row.get("message_id"))
@@ -457,11 +599,17 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                     print("Lane not found", file=stderr)
                     error_reported = True
                     return 3
-                reason = "human:cli" if args.command == "assign" else "reroute:" + str(message.get("lane") or "none")
-                store.set_route(args.id, args.lane, reason)
-                if getattr(args, "note", None):
-                    store.set_state(args.id, "assigned", note=args.note)
-                append(root, args.lane, [record(dict(message, id=args.id), "reroute" if args.command == "reroute" else "new")])
+                refusal = inbox_refusal(dict(message, id=args.id))
+                if refusal:
+                    print(refusal, file=stderr)
+                    error_reported = True
+                    return 2
+                # One code path with the console: route, inbox append and a wake request.
+                if args.command == "assign":
+                    actions.assign(store, root, args.id, args.lane, note=getattr(args, "note", None),
+                                   reason="human:cli")
+                else:
+                    actions.reroute(store, root, args.id, args.lane, source="cli")
                 print(args.id, args.lane, file=stdout)
             return 0
         except AmbiguousLane as exc:
