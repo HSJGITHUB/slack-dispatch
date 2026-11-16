@@ -146,6 +146,9 @@ class Console:
     ui_language: str = "en"
     # P19: seconds an immediate console action or GO commit stays undoable (at least 10).
     undo_seconds: int = 30
+    # P20: Slack workspace subdomain for message permalinks
+    # (`https://<workspace_domain>.slack.com/archives/...`); None hides the links.
+    workspace_domain: str | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +183,8 @@ class UserDirectory:
     ttl_seconds: int = 86400
     # After a failed users.info lookup the user is not looked up again for this long.
     failure_cooldown_seconds: int = 300
+    # P20: look up every new author (not only app posts) so display names fill in.
+    resolve_names: bool = True
 
 
 DEFAULT_CLOSED_STATUSES = ("closed", "answered", "answered_action_ours",

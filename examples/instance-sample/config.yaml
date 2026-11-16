@@ -160,6 +160,9 @@ console:
   ui_language: en
   # P19: seconds an immediate action or GO commit can be undone (default 30, minimum 10).
   undo_seconds: 30
+  # P20: the Slack workspace subdomain (for example `example` for example.slack.com).
+  # When set, console rows and `inbox --links` carry message permalinks; null hides them.
+  workspace_domain: null
   channels:
     C0000000001: dummy-support
     C0000000002: dummy-general
@@ -191,11 +194,14 @@ membership:
 # app_id; answers are cached in the ledger table user_directory for ttl_seconds. A failed
 # lookup keeps an expired cached answer, else counts the author as human, and the user is
 # not looked up again for failure_cooldown_seconds. enabled false keeps the first three
-# rules.
+# rules. P20 resolve_names (default true) also looks up every new author (not only app
+# posts) from the service flush, so the console and the CLI show names instead of ids;
+# `slack-dispatch directory refresh [--missing-only]` backfills earlier authors.
 user_directory:
   enabled: true
   ttl_seconds: 86400
   failure_cooldown_seconds: 300
+  resolve_names: true
 # Optional owner resolver and registry sync (P17). registry_path is the session thread
 # registry JSON (the instance supplies the real path; the file is only read). harvest_path
 # is an optional scope harvest jsonl (null: no harvest evidence). With enabled true the

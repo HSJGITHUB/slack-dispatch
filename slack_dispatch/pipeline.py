@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import threading
 import sys
+import time
 from urllib.parse import quote
 
 from slack_dispatch.ingest.membership import NOT_MEMBER
@@ -82,6 +83,20 @@ def can_notify(config, store, spec, lane, notifier=None, message_ids=None):
 # assistant DM. file_inbox adapters are never logged (their records are per message).
 
 DELIVERY_PRUNE_SECONDS = 86400
+# P20: directory name lookups per flush (the rest wait for the next flush) and the recheck
+# interval used when the directory has no ttl_seconds attribute.
+NAME_LOOKUPS_PER_FLUSH = 20
+DIRECTORY_TTL_FALLBACK = 86400
+# fix1: total time one flush may spend on name lookups (the rest wait for the next flush) and
+# the largest number of users kept in the name queue and in the checked map (oldest dropped).
+NAME_LOOKUP_BUDGET_SECONDS = 3.0
+NAME_TRACK_LIMIT = 5000
+
+
+def _trim_oldest(entries, limit):
+    """Drop the oldest keys of an insertion-ordered dict until it holds `limit` (P20 fix1)."""
+    while len(entries) > limit:
+        entries.pop(next(iter(entries)))
 
 
 def skip_reason(config, store, spec, lane, notifier=None):
@@ -387,6 +402,13 @@ class Pipeline:
         self.directory = None
         self.app_posts_human = 0
         self.bot_posts = 0
+        # P20: authors waiting for a directory name lookup (resolved from flush, off the
+        # event path) and when each author was last checked (epoch seconds, memory only).
+        self._name_queue = {}
+        self._names_checked = {}
+        self.directory_names = 0
+        # fix1: the lookup time budget clock (monotonic; tests replace it).
+        self.name_clock = time.monotonic
         self.last_event_at = None
         self._missing_human_logged = False
         self._retry = {}
@@ -449,7 +471,7 @@ class Pipeline:
             if self.directory is not None:
                 # P16 counters appear with the directory, like the P15 membership counters.
                 result.update(self.directory.snapshot(), app_posts_human=self.app_posts_human,
-                              bot_posts=self.bot_posts)
+                              bot_posts=self.bot_posts, directory_names=self.directory_names)
             if self.owner_resolver is not None:
                 # P17: human queue items closed by an owner reply in their thread.
                 result["owner_reply_closed"] = self.owner_reply_closed
@@ -545,11 +567,84 @@ class Pipeline:
                 # Gap detection measures live intake only; backfill must not mask a gap.
                 self.last_event_at = event.get("received_at")
             try:
-                return self._handle(event)
+                result = self._handle(event)
             except Exception:
                 self.failure("event")
                 # Reconcile must not advance its cursor after a failed callback.
                 raise RuntimeError("Event processing failed") from None
+            self._note_author(event, result)
+            return result
+
+    def resolve_names_enabled(self):
+        settings = getattr(self.config, "user_directory", None)
+        return self.directory is not None and bool(getattr(settings, "resolve_names", True))
+
+    def _note_author(self, event, result):
+        """P20: queue a new message author for a directory name lookup (done in flush).
+
+        Every author counts, not only app posts. An author checked within the directory
+        TTL is not queued again. Never raises: names are display data only.
+        """
+        try:
+            user = event.get("user")
+            if (not user or not self.resolve_names_enabled() or result.duplicate
+                    or result.kind != "message" or event.get("subtype") == "message_deleted"):
+                return
+            checked = self._names_checked.get(user)
+            ttl = getattr(self.directory, "ttl_seconds", DIRECTORY_TTL_FALLBACK)
+            now = self.clock()
+            if checked is not None and 0 <= now - checked < ttl:
+                return
+            if user not in self._name_queue:
+                self._name_queue[user] = None
+                _trim_oldest(self._name_queue, NAME_TRACK_LIMIT)
+        except Exception as error:
+            LOG.error("Directory name queue failed class=%s", type(error).__name__)
+
+    def resolve_names(self, now=None, *, limit=NAME_LOOKUPS_PER_FLUSH,
+                      budget=NAME_LOOKUP_BUDGET_SECONDS):
+        """P20: look up queued authors through the directory, outside the pipeline lock.
+
+        Under the lock only the next `limit` user ids are taken from the queue; the
+        users.info calls run with the lock released (the directory stores each row through
+        the ledger's own transaction), and the bookkeeping takes the lock again. Lookups
+        stop once `budget` seconds (`name_clock`, monotonic) have passed; the users not
+        reached go back to the front of the queue for the next flush. Same TTL, cooldown and
+        fail-open rules as the bot flag; a failed lookup leaves the author unchecked so a
+        later message queues it again after the cooldown.
+        """
+        with self.lock:
+            if not self._name_queue or not self.resolve_names_enabled():
+                return 0
+            directory = self.directory
+            batch = list(self._name_queue)[:limit]
+            for user in batch:
+                self._name_queue.pop(user, None)
+        now = self.clock() if now is None else now
+        started = self.name_clock()
+        done = 0
+        for position, user in enumerate(batch):
+            if position and self.name_clock() - started >= budget:
+                with self.lock:
+                    rest = batch[position:]
+                    self._name_queue = dict.fromkeys(rest + [name for name in self._name_queue
+                                                            if name not in rest])
+                    _trim_oldest(self._name_queue, NAME_TRACK_LIMIT)
+                break
+            before = getattr(directory, "names", 0)
+            try:
+                row = directory.ensure_name(user)
+            except Exception as error:
+                LOG.error("Directory name lookup failed class=%s", type(error).__name__)
+                continue
+            with self.lock:
+                self.directory_names += max(0, getattr(directory, "names", 0) - before)
+                if row is not None:
+                    self._names_checked.pop(user, None)
+                    self._names_checked[user] = now
+                    _trim_oldest(self._names_checked, NAME_TRACK_LIMIT)
+            done += 1
+        return done
 
     def is_bot(self, event):
         """The one P16 bot decision for socket and reconcile events (see user_directory).
@@ -776,6 +871,9 @@ class Pipeline:
                 ids = self._current_ids(lane, ids, "lane")
                 if ids:
                     self._send("lane", lane, ids, inbox=False)
+        # P20 fix1: directory name lookups run after the pipeline lock is released, so a slow
+        # users.info call never holds up handle_event.
+        self.resolve_names(now)
 
     def _current_ids(self, lane, ids, purpose):
         result = []

@@ -160,7 +160,8 @@ class DisplayTests(unittest.TestCase):
         code, out, err = self.cli("inbox", "support")
         self.assertEqual((code, err), (0, ""))
         lines = out.splitlines()
-        self.assertEqual(lines[0], "id age when channel thread kind edited attention author state")
+        self.assertEqual(lines[0], "id age when channel thread kind edited attention author state"
+                         " channel_name author_name")
         self.assertIn(" 11-14 22:13 CDUMMY ", lines[1])
         self.assertIn(" UDUMMY1 assigned", lines[1])
         code, out, _ = self.cli("inbox", "support", "--json")

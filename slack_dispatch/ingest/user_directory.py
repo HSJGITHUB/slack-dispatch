@@ -12,6 +12,12 @@ performs no network or credential reads. A failed lookup keeps an expired cached
 value; a user with no cached row is treated as human for that event (fail open): a bot
 post reaching a lane costs one `done`, a lost human post costs a missed reply. After a
 failure the user is not looked up again for `failure_cooldown_seconds` (in memory only).
+
+P20: the directory also supplies display names. With `user_directory.resolve_names` the
+pipeline asks `ensure_name` for every author it has not seen (off the hot path, from its
+periodic flush), so the table gradually holds every active user's `name` (`real_name`,
+else `name`). `refresh` is the operator backfill (`directory refresh`), and
+`open_reconcile_client(config)` builds the same read-only client the reconcile source uses.
 """
 from datetime import datetime, timezone
 import logging
@@ -19,7 +25,7 @@ import threading
 import time
 
 from .normalize import IDENTIFIER, safe
-from .slack_reconcile import READ_METHODS
+from .slack_reconcile import READ_METHODS, SlackReconcileSource
 
 LOG = logging.getLogger(__name__)
 METHOD = "users.info"
@@ -81,11 +87,13 @@ def parse_user(response):
     user_id = safe(user.get("id"), IDENTIFIER)
     if user_id is None:
         return None
-    name = user.get("name")
+    # P20: the display name is `real_name` when set, else the handle `name`.
+    name = next((value for value in (user.get("real_name"), user.get("name"))
+                 if isinstance(value, str) and value.strip()), None)
     return dict(user=user_id, is_bot=int(user.get("is_bot") is True),
                 is_app_user=int(user.get("is_app_user") is True),
                 deleted=int(user.get("deleted") is True),
-                name=name[:200] if isinstance(name, str) and name else None)
+                name=name.strip()[:200] if name else None)
 
 
 class UserDirectory:
@@ -108,6 +116,8 @@ class UserDirectory:
         self.clock = clock or time.time
         self.lookups = 0
         self.failures = 0
+        # P20: names stored by `ensure_name` (heartbeat counter `directory_names`).
+        self.names = 0
         self._warned = {}
         self._lock = threading.Lock()
 
@@ -137,6 +147,53 @@ class UserDirectory:
                 return bool(row["is_bot"]) if row is not None else False
             return bool(fetched["is_bot"])
 
+    def ensure_name(self, user):
+        """P20: make sure the user has a fresh directory row (and so a display name).
+
+        Looks the user up only when there is no row or the row is older than the TTL, with
+        the same cooldown and fail-open rules as `is_bot`. Returns the row, the old row when
+        the lookup failed or is cooling down, or None. fix1: the users.info call runs without
+        the directory lock (only the checks and the counters take it), so `is_bot` on the
+        event path never waits for a name lookup; the row is stored through the ledger's
+        own transaction.
+        """
+        if not user:
+            return None
+        with self._lock:
+            row = self.store.get_user_directory(user)
+            if row is not None and not self._stale(row):
+                return row
+            if self._cooling_down(user):
+                return row
+            self.lookups += 1
+        try:
+            fetched = self._request(user)
+            self.store.put_user_directory(fetched, _stamp(self.clock()))
+        except _LookupFailed as error:
+            with self._lock:
+                self._fail(user, error.error_class, error.slack_error)
+            return row
+        except Exception as error:
+            with self._lock:
+                self._fail(user, type(error).__name__, None)
+            return row
+        with self._lock:
+            self._failed_at.pop(user, None)
+            if fetched.get("name"):
+                self.names += 1
+        return fetched
+
+    def refresh(self, user):
+        """Operator backfill (P20 `directory refresh`): look the user up now, whatever the
+        TTL. Returns the stored row, or None when the lookup failed."""
+        if not user:
+            return None
+        with self._lock:
+            fetched = self._lookup(user)
+            if fetched is not None and fetched.get("name"):
+                self.names += 1
+            return fetched
+
     def _cooling_down(self, user):
         failed = self._failed_at.get(user)
         if failed is None:
@@ -152,26 +209,32 @@ class UserDirectory:
         now = self.clock()
         return seen is None or now < seen or now - seen >= self.ttl_seconds
 
+    def _request(self, user):
+        """One users.info call parsed into a directory row; raises _LookupFailed. No state
+        changes, so callers may run it without the directory lock (fix1)."""
+        client = self.client()
+        if client is None:
+            raise _LookupFailed("NoClient", None)
+        try:
+            response = client.api_call(METHOD, http_verb="GET", params={"user": user})
+        except Exception as error:
+            data = getattr(getattr(error, "response", None), "data", None)
+            raise _LookupFailed(type(error).__name__,
+                                data.get("error") if isinstance(data, dict) else None) from None
+        if not isinstance(response, dict) and hasattr(response, "data"):
+            response = response.data
+        if not isinstance(response, dict) or not response.get("ok", True):
+            raise _LookupFailed("SlackResponse",
+                                response.get("error") if isinstance(response, dict) else None)
+        row = parse_user(response)
+        if row is None or row["user"] != user:
+            raise _LookupFailed("MissingUser", None)
+        return row
+
     def _lookup(self, user):
         self.lookups += 1
         try:
-            client = self.client()
-            if client is None:
-                raise _LookupFailed("NoClient", None)
-            try:
-                response = client.api_call(METHOD, http_verb="GET", params={"user": user})
-            except Exception as error:
-                data = getattr(getattr(error, "response", None), "data", None)
-                raise _LookupFailed(type(error).__name__,
-                               data.get("error") if isinstance(data, dict) else None) from None
-            if not isinstance(response, dict) and hasattr(response, "data"):
-                response = response.data
-            if not isinstance(response, dict) or not response.get("ok", True):
-                raise _LookupFailed("SlackResponse",
-                               response.get("error") if isinstance(response, dict) else None)
-            row = parse_user(response)
-            if row is None or row["user"] != user:
-                raise _LookupFailed("MissingUser", None)
+            row = self._request(user)
             self.store.put_user_directory(row, _stamp(self.clock()))
             self._failed_at.pop(user, None)
             return row
@@ -195,6 +258,21 @@ class UserDirectory:
 
     def snapshot(self):
         return {"directory_lookups": self.lookups, "directory_failures": self.failures}
+
+
+def open_reconcile_client(config):
+    """The read-only Slack client of the first slack_reconcile source (P20 backfill).
+
+    Built like the service's `--rehydrate-bodies` mode: the source's user token, the
+    reconcile read allowlist, no intake started. Raises LookupError without a source.
+    """
+    entries = [entry for entry in config.sources if entry.kind == "slack_reconcile"]
+    entry = next((row for row in entries if row.enabled), entries[0] if entries else None)
+    if entry is None:
+        raise LookupError("No slack_reconcile source configured")
+    source = SlackReconcileSource(entry, lambda event: None, entry.env_file, entry.user_token_key,
+                                  None, excluded_channels=config.excluded_channels)
+    return source.open_client()
 
 
 class _LookupFailed(Exception):

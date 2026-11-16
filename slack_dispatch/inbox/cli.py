@@ -95,6 +95,8 @@ def build_parser():
             sub.add_argument("--full", action="store_true")
             sub.add_argument("--no-body", action="store_true")
             sub.add_argument("--owner")
+            # P20: a `link` column with the Slack permalink (console.workspace_domain).
+            sub.add_argument("--links", action="store_true")
     sub = commands.add_parser("import-bindings")
     options(sub)
     sub.add_argument("path")
@@ -167,6 +169,14 @@ def build_parser():
     sub.add_argument("--hours", type=int, default=DELIVERY_HOURS)
     sub.add_argument("--status")
     sub.add_argument("--json", action="store_true")
+    # P20: operator backfill of display names (users.info for ledger authors).
+    sub = commands.add_parser("directory")
+    options(sub)
+    directory = sub.add_subparsers(dest="directory_command", required=True)
+    target = directory.add_parser("refresh")
+    options(target)
+    target.add_argument("--missing-only", action="store_true")
+    target.add_argument("--json", action="store_true")
     # P19: undo a recent console action (same rules as the console).
     sub = commands.add_parser("undo")
     options(sub)
@@ -210,11 +220,31 @@ def display_zone(name, stderr):
 
 def display_settings(config_path, stderr):
     """Return (people, zone) from an optional config file; defaults are raw ids and UTC."""
+    people, zone, _ = display_config(config_path, stderr)
+    return people, zone
+
+
+def display_config(config_path, stderr):
+    """Return (people, zone, config) from an optional config file (P20 keeps the config for
+    channel names and `console.workspace_domain`); without a file ({}, UTC, None)."""
     if not config_path:
-        return {}, timezone.utc
+        return {}, timezone.utc, None
     from slack_dispatch.config.loader import load_config
     config = load_config(config_path)
-    return dict(config.people), display_zone(config.display_timezone, stderr)
+    return dict(config.people), display_zone(config.display_timezone, stderr), config
+
+
+def display_names(config, store):
+    """P20: the shared resolver (people, then the ledger directory, then the id), one per
+    command. Works without a config: the ledger tables still supply names."""
+    from slack_dispatch.console.queries import DisplayNames
+    return DisplayNames(config, store)
+
+
+def permalink_for(config, channel, ts, thread_ts=None):
+    """P20: the message permalink (`console.workspace_domain`), or None."""
+    from slack_dispatch.console.queries import message_permalink, workspace_domain
+    return message_permalink(workspace_domain(config), channel, ts, thread_ts)
 
 
 def when(ts, zone):
@@ -313,29 +343,79 @@ def all_messages(store):
 LIST_COLUMNS = ("id", "age", "when", "channel", "thread", "kind", "edited", "attention", "author",
                 "state")
 ITEM_COLUMNS = ("id", "author", "ts", "when", "kind", "edited", "attention")
+# P20 fix1: text output appends the resolved names (spaces become `_`); JSON keeps ids.
+NAME_COLUMNS = ("channel_name", "author_name")
+
+
+def text_label(value):
+    """A name for space-separated text output: spaces become `_` (JSON keeps the original)."""
+    return "-" if not value else str(value).replace(" ", "_")
+
+
 # JSON rows also carry the raw message ts and the raw author id.
 JSON_EXTRA = ("ts", "author_id")
 
 
-def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc):
+def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc, names=None,
+               links=None):
+    """`inbox LANE` as text or JSON.
+
+    P20: `names` (a DisplayNames; else the `people` map) resolves authors and, in text,
+    channels; JSON keeps channel ids and adds `channel_name` when a name is known. `links(channel, ts,
+    thread_ts)` returns a permalink: JSON rows then carry `permalink`, and `--links` adds a
+    text `link` column (`-` without a workspace domain).
+    """
     people = people or {}
+    with_links = bool(getattr(args, "links", False))
+
+    def author_name(author):
+        if names is not None:
+            return names.user(author) if author and author != "-" else author
+        return people.get(author, author)
+
+    def channel_label(channel):
+        return names.channel(channel) if names is not None and channel else channel
+
+    def legacy_author(author):
+        # fix1: the text `author` column keeps its pre-P20 value (config people, else id).
+        return people.get(author, author)
+
+    def link(channel, ts, thread_ts=None):
+        return links(channel, ts, thread_ts) if links is not None else None
+
     rows = inbox_rows(root, args.lane, store, args.include_done)
     for row in rows:
         row["when"] = when(row.get("ts"), zone)
         row["author_id"] = row["author"]
-        row["author"] = people.get(row["author"], row["author"])
+        row["author"] = author_name(row["author"])
+        row["permalink"] = link(row.get("channel"), row.get("ts"), row.get("thread_ts"))
     if not args.thread:
         output = [{key: row[key] for key in LIST_COLUMNS + (JSON_EXTRA if args.json else ())}
                   for row in rows]
+        for row, source in zip(output, rows):
+            if args.json:
+                channel_name = names.channel_name(source.get("channel")) if names else None
+                if channel_name:
+                    row["channel_name"] = channel_name
+                if links is not None:
+                    row["permalink"] = source["permalink"]
+            else:
+                # fix1: existing columns unchanged (channel id); names go to added columns.
+                row["author"] = legacy_author(source["author_id"])
+                row["channel_name"] = text_label(channel_label(source.get("channel")))
+                row["author_name"] = text_label(author_name(source["author_id"]))
+                if with_links:
+                    row["link"] = source["permalink"] or "-"
         if args.show_body and not args.no_body:
             for row in output:
                 row["body"] = stored_body(store, row["id"])
         if args.json:
             print(json.dumps(output, ensure_ascii=False), file=stdout)
         else:
-            print(" ".join(LIST_COLUMNS), file=stdout)
+            columns = LIST_COLUMNS + NAME_COLUMNS + (("link",) if with_links else ())
+            print(" ".join(columns), file=stdout)
             for row in output:
-                print(*(row[key] for key in LIST_COLUMNS), file=stdout)
+                print(*(row[key] for key in columns), file=stdout)
                 if "body" in row:
                     print(row["id"], row["body"], file=stdout)
         return
@@ -350,7 +430,7 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc):
         author = (message or {}).get("author") or "-"
         root_ts = pending[0].get("thread_ts") or pending[0]["ts"]
         root_row = {"id": root_id, "channel": pending[0]["channel"], "ts": root_ts,
-                    "when": when(root_ts, zone), "author": people.get(author, author),
+                    "when": when(root_ts, zone), "author": author_name(author),
                     "author_id": author,
                     "state": ("deleted" if message and is_deleted(message)
                               else (message or {}).get("state") or "unknown"),
@@ -366,9 +446,16 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc):
             if row["id"] == root_id:
                 continue
             item = {key: row[key] for key in ITEM_COLUMNS + (("author_id",) if args.json else ())}
+            if links is not None:
+                item["permalink"] = row["permalink"]
             if not args.no_body:
                 item["body"] = stored_body(store, row["id"])
             items.append(item)
+        channel_name = names.channel_name(root_row["channel"]) if names else None
+        if channel_name:
+            root_row["channel_name"] = channel_name
+        if links is not None:
+            root_row["permalink"] = link(root_row["channel"], root_ts)
         group = {"root": root_row, "items": items}
         replies = [row for row in ledger_rows if thread_id(row) == root_id
                    and Decimal(row["ts"]) > Decimal(pending[0]["ts"])
@@ -380,17 +467,23 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc):
     if args.json:
         print(json.dumps(output, ensure_ascii=False), file=stdout)
         return
+    item_ids = {row["id"]: row["author_id"] for row in rows}
     for group in output:
         row = group["root"]
-        print(row["id"], "channel", row["channel"], "author", row["author"],
+        print(row["id"], "channel", row["channel"], "author", legacy_author(row["author_id"]),
               "ts", row["ts"], "when", row["when"], "state", row["state"],
-              "root not in ledger" if row["missing"] else "root", file=stdout)
+              "root not in ledger" if row["missing"] else "root",
+              "channel_name", text_label(channel_label(row["channel"])),
+              "author_name", text_label(row["author"]),
+              *(("link", row.get("permalink") or "-") if with_links else ()), file=stdout)
         if "kind" in row:
             print("kind", row["kind"], "edited", row["edited"], "attention", row["attention"], file=stdout)
         if "body" in row:
             print(row["body"], file=stdout)
         for item in group["items"]:
-            print(*(item[key] for key in ITEM_COLUMNS), file=stdout)
+            print(*(legacy_author(item_ids[item["id"]]) if key == "author" else item[key]
+                    for key in ITEM_COLUMNS), text_label(item["author"]),
+                  *((item.get("permalink") or "-",) if with_links else ()), file=stdout)
             if "body" in item:
                 print(item["body"], file=stdout)
         if "owner_replied_at" in group:
@@ -1041,6 +1134,7 @@ def owner_command(args, store, config, stdout, stderr):
     if bool(args.pending) == bool(args.channel) or (args.apply and not args.pending):
         raise BadInput("Supply a channel or --pending")
     resolver = owner_resolver(config)
+    names = display_names(config, store)  # P20: channel and author names
     if not args.pending:
         if not CONVERSATION.fullmatch(args.channel) or (
                 args.owner_ts is not None and not SLACK_TS.fullmatch(args.owner_ts)):
@@ -1051,12 +1145,15 @@ def owner_command(args, store, config, stdout, stderr):
             if message.get("thread_ts") and message["thread_ts"] != args.owner_ts:
                 thread_ts = message["thread_ts"]
         result = resolver.resolve(store, args.channel, args.owner_ts, thread_ts).as_dict()
+        channel_name = names.channel_name(args.channel)
         if args.json:
+            # The GET /api/owner shape, unchanged; the text line carries the channel name.
             print(json.dumps(result, ensure_ascii=False), file=stdout)
             return 0
         best = result["best"]
         print(f"channel {args.channel} root {result['root'] or '-'} best "
-              + (f"{best['lane']} ({best['confidence']}, {best['source']})" if best else "none"),
+              + (f"{best['lane']} ({best['confidence']}, {best['source']})" if best else "none")
+              + (f" name {text_label(channel_name)}" if channel_name else ""),
               file=stdout)
         row = result["registry_row"]
         if row:
@@ -1078,7 +1175,10 @@ def owner_command(args, store, config, stdout, stderr):
                      "best_lane": best.lane if best else None,
                      "confidence": best.tier if best else None,
                      "source": best.source if best else None,
-                     "reason": resolution.reason()})
+                     "reason": resolution.reason(),
+                     "channel_name": names.channel_name(message["channel"]),
+                     "author": message.get("author"),
+                     "author_name": names.user_name(message.get("author"))})
     applied = 0
     if args.apply:
         for row in rows:
@@ -1091,6 +1191,7 @@ def owner_command(args, store, config, stdout, stderr):
         return 0
     print(" ".join(OWNER_COLUMNS), file=stdout)
     for row in rows:
+        # Ids stay in the table (scripts copy them); JSON rows carry the P20 names.
         print(*(row[key] or "-" for key in OWNER_COLUMNS), file=stdout)
     found = sum(1 for row in rows if row["best_lane"])
     print(f"pending={len(rows)} with_lane={found} applied={applied}", file=stdout)
@@ -1175,7 +1276,7 @@ def deliveries(args, store, config, stdout, stderr):
     if config is None:
         config = SimpleNamespace(display_timezone="UTC", people={},
                                  console=SimpleNamespace(channels={}))
-    view = queries.View(config)
+    view = queries.View(config).bind(store)  # P20: people, then the ledger, then ids
     now = DELIVERY_CLOCK()
     rows = store.list_deliveries(since=queries.delivery_since(now, args.hours), lane=args.lane,
                                  status=args.status or None) if hasattr(store, "list_deliveries") else []
@@ -1193,6 +1294,49 @@ def deliveries(args, store, config, stdout, stderr):
     return 0
 
 
+def directory_refresh(args, store, config, stdout, stderr, *, client=None):
+    """P20 `directory refresh [--missing-only] [--json]`: operator backfill of names.
+
+    Looks up every distinct ledger author (`--missing-only`: only authors without a
+    `user_directory` row) with read-only `users.info` calls through the reconcile source's
+    client (`client` is injected by tests). Prints the counts; exit 1 when a lookup failed.
+    """
+    from slack_dispatch.ingest.user_directory import (DEFAULT_TTL_SECONDS, UserDirectory,
+                                                      known_bot_users, open_reconcile_client)
+    if client is None:
+        if config is None:
+            print("Config is required (--config or SLACK_DISPATCH_CONFIG)", file=stderr)
+            return 2
+        try:
+            client = open_reconcile_client(config)
+        except LookupError:
+            print("No slack_reconcile source configured", file=stderr)
+            return 2
+        except Exception as error:
+            # Class name only: the message could name the credential file.
+            print("Slack client could not be opened class=" + type(error).__name__, file=stderr)
+            return 2
+    settings = getattr(config, "user_directory", None)
+    directory = UserDirectory(client, store, getattr(settings, "ttl_seconds", DEFAULT_TTL_SECONDS),
+                              known_bot_users(config))
+    users = store.authors_without_directory() if args.missing_only else store.distinct_authors()
+    named = failed = 0
+    for user in users:
+        row = directory.refresh(user)
+        if row is None:
+            failed += 1
+        elif row.get("name"):
+            named += 1
+    result = {"mode": "missing-only" if args.missing_only else "all", "authors": len(users),
+              "looked_up": directory.lookups, "named": named, "failed": failed}
+    if args.json:
+        print(json.dumps(result), file=stdout)
+    else:
+        print("directory refresh " + " ".join(f"{key}={value}" for key, value in result.items()),
+              file=stdout)
+    return 1 if failed else 0
+
+
 def configured_session(config_path, lane):
     """Return the lane's configured session from an optional config file, else None."""
     if not config_path:
@@ -1202,7 +1346,8 @@ def configured_session(config_path, lane):
     return configured.session if configured else None
 
 
-def main(argv=None, *, store=None, stdout=None, stderr=None):
+def main(argv=None, *, store=None, stdout=None, stderr=None, client=None):
+    # `client` (P20) is the Slack client for `directory refresh`; tests inject a fake.
     # Console streams use UTF-8 so non-ASCII text survives a legacy code page (cp949).
     # Injected streams are the caller's and are left unchanged.
     if stdout is None:
@@ -1230,15 +1375,16 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 configured = configured_session(args.config or os.environ.get("SLACK_DISPATCH_CONFIG"),
                                                 args.lane)
             if args.command == "inbox":
-                # Optional display settings: people names and display_timezone.
-                people, zone = display_settings(args.config or os.environ.get("SLACK_DISPATCH_CONFIG"),
-                                                stderr)
+                # Optional display settings: people names and display_timezone; since P20
+                # also channel names and console.workspace_domain from the same config.
+                people, zone, display = display_config(
+                    args.config or os.environ.get("SLACK_DISPATCH_CONFIG"), stderr)
             # P13: scope and sent read the optional config strictly (scope:auto, min_evidence);
             # assign and reroute only borrow min_evidence and never fail on the config.
             config = None
-            if args.command in ("scope", "sent", "owner", "registry"):
+            if args.command in ("scope", "sent", "owner", "registry", "directory"):
                 config = optional_config(args)
-            elif args.command in ("assign", "reroute"):
+            elif args.command in ("assign", "reroute", "queue"):
                 config = optional_config(args, strict=False)
             if store is None:
                 path = args.ledger or os.environ.get("SLACK_DISPATCH_LEDGER")
@@ -1285,7 +1431,16 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 if unknown:
                     print("Unknown lanes: " + ", ".join(sorted(unknown)), file=stdout)
             elif args.command == "inbox":
-                show_inbox(args, root, store, stdout, people, zone)
+                from functools import partial
+                from slack_dispatch.console.queries import workspace_domain
+                # P20: JSON rows carry `permalink` whenever the domain is configured.
+                links = partial(permalink_for, display) if workspace_domain(display) else None
+                show_inbox(args, root, store, stdout, people, zone,
+                           names=display_names(display, store), links=links)
+            elif args.command == "directory":
+                code = directory_refresh(args, store, config, stdout, stderr, client=client)
+                error_reported = code != 0
+                return code
             elif args.command in ("scope", "sent"):
                 if args.command == "sent":
                     code = sent(args, store, config, stdout, stderr)
@@ -1323,9 +1478,15 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 error_reported = code != 0
                 return code
             elif args.command == "queue":
+                # P20 fix1: the existing `id suggestion reason`, then the channel and author
+                # display names (people, directory, id; spaces become `_`).
+                names = display_names(config, store)
                 for row in store.list_messages(state="human_pending"):
                     message_id = row.get("id", row.get("message_id"))
-                    print(message_id, row.get("classifier_suggestion", row.get("suggested_lane")) or "none", row.get("suggestion_reason") or "none", file=stdout)
+                    print(message_id,
+                          row.get("classifier_suggestion", row.get("suggested_lane")) or "none", row.get("suggestion_reason") or "none",
+                          text_label(names.channel(row.get("channel"))),
+                          text_label(names.user(row.get("author"))), file=stdout)
                     if args.show_body:
                         full = store.get_message(message_id, include_body=True)
                         if full and full.get("text", full.get("body")) is not None:

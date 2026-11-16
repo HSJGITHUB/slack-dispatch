@@ -424,3 +424,66 @@ whose registry row is closed: `id state lane channel thread registry_id status l
 message_ts compare`, where `compare` is `newer` (registry `last_ts` at or after the item:
 a `registry_closed` candidate), `older` or `unknown` (no `last_ts`). Nothing is written.
 Without `owner_resolver.registry_path` it exits 2.
+
+## P20 names and links
+
+### Names
+
+`inbox`, `queue`, `owner` and `deliveries` resolve names with the console's resolver
+(`console.queries.DisplayNames`): users by config `people`, then the ledger
+`user_directory.name`, then the id; channels by `console.channels`, then the ledger
+`channel_membership` (`#name`, `DM:<partner name>`, `group DM`), then the id. The ledger
+tables are read even without a config.
+
+Scripts should parse `--json`; text output is for people.
+
+In text output the existing columns keep their meaning and order (`channel` is the id,
+`author` is the config `people` name else the id). The resolved names are appended, with
+spaces replaced by `_` (JSON keeps the original text):
+
+- `inbox` list: header `id age when channel thread kind edited attention author state
+  channel_name author_name` (plus `link` with `--links`). Thread view: each root line ends
+  with `channel_name <name> author_name <name>` (then `link <url>`), each item line with the
+  author name (then the url). `--json` keeps `channel` as the id and `author_id` as the raw
+  id, `author` is the resolved name, and `channel_name` is added when a name is known
+  (thread JSON roots too).
+- `queue` prints `id suggestion reason channel_name author_name`.
+- `owner CHANNEL` appends ` name <channel name>` to its first line when one is known;
+  `owner --pending --json` rows add `channel_name`, `author` and `author_name`. The text
+  table and `owner --json` (the `GET /api/owner` shape) are unchanged.
+- `deliveries --json` items carry the resolved names and `permalink`.
+
+### Links
+
+With `console.workspace_domain` in the config, `inbox ... --json` rows (list rows, thread
+roots and items) always carry `permalink`. `inbox LANE --links` adds a `link` column to the
+list view, `link <url>` to each thread root line and the url to each thread item line; without
+the domain the value is `-`.
+
+### `directory refresh [--missing-only] [--json]`
+
+Backfills display names: looks up every distinct ledger author with `users.info` through the
+reconcile source's read-only client (built like `--rehydrate-bodies`; needs `--config` or
+`SLACK_DISPATCH_CONFIG` with a `slack_reconcile` source). `--missing-only` looks up only
+authors without a `user_directory` row. A name is `real_name`, else `name`. Output:
+
+```text
+directory refresh mode=missing-only authors=2 looked_up=2 named=2 failed=0
+```
+
+Exit codes: 0 done, 1 at least one lookup failed (one WARNING per user, nothing written for
+it), 2 no config, no `slack_reconcile` source or the client could not be opened (exception
+class only). There is no pacing between calls; use `--missing-only` for routine backfills.
+
+### Service
+
+`user_directory.resolve_names` (default true): the service queues every new message author
+(not only posts with `bot_id` or `app_id`) and looks them up from its periodic flush, at most
+20 and at most 3 seconds per flush (the rest wait for the next flush), never on the event
+path: the `users.info` calls run after the pipeline lock is released and without the
+directory lock, so event handling never waits for them. The queue and the map of checked
+users keep at most 5,000 users each (oldest dropped). A user is not queued again within
+`ttl_seconds` of a check; a fresh row costs no call; failures keep the P16 cooldown and
+fail-open rules. The
+heartbeat counter `directory_names` counts names stored this way. `false` restores the P16
+behaviour (lookups only for app posts).

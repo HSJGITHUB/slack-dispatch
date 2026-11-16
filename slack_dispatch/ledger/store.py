@@ -54,6 +54,10 @@ CONSOLE_ACTION_COLUMNS = {"at": "TEXT", "action": "TEXT", "ids": "TEXT", "before
                           "undone_at": "TEXT", "result": "TEXT", "meta": "TEXT"}
 SNAPSHOT_FIELDS = ("state", "lane", "note", "done_at", "ack_at", "assigned_at", "route_reason")
 OPEN_STATES = ("new", "assigned", "acked", "human_pending")
+# P20: when the delivery log started, stored once at migration as a `cursors` row (the
+# ledger has no key-value table). Readers take the earlier of this and the first row.
+META_SOURCE = "meta"
+DELIVERY_LOG_STARTED = "delivery_log_started_at"
 
 
 class UndoStateError(Exception):
@@ -167,6 +171,11 @@ class LedgerStore:
                 if name not in present:
                     db.execute(f"ALTER TABLE delivery_log ADD COLUMN {name} {declaration}")
             db.execute("CREATE INDEX IF NOT EXISTS delivery_log_created ON delivery_log (created_at)")
+            # P20: the delivery log start, written once (the first row's time when rows exist).
+            first = db.execute("SELECT MIN(created_at) FROM delivery_log").fetchone()[0]
+            db.execute("INSERT OR IGNORE INTO cursors (source, channel, cursor) VALUES (?, ?, ?)",
+                       (META_SOURCE, DELIVERY_LOG_STARTED,
+                        first or datetime.now(timezone.utc).isoformat(timespec="microseconds")))
             # P19: console action journal for undo (additive).
             db.execute(CONSOLE_ACTIONS_DDL)
             present = {r[1] for r in db.execute("PRAGMA table_info(console_actions)")}
@@ -1102,6 +1111,61 @@ class LedgerStore:
             db.execute("UPDATE console_actions SET undone_at=?, result=? WHERE id=?",
                        (at, json.dumps(result), row["id"]))
             return result
+
+    # P20 display names, permalinks and the Deliveries empty state (additive reads only).
+
+    def distinct_authors(self, *, source="slack"):
+        """Every distinct non-empty author id of the ledger's messages, sorted."""
+        return [row["author"] for row in self._rows(
+            "SELECT DISTINCT author FROM messages WHERE source=? AND author IS NOT NULL "
+            "AND author != '' ORDER BY author", (source,))]
+
+    def authors_without_directory(self, *, source="slack"):
+        """Distinct authors that have no `user_directory` row, sorted."""
+        if not self.has_table("user_directory"):
+            return self.distinct_authors(source=source)
+        return [row["author"] for row in self._rows(
+            "SELECT DISTINCT m.author FROM messages m LEFT JOIN user_directory d "
+            "ON d.user = m.author WHERE m.source=? AND m.author IS NOT NULL AND m.author != '' "
+            "AND d.user IS NULL ORDER BY m.author", (source,))]
+
+    def message_refs(self, ids):
+        """{id: {channel, ts, thread_ts}} for the ids present in the ledger (no bodies)."""
+        ids = sorted({str(item) for item in ids or ()})
+        refs = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for row in self._rows(f"SELECT id, channel, ts, thread_ts FROM messages WHERE id IN ({marks})",
+                                  chunk):
+                refs[row["id"]] = {"channel": row["channel"], "ts": row["ts"],
+                                   "thread_ts": row["thread_ts"]}
+        return refs
+
+    def delivery_log_started_at(self):
+        """When the delivery log started (UTC ISO): the earlier of the time stored at
+        migration and the first `delivery_log` row; None when neither exists."""
+        stamps = []
+        stored = self.get_cursor(META_SOURCE, DELIVERY_LOG_STARTED)
+        if stored:
+            stamps.append(stored)
+        if self.has_table("delivery_log"):
+            first = self._rows("SELECT MIN(created_at) AS at FROM delivery_log")[0]["at"]
+            if first:
+                stamps.append(first)
+        moments = [(moment, stamp) for stamp in stamps
+                   for moment in [_moment(stamp)] if moment is not None]
+        return min(moments)[1] if moments else None
+
+    def count_service_deliveries(self, *, since=None, before=None, lane=None):
+        """Rows of the service-owned `service_deliveries` table (per thread and lane, latest
+        delivery time in epoch seconds) with since <= delivered_at < before; 0 without it."""
+        if not self.has_table("service_deliveries"):
+            return 0
+        return self._rows("SELECT COUNT(*) AS n FROM service_deliveries WHERE "
+                          "(? IS NULL OR delivered_at >= ?) AND (? IS NULL OR delivered_at < ?) "
+                          "AND (? IS NULL OR lane = ?)",
+                          (since, since, before, before, lane, lane))[0]["n"]
 
 
 def _json_list(value):

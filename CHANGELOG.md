@@ -5,6 +5,30 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P20 display names and permalinks
+- One name resolver, `console.queries.DisplayNames`: users by config `people`, then the
+  ledger `user_directory.name`, then the id; channels by `console.channels`, then the ledger
+  `channel_membership` (`#name`, `DM:<partner name>` for direct messages, `group DM` for
+  group DMs), then the id. The console reads each table once per request; ids stay on hover.
+- Console rows (triage, lane threads, Deliveries item lists, search, Scope names) show these
+  names; the payloads add `author_name`, `channel_name` and `permalink`.
+- `console.workspace_domain` (a Slack subdomain) turns on message permalinks: a small link
+  icon on every message row (new tab), the thread root line links to the root, and Recent
+  actions link their first ids. The console and the CLI build links with the dispatch
+  card's own helper plus `?thread_ts=<root>&cid=<channel>` for replies.
+- CLI: `inbox`, `queue`, `owner` and `deliveries` use the same name order. Text output keeps
+  its columns (channel ids) and appends `channel_name` and `author_name` (spaces as `_`);
+  scripts should use `--json`. `inbox --links` adds a `link` column and `--json` carries
+  `permalink` when the domain is set.
+- `user_directory.resolve_names` (default true): the service looks up every new author (not
+  only app posts) from its flush outside the pipeline lock, at most 20 and 3 seconds per
+  flush (queue and checked map capped at 5,000 users), with the P16 TTL, cooldown and
+  fail-open rules; heartbeat counter `directory_names`. `users.info` names now prefer
+  `real_name`. Operator backfill: `directory refresh [--missing-only] [--json]`.
+- Deliveries tab: an empty window shows when the log started (stored once at migration)
+  and how many wakes the older `service_deliveries` record holds for the window before
+  that start (no details).
+
 ### P19 console undo
 - Every console write that changes message rows (triage `Apply now`, a GO commit as one
   row, lane `ack`, `done` and `reroute`, a channel exclusion with every item it closed) is

@@ -78,7 +78,8 @@ class InboxViewTests(unittest.TestCase):
         self.assertEqual(rows[1]["edited"], "no")
         text = self.cli("inbox", "support")[1]
         self.assertEqual(text.splitlines()[0],
-                         "id age when channel thread kind edited attention author state")
+                         "id age when channel thread kind edited attention author state"
+                         " channel_name author_name")
         self.assertEqual(sum(line.startswith(first) for line in text.splitlines()), 1)
         self.assertNotIn("DUMMY_BODY", text)
         self.assertEqual(self.payload("inbox", "support", "--show-body")[0]["body"], "DUMMY_BODY")

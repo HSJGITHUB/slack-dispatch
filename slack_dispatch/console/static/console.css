@@ -265,3 +265,6 @@ h2:first-child { margin-top: 0; }
 .toast button.link { color: #fff; font-weight: 600; text-decoration: underline; }
 .toast button.link:disabled { text-decoration: none; }
 .actions.handled { color: var(--muted); }
+/* P20: Slack permalink icon (opens a new tab). */
+a.permalink { color: var(--accent); text-decoration: none; font-size: 0.9em; padding: 0 2px; }
+a.permalink:hover, a.permalink:focus { text-decoration: underline; }

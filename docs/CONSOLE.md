@@ -50,6 +50,7 @@ console:
   direct_lane: owner      # default owner-direct; when set it must be a configured lane
   ui_language: en         # en (default) or ko: the language of the page
   undo_seconds: 30        # P19 undo window, at least 10
+  workspace_domain: null  # P20 Slack subdomain for message permalinks
   channels:               # channel id -> display name, console only
     C0000000001: dummy-support
 ```
@@ -510,3 +511,73 @@ the console; the result's `by` is `cli`. Text output is one summary line plus on
 id that was not restored or whose wake was already sent; `--json` prints the result. Exit
 codes: 0 undone (conflicts are listed), 1 already undone or the window expired, 2 invalid
 arguments, configuration or missing ledger, 3 unknown action or nothing to undo.
+
+## P20 display names and permalinks
+
+### Names
+
+Every user and channel the console shows goes through one resolver,
+`queries.DisplayNames(config, store)`:
+
+| Kind | Order |
+| --- | --- |
+| User | config `people`, then `user_directory.name` in the ledger, then the id |
+| Channel | `console.channels`, then `channel_membership` in the ledger, then the id |
+
+A membership row names a channel `#<name>` (public and private channels), a direct message
+`DM:<partner name>` (the partner through the user order) and a group DM `group DM` (`그룹 DM`
+in `ko`; UI key `groupDm`). Each request binds the view to the ledger (`View.bind(store)`), so
+each table is read once per page build, never per row. A failed read shows ids (one WARNING
+with the table and the exception class).
+
+Names appear on queue rows (author, channel, thread root, thread context), lane thread views,
+Deliveries item lists, search results, the Scope tab name column and exclude results. The id
+stays in the element's `title`, so hovering shows it and it can still be copied. Mention lists
+inside bodies and the registry badge owner text are left as they are, and owner candidates
+keep session ids.
+
+Payloads keep the `{id, name}` objects (name null when only the id is known) and add
+`author_name` (queue items, their root and thread context, search rows), `channel_name`
+(queue items, search rows, lane inbox roots and items) and `permalink` (below).
+
+The service fills `user_directory` for every author (`user_directory.resolve_names`, see
+INBOX.md "P20 names and links"), and `directory refresh` backfills older authors.
+
+### Permalinks
+
+```yaml
+console:
+  workspace_domain: dummy-workspace   # the Slack subdomain; null (default) hides the links
+```
+
+The value must be a Slack subdomain (`[a-z0-9][a-z0-9-]{0,62}`), like the dispatch card
+adapter's `workspace_domain`. A message links to
+`https://<domain>.slack.com/archives/<CHANNEL>/p<ts without the dot>`; a thread reply adds
+`?thread_ts=<root ts>&cid=<CHANNEL>`. `queries.message_permalink(domain, channel, ts,
+thread_ts=None)` builds it on top of the dispatch card's `permalink` helper; the card's own
+output is unchanged.
+
+`GET /api/config` adds `permalinks` (true when the domain is set). Payloads add `permalink`
+on queue items, their root and context rows, search rows, Deliveries items, and lane inbox
+roots and items (lane inbox keys only when the domain is set); Recent actions rows add
+`links` (`{id, permalink}` for the first five ids). Without the domain every `permalink` is
+null and the page shows no icon.
+
+The page shows a small `↗` link next to each message (queue row, thread root line, thread
+context, lane root and items, Deliveries items, search ids, Recent actions) that opens Slack
+in a new tab (`target=_blank`, `rel=noopener noreferrer`; UI key `openInSlack`).
+
+### Deliveries empty state
+
+The delivery log started when P18 was deployed. When the filtered list is empty the tab shows
+`Log started: <time>` (`기록 시작: <time>`) and, when the older per-thread record
+`service_deliveries` has wakes in the same window before that start, `N earlier record(s) in
+the old format (no details)` (`이전 방식 기록 N건 (상세 없음)`). `GET /api/deliveries` adds
+`log_started_at` (UTC ISO), `log_started_when` (display time zone) and `legacy_deliveries`.
+
+The start is stored once by the ledger migration in the `cursors` table (source `meta`, key
+`delivery_log_started_at`): the first `delivery_log` row's time when rows already exist, else
+the migration time. Readers take the earlier of that value and the first row.
+`legacy_deliveries` is counted only for an empty window, honours the lane filter, and is 0 for
+the human_queue purpose or lane and for status filters other than `sent` (the old record holds
+lane wakes that were sent, one row per thread and lane with its latest time).

@@ -441,3 +441,42 @@ All additive; the schema version stays 2.
   action_id, as_json, stdout, stderr, now, by="cli")`. Inbox CLI: `undo [--last |
   ACTION_ID] [--json]` (`UNDO_CLOCK`), and `inbox_rows` skips rows whose ledger lane is null
   and state is `human_pending` or `excluded`.
+
+## P20 display names and permalinks
+
+All additive; the schema version stays 2 and no table changes.
+
+- `slack_dispatch.console.queries`: `DisplayNames(config=None, store=None)` with `user(id)`,
+  `user_name(id)`, `channel(id)`, `channel_name(id)`, `directory()` and `membership()` (one
+  read of `user_directory` and `channel_membership` per instance); `GROUP_DM`;
+  `message_permalink(domain, channel, ts, thread_ts=None)` (built on
+  `notify.dispatch_card.permalink`); `workspace_domain(config)`. `View(config, store=None)`
+  adds `bind(store)`, `user_name`, `channel_name`, `permalink`, `domain` and `names`;
+  `membership_view(store, view=None)`; `delivery_log_start(store, view, now, *, hours, lane,
+  purpose, status, empty)`; `action_links(view, ids, refs)` and `RECENT_LINKS`.
+- Console payloads add `author_name`, `channel_name` and `permalink` (queue items, roots,
+  context, search rows), `permalink` on Deliveries items and on lane inbox roots and items
+  (with a domain), `channel_name` on lane inbox items, `links` on `GET /api/actions` rows,
+  `permalinks` on `GET /api/config`, and `log_started_at`, `log_started_when` and
+  `legacy_deliveries` on `GET /api/deliveries`. `{id, name}` objects and `GET /api/owner`
+  are unchanged.
+- `LedgerStore` adds reads `distinct_authors(*, source)`, `authors_without_directory(*,
+  source)`, `message_refs(ids)`, `delivery_log_started_at()` and
+  `count_service_deliveries(*, since, before, lane)`. `migrate()` inserts the `cursors` row
+  (`meta`, `delivery_log_started_at`) once (`META_SOURCE`, `DELIVERY_LOG_STARTED`).
+- `slack_dispatch.ingest.user_directory`: `parse_user` prefers `real_name`;
+  `UserDirectory.ensure_name(user)`, `refresh(user)` and the counter `names`;
+  `open_reconcile_client(config)`.
+- `slack_dispatch.pipeline`: `Pipeline.resolve_names(now=None, *, limit)`,
+  `resolve_names_enabled()`, `directory_names` and `name_clock`; `flush` calls
+  `resolve_names` after releasing the pipeline lock (fix1); `NAME_LOOKUPS_PER_FLUSH = 20`,
+  `NAME_LOOKUP_BUDGET_SECONDS = 3.0`, `NAME_TRACK_LIMIT = 5000`. Heartbeat counter
+  `directory_names` with the directory. `UserDirectory.ensure_name` calls users.info without
+  the directory lock (`_request`).
+- Inbox CLI: `show_inbox(..., names=None, links=None)`; `display_config`, `display_names`,
+  `permalink_for`; `inbox --links`; `directory refresh [--missing-only] [--json]`;
+  `main(..., client=None)`; `NAME_COLUMNS`, `text_label`. Text output keeps its columns and
+  appends `channel_name author_name` (`inbox`) or the two names (`queue`, after `id suggestion
+  reason`); spaces become `_` (fix1).
+- Config: optional `console.workspace_domain` (Slack subdomain, default null) and
+  `user_directory.resolve_names` (bool, default true).

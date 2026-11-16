@@ -82,6 +82,10 @@ const UI_TEXT = Object.freeze({
     itemThread: "thread",
     itemMissing: "not in ledger",
     repeated: (count, time) => "x" + count + (time ? " (last " + time + ")" : ""),
+    openInSlack: "Open in Slack (new tab)",
+    groupDm: "group DM",
+    deliveryLogStarted: (when) => "Log started: " + when,
+    legacyDeliveries: (count) => count + " earlier record(s) in the old format (no details)",
     searchPlaceholder: "Search id, channel, author or text",
     searchButton: "Search",
     loading: "Loading...",
@@ -303,6 +307,10 @@ const UI_TEXT = Object.freeze({
     itemThread: "스레드",
     itemMissing: "원장에 없음",
     repeated: (count, time) => count + "회" + (time ? " (마지막 " + time + ")" : ""),
+    openInSlack: "Slack에서 열기 (새 탭)",
+    groupDm: "그룹 DM",
+    deliveryLogStarted: (when) => "기록 시작: " + when,
+    legacyDeliveries: (count) => "이전 방식 기록 " + count + "건 (상세 없음)",
     searchPlaceholder: "id, 채널, 작성자, 본문 검색",
     searchButton: "검색",
     loading: "불러오는 중...",
@@ -514,9 +522,43 @@ function bytes(value) {
   return (value / 1048576).toFixed(1) + " " + u.mib;
 }
 
+// P20: the server resolves names (config, then ledger, then id); `group DM` is the one
+// channel name the page translates.
+const GROUP_DM = "group DM";
+const LINK_ICON = "↗";
+
 function named(ref) {
   if (!ref || !ref.id) return UI.none;
+  if (ref.name === GROUP_DM) return UI.groupDm;
   return ref.name ? ref.name : ref.id;
+}
+
+// A user or channel shown by name with its id on hover (title), so it can still be copied.
+function nameSpan(ref, props) {
+  return el("span", Object.assign({ title: ref && ref.id ? ref.id : null, text: named(ref) }, props || {}));
+}
+
+// A channel label: `#name` for configured names, the resolved label (`#name`, `DM:...`,
+// group DM) as is, `#id` when only the id is known.
+function channelText(ref) {
+  if (!ref || !ref.id) return UI.none;
+  const name = ref.name;
+  if (!name) return "#" + ref.id;
+  if (name === GROUP_DM) return UI.groupDm;
+  return name.startsWith("#") || name.startsWith("DM:") ? name : "#" + name;
+}
+
+// Scope tab names (P20: resolved by the server; null shows "-").
+function scopeName(name) {
+  return name === GROUP_DM ? UI.groupDm : name;
+}
+
+// P20: a small link icon that opens the Slack permalink in a new tab; nothing without one
+// (console.workspace_domain unset).
+function linkIcon(url) {
+  if (!url) return null;
+  return el("a", { className: "permalink", href: url, target: "_blank", rel: "noopener noreferrer",
+    title: UI.openInSlack, "aria-label": UI.openInSlack, text: LINK_ICON });
 }
 
 function bodyBlock(text, truncated) {
@@ -768,7 +810,8 @@ function queueCard(item) {
   const meta = el("div", { className: "meta" },
     chip,
     el("strong", { title: c.when, text: item.when || item.ts }),
-    el("span", { title: c.channel + ": " + item.channel.id, text: "#" + named(item.channel) }),
+    linkIcon(item.permalink),
+    el("span", { title: c.channel + ": " + item.channel.id, text: channelText(item.channel) }),
     item.not_member ? el("span", { className: "badge warn", title: UI.notMemberTitle, text: UI.notMember }) : null,
     el("span", { title: c.author + ": " + (item.author.id || ""), text: named(item.author) }),
     item.attention ? el("span", { className: "badge attention", title: c.attention, text: UI.attention(item.attention) }) : null,
@@ -784,6 +827,7 @@ function queueCard(item) {
   if (item.root) {
     parts.push(el("div", { className: "root" },
       el("div", { className: "meta small" }, el("strong", { text: UI.rootLabel }),
+        linkIcon(item.root.permalink),
         item.root.missing ? el("span", { text: UI.rootMissing }) : [
           el("span", { title: item.root.author.id || "", text: named(item.root.author) }),
           el("span", { text: item.root.when || "" })]),
@@ -798,6 +842,7 @@ function queueCard(item) {
         el("div", { className: "meta small" },
           el("span", { title: row.author.id || "", text: named(row.author) }),
           el("span", { text: row.when || "" }),
+          linkIcon(row.permalink),
           row.after ? el("span", { className: "badge", text: UI.later }) : null,
           row.state ? el("span", { className: "badge", text: UI.state(row.state) }) : null),
         bodyBlock(row.body, row.truncated)))));
@@ -1069,12 +1114,12 @@ function showCommitResults(results) {
   }
   for (const row of results.filter((item) => item.status === "applied" && item.action === "exclude_channel")) {
     box.append(el("div", { className: "channel-hint" },
-      UI.channelExcluded("#" + named(row.channel), row.closed || 0) + " ",
+      UI.channelExcluded(channelText(row.channel), row.closed || 0) + " ",
       el("a", { href: "/proposals", text: UI.openScope, onclick: (event) => { event.preventDefault(); showView("proposals", true); } })));
   }
   const hinted = results.filter((row) => row.status === "applied" && row.channel_hint);
   if (hinted.length) {
-    const names = Array.from(new Set(hinted.map((row) => "#" + named(row.channel))));
+    const names = Array.from(new Set(hinted.map((row) => channelText(row.channel))));
     box.append(el("div", { className: "channel-hint" },
       UI.channelHint + " (" + names.join(", ") + ") ",
       el("a", { href: "/proposals", text: UI.openScope, onclick: (event) => { event.preventDefault(); showView("proposals", true); } })));
@@ -1209,7 +1254,8 @@ function laneGroup(lane, group) {
   const root = group.root;
   const parts = [el("div", { className: "meta" },
     el("strong", { text: root.when_full || root.when || root.ts }),
-    el("span", { title: root.channel, text: "#" + (root.channel_name || root.channel) }),
+    linkIcon(root.permalink),
+    el("span", { title: root.channel, text: channelText({ id: root.channel, name: root.channel_name }) }),
     el("span", { title: root.author_id || "", text: root.author }),
     el("span", { className: "badge", text: UI.state(root.state) }),
     root.missing ? el("span", { className: "badge warn", text: UI.rootMissing }) : null,
@@ -1226,6 +1272,7 @@ function laneGroup(lane, group) {
       el("div", { className: "meta small" },
         el("strong", { title: item.author_id || "", text: item.author }),
         el("span", { text: item.when_full || item.when }),
+        linkIcon(item.permalink),
         el("span", { className: "badge", text: UI.state(item.state || UI.none) }),
         el("span", { className: "badge", text: UI.kind(item.kind) }),
         item.edited === "yes" ? el("span", { className: "badge warn", text: UI.edited }) : null,
@@ -1427,7 +1474,12 @@ function recentActionsCard(data) {
   card.append(table([c.at, c.action, c.items, c.actor, c.undo], rows.map((row) => [
     el("span", { title: row.when || null, text: row.time || UI.none }),
     (UI.journalActions[row.action] || row.action) + (row.lane ? " (" + row.lane + ")" : ""),
-    row.count, row.by,
+    // P20: link icons for the first message ids (title = id), when permalinks are on.
+    (row.links || []).length
+      ? el("span", {}, String(row.count), " ", (row.links || []).map((link) =>
+        el("span", { title: link.id }, linkIcon(link.permalink))))
+      : row.count,
+    row.by,
     row.undone_at ? el("span", { className: "badge", text: UI.undoUndone })
       : row.undoable ? el("button", { text: UI.undoButton(row.seconds_left), onclick: () => undoActions([row.id]) })
         : el("span", { className: "muted", text: UI.undoExpired })])));
@@ -1533,7 +1585,7 @@ async function loadProposals() {
   } else {
     list.append(table([c.kind, c.scopeKey, c.name, c.lane, c.evidence, c.status, c.lanes, c.current,
       c.firstSeen, c.lastSeen, c.actions], data.proposals.map((row) => [
-      row.kind, el("span", { className: "mono", text: row.key }), row.name, row.lane, row.evidence_count,
+      row.kind, el("span", { className: "mono", text: row.key }), scopeName(row.name), row.lane, row.evidence_count,
       el("span", {}, row.status,
         row.conflict ? el("span", { className: "badge bad", text: UI.conflict }) : null,
         row.effective ? el("span", { className: "badge ok", text: UI.effective }) : null,
@@ -1550,7 +1602,7 @@ async function loadProposals() {
     learned.append(el("div", { className: "muted", text: UI.learnedEmpty }));
   } else {
     learned.append(table([c.kind, c.scopeKey, c.name, c.lane, c.by, c.at, c.inConfig], data.learned.map((row) =>
-      [row.kind, el("span", { className: "mono", text: row.key }), row.name, row.lane, row.confirmed_by,
+      [row.kind, el("span", { className: "mono", text: row.key }), scopeName(row.name), row.lane, row.confirmed_by,
         row.confirmed_at, yesNo(row.in_config)])));
   }
   const output = el("pre", { className: "mono", hidden: true });
@@ -1585,7 +1637,7 @@ function exclusionsCard(rows) {
     card.append(el("div", { className: "muted", text: UI.exclusionsEmpty }));
   } else {
     card.append(table([c.channel, c.name, c.by, c.at, c.inConfig, c.actions], rows.map((row) =>
-      [el("span", { className: "mono", text: row.channel }), row.name, row.by, row.excluded_at,
+      [el("span", { className: "mono", text: row.channel }), scopeName(row.name), row.by, row.excluded_at,
         yesNo(row.in_config), el("button", { text: UI.undo, onclick: () => undoExclusion(row.channel) })])));
   }
   const output = el("pre", { className: "mono", hidden: true });
@@ -1670,7 +1722,8 @@ async function runSearch(query) {
   if (data.truncated) section.append(el("div", { className: "muted small", text: UI.searchTruncated }));
   section.append(el("article", { className: "card" }, table(
     [c.id, c.when, c.channel, c.author, c.state, c.lane, c.reason, c.note, c.text],
-    data.rows.map((row) => [el("span", { className: "mono", text: row.id }), row.when, named(row.channel), named(row.author),
+    data.rows.map((row) => [el("span", {}, el("span", { className: "mono", text: row.id }), " ", linkIcon(row.permalink)),
+      row.when, nameSpan(row.channel), nameSpan(row.author),
       row.state, row.lane, row.route_reason, row.note,
       row.snippet === null ? el("span", { className: "muted", text: UI.noBody }) : row.snippet + (row.truncated ? " " + UI.truncated : "")]))));
 }
@@ -1721,8 +1774,8 @@ function deliveryItems(row) {
   const details = el("details", { className: "context", open: deliveries.open.has(row.id) },
     el("summary", { text: String(row.item_count) }),
     el("ul", { className: "delivery-items" }, row.items.map((item) => el("li", {},
-      el("span", { className: "mono", text: item.id }), " ",
-      named(item.channel), " · ", named(item.author),
+      el("span", { className: "mono", text: item.id }), " ", linkIcon(item.permalink), " ",
+      nameSpan(item.channel), " · ", nameSpan(item.author),
       item.is_reply ? el("span", { className: "badge", text: UI.itemThread }) : null,
       item.missing ? el("span", { className: "badge warn", text: UI.itemMissing }) : null))));
   details.addEventListener("toggle", () => {
@@ -1786,7 +1839,13 @@ async function loadDeliveries(force) {
   section.append(el("div", { className: "meta delivery-summary" }, el("strong", { text: UI.deliveriesSummary(summary) })));
   section.append(deliveryFilters());
   if (!data.rows.length) {
-    section.append(el("div", { className: "empty-state", text: UI.deliveriesEmpty }));
+    // P20: an empty window is not an error: say when the log started and how many wakes the
+    // older per-thread record holds for this window (no details).
+    section.append(el("div", { className: "empty-state" },
+      el("div", { text: UI.deliveriesEmpty }),
+      data.log_started_when ? el("div", { className: "muted small", title: data.log_started_at || null,
+        text: UI.deliveryLogStarted(data.log_started_when) }) : null,
+      data.legacy_deliveries ? el("div", { className: "muted small", text: UI.legacyDeliveries(data.legacy_deliveries) }) : null));
     return;
   }
   section.append(el("article", { className: "card" }, table(

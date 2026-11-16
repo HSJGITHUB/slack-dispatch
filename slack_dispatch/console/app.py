@@ -5,6 +5,10 @@ on every response, Host and Origin checks against DNS rebinding and cross-site p
 Writes go through `slack_dispatch.console.actions`, which mirrors the inbox CLI.
 Since P19 every write that changes message rows is journaled and can be undone for
 `console.undo_seconds` (`POST /api/undo/{id}`, `POST /api/undo/last`, `GET /api/actions`).
+Since P20 every page build binds the view to the store (`view.bind(store)`), so user and
+channel names follow `queries.DisplayNames` (config, then ledger, then id) with one read per
+table per request, and message rows carry Slack permalinks when
+`console.workspace_domain` is set.
 Nothing here logs request lines, queries or message bodies.
 """
 import logging
@@ -191,12 +195,13 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                 "timezone_warning": view.zone_warning, "store_body": config.ledger.store_body,
                 "lane_hint_people": config.console.lane_hint_people,
                 "ui_language": config.console.ui_language,
-                "owner_resolver": owner is not None, "undo_seconds": undo_seconds}
+                "owner_resolver": owner is not None, "undo_seconds": undo_seconds,
+                "permalinks": view.domain is not None}
 
     @app.get("/api/queue")
     def queue(offset: int = Query(0, ge=0), limit: int | None = Query(None, ge=1, le=500)):
-        return queries.queue_page(store, config, view, clock(), offset=offset, limit=limit,
-                                  owner=owner)
+        return queries.queue_page(store, config, view.bind(store), clock(), offset=offset,
+                                  limit=limit, owner=owner)
 
     @app.post("/api/queue/actions")
     def queue_actions(request: QueueActionRequest):
@@ -215,26 +220,27 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
         results = actions.apply(store, root, request.action, request.ids, lane=lane, note=note,
                                 guard=actions.queue_guard, min_evidence=threshold, journal=journal)
         undo = journal.finish(undo_seconds, clock())
+        bound = view.bind(store)  # P20: one name cache for the whole response
         if request.action == "exclude":
             for result in results:
-                add_channel_hint(result, result["ok"])
+                add_channel_hint(result, result["ok"], bound)
         if request.action == "exclude_channel":
             for result in results:
-                add_excluded_channel(result, result["ok"])
+                add_excluded_channel(result, result["ok"], bound)
         return dict(summary(results, lane), undo=undo, journal=journal.status)
 
-    def add_excluded_channel(row, applied):
+    def add_excluded_channel(row, applied, bound):
         """P15: name the channel an applied exclude_channel closed."""
         message = store.get_message(row["id"]) if applied else None
         if message:
-            row["channel"] = view.channel(message["channel"])
+            row["channel"] = bound.channel(message["channel"])
 
-    def add_channel_hint(row, applied):
+    def add_channel_hint(row, applied, bound):
         """P14: flag an applied exclude whose channel has no lane default."""
         message = store.get_message(row["id"]) if applied else None
         row["channel_hint"] = bool(message) and queries.channel_hint(store, config, message)
         if row["channel_hint"]:
-            row["channel"] = view.channel(message["channel"])
+            row["channel"] = bound.channel(message["channel"])
 
     def decision_lane(action, lane):
         """(destination lane, None) for a staged decision, or (None, error detail)."""
@@ -262,6 +268,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
         """
         results, seen = [], set()
         journal = actions.Journal(store, "commit")
+        bound = view.bind(store)  # P20: one name cache for the whole response
         for decision in request.decisions:
             row = {"id": decision.id, "action": decision.action, "lane": None,
                    "status": "error", "detail": None}
@@ -282,10 +289,10 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
             row.update(lane=lane, status=status,
                        detail=result["detail"] or (result["error"] if status == "error" else None))
             if decision.action == "exclude":
-                add_channel_hint(row, row["status"] == "applied")
+                add_channel_hint(row, row["status"] == "applied", bound)
             if decision.action == "exclude_channel":
                 row["closed"] = result.get("closed", 0)
-                add_excluded_channel(row, row["status"] == "applied")
+                add_excluded_channel(row, row["status"] == "applied", bound)
         counts = {name: sum(row["status"] == name for row in results)
                   for name in actions.COMMIT_STATUSES}
         # P19: one journal row for the whole commit (null when nothing changed). A journal
@@ -300,8 +307,8 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
     @app.get("/api/lanes/{lane}/inbox")
     def lane_inbox(lane: str, full: bool = False):
         checked_lane(lane, registered=False)
-        return {"lane": lane, "groups": queries.lane_inbox(store, config, view, root, lane, full=full,
-                                                           owner=owner)}
+        return {"lane": lane, "groups": queries.lane_inbox(store, config, view.bind(store), root,
+                                                           lane, full=full, owner=owner)}
 
     @app.post("/api/lanes/{lane}/actions")
     def lane_actions(lane: str, request: LaneActionRequest):
@@ -324,7 +331,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
     @app.get("/api/actions")
     def recent_actions(limit: int = Query(20, ge=1, le=200)):
         return {"undo_seconds": undo_seconds,
-                "actions": queries.recent_actions(store, view, clock(), limit=limit)}
+                "actions": queries.recent_actions(store, view.bind(store), clock(), limit=limit)}
 
     def undo_response(run):
         try:
@@ -355,7 +362,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
         query = q.strip()
         if len(query) < 2:
             raise HTTPException(400, "Query needs at least 2 characters")
-        return queries.search(store, view, query)
+        return queries.search(store, view.bind(store), query)
 
     @app.get("/api/owner")
     def owner_candidates(channel: str = Query(..., max_length=100),
@@ -371,7 +378,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
 
     @app.get("/api/proposals")
     def proposal_list():
-        return queries.proposals(store, config, view)
+        return queries.proposals(store, config, view.bind(store))
 
     @app.post("/api/proposals/actions")
     def proposal_action(request: ProposalActionRequest):
@@ -389,7 +396,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
 
     @app.get("/api/proposals/export")
     def proposal_export():
-        return {"yaml": queries.export_yaml(store, config, view)}
+        return {"yaml": queries.export_yaml(store, config, view.bind(store))}
 
     @app.post("/api/channel-exclusions/undo")
     def channel_exclusion_undo(request: ChannelExclusionRequest):
@@ -400,7 +407,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
 
     @app.get("/api/channel-exclusions/export")
     def channel_exclusion_export():
-        return {"yaml": queries.export_exclusions_yaml(store, config, view)}
+        return {"yaml": queries.export_exclusions_yaml(store, config, view.bind(store))}
 
     # P18: delivery log tab (page, rows with receipts, window summary). Read-only.
     app.add_api_route("/deliveries", page, methods=["GET"], include_in_schema=False)
@@ -420,8 +427,8 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                    hours: int = Query(queries.DELIVERY_DEFAULT_HOURS, ge=0, le=24 * 366),
                    page: int = Query(1, ge=1, le=100000)):
         lane, purpose, status = delivery_filters(lane, purpose, status)
-        return queries.deliveries_page(store, config, view, clock(), lane=lane, purpose=purpose,
-                                       status=status, hours=hours, page=page)
+        return queries.deliveries_page(store, config, view.bind(store), clock(), lane=lane,
+                                       purpose=purpose, status=status, hours=hours, page=page)
 
     @app.get("/api/deliveries/summary")
     def deliveries_summary(hours: int = Query(queries.DELIVERY_DEFAULT_HOURS, ge=0, le=24 * 366)):

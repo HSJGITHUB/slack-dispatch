@@ -5,6 +5,7 @@ bodies are returned to the console page for display and are never logged.
 """
 import argparse
 from collections import Counter
+import copy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import io
@@ -19,6 +20,7 @@ from slack_dispatch.ingest.membership import member_status
 from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.ledger.store import delivery_item_ids
 from slack_dispatch.notify import effective_lane, wake_switch_path
+from slack_dispatch.notify.dispatch_card import permalink as card_permalink
 from slack_dispatch.notify.session_resolve import is_session_id
 from slack_dispatch.pipeline import HUMAN_QUEUE
 from slack_dispatch.runtime.heartbeat import SCHEMA, is_stale, read_heartbeat
@@ -100,21 +102,143 @@ def seconds_since(stamp, now):
         return None
 
 
-class View:
-    """Display settings shared by the read models: people, channel names and time zone."""
+# P20 display names and permalinks.
 
-    def __init__(self, config):
+GROUP_DM = "group DM"  # the page shows its ko label for this exact value
+
+
+def message_permalink(domain, channel, ts, thread_ts=None):
+    """Slack permalink of a message, or None without a workspace domain (P20).
+
+    `https://<domain>.slack.com/archives/<CHANNEL>/p<ts without the dot>`, built by the
+    dispatch card's own helper; a thread reply (thread_ts set and different from ts) adds
+    `?thread_ts=<root ts>&cid=<CHANNEL>`.
+    """
+    link = card_permalink(domain, channel, ts)
+    if link and thread_ts and str(thread_ts) != str(ts):
+        link += f"?thread_ts={thread_ts}&cid={channel}"
+    return link
+
+
+def workspace_domain(config):
+    """`console.workspace_domain`, or None (permalinks hidden)."""
+    return getattr(getattr(config, "console", None), "workspace_domain", None) or None
+
+
+class DisplayNames:
+    """The one display name resolver of the console and the inbox CLI (P20).
+
+    Users: config `people`, then `user_directory.name` in the ledger, then the id.
+    Channels: `console.channels`, then `channel_membership`: `#<name>` for channels,
+    `DM:<partner name>` for `im` rows (partner through the user order above), `group DM`
+    for `mpim` rows; then the id. Each ledger table is read at most once per instance, so
+    one instance per page build or command keeps it to one query per table.
+    """
+
+    def __init__(self, config=None, store=None):
+        self.people = dict(getattr(config, "people", None) or {})
+        self.channels = dict(getattr(getattr(config, "console", None), "channels", None) or {})
+        self.store = store
+        self._users = None
+        self._conversations = None
+
+    def _read(self, method):
+        lookup = getattr(self.store, method, None)
+        if not callable(lookup):
+            return []
+        try:
+            return lookup() or []
+        except Exception as error:
+            # Names are display data: a failed read shows ids instead of failing the page.
+            LOG.warning("Display name read failed table=%s class=%s", method, type(error).__name__)
+            return []
+
+    def directory(self):
+        """{user id: name} from the ledger table `user_directory` (one read)."""
+        if self._users is None:
+            self._users = {row["user"]: row["name"] for row in self._read("list_user_directory")
+                           if row.get("user") and row.get("name")}
+        return self._users
+
+    def membership(self):
+        """{channel id: row} from the ledger table `channel_membership` (one read)."""
+        if self._conversations is None:
+            self._conversations = {row["channel"]: row for row in self._read("list_membership")
+                                   if row.get("channel")}
+        return self._conversations
+
+    def user_name(self, user):
+        """The display name of a user id, or None when only the id is known."""
+        if not user:
+            return None
+        return self.people.get(user) or self.directory().get(user)
+
+    def user(self, user):
+        return self.user_name(user) or user
+
+    def channel_name(self, channel):
+        """The display name of a conversation id, or None when only the id is known."""
+        if not channel:
+            return None
+        if self.channels.get(channel):
+            return self.channels[channel]
+        row = self.membership().get(channel)
+        if row is None:
+            return None
+        if row.get("kind") == "im":
+            partner = self.user(row.get("partner_user"))
+            return "DM:" + partner if partner else None
+        if row.get("kind") == "mpim":
+            return GROUP_DM
+        return "#" + row["name"] if row.get("name") else None
+
+    def channel(self, channel):
+        return self.channel_name(channel) or channel
+
+
+class View:
+    """Display settings shared by the read models: people, channel names and time zone.
+
+    `View(config)` uses the configured names only. `view.bind(store)` (P20) returns a copy
+    for one page build whose names follow `DisplayNames` (config, then ledger, then id).
+    """
+
+    def __init__(self, config, store=None):
         warning = io.StringIO()
         self.zone = display_zone(config.display_timezone, warning)
         self.zone_warning = warning.getvalue().strip() or None
+        self.config = config
         self.people = dict(config.people)
         self.channels = dict(config.console.channels)
+        self.domain = workspace_domain(config)
+        self.names = DisplayNames(config, store) if store is not None else None
+
+    def bind(self, store):
+        """A copy of this view with a fresh name cache for one page build (P20)."""
+        bound = copy.copy(self)
+        bound.names = DisplayNames(self.config, store)
+        return bound
+
+    def user_name(self, user):
+        if not user:
+            return None
+        return self.names.user_name(user) if self.names is not None else self.people.get(user)
+
+    def channel_name(self, channel):
+        if not channel:
+            return None
+        if self.names is not None:
+            return self.names.channel_name(channel)
+        return self.channels.get(channel)
 
     def person(self, user):
-        return {"id": user, "name": self.people.get(user) if user else None}
+        return {"id": user, "name": self.user_name(user)}
 
     def channel(self, channel):
-        return {"id": channel, "name": self.channels.get(channel) if channel else None}
+        return {"id": channel, "name": self.channel_name(channel)}
+
+    def permalink(self, channel, ts, thread_ts=None):
+        return message_permalink(self.domain, channel, ts, thread_ts)
 
     def when_ts(self, ts):
         try:
@@ -150,9 +274,12 @@ def _clip(body, limit):
 def _brief(view, row, limit):
     """A thread message for context lists: metadata plus a clipped body."""
     body, truncated = _clip(row.get("body"), limit)
+    author = view.person(row.get("author"))
     return {"id": row["id"], "ts": row["ts"], "when": view.when_ts(row["ts"]),
-            "author": view.person(row.get("author")), "state": row.get("state"),
-            "lane": row.get("lane"), "body": body, "truncated": truncated}
+            "author": author, "author_name": author["name"] or author["id"],
+            "state": row.get("state"), "lane": row.get("lane"), "body": body,
+            "truncated": truncated,
+            "permalink": view.permalink(row.get("channel"), row["ts"], row.get("thread_ts"))}
 
 
 def lane_hints(store, config, message):
@@ -182,10 +309,15 @@ def author_hints(store, config, row, cache):
     return [dict(hint) for hint in cache[key]]
 
 
-def membership_view(store):
-    """(member channel ids, loaded) from the ledger table `channel_membership` (P15)."""
-    lookup = getattr(store, "list_membership", None)
-    rows = lookup() if callable(lookup) else []
+def membership_view(store, view=None):
+    """(member channel ids, loaded) from the ledger table `channel_membership` (P15).
+
+    With a bound view (P20) the rows its name cache already read are reused."""
+    if view is not None and getattr(view, "names", None) is not None:
+        rows = list(view.names.membership().values())
+    else:
+        lookup = getattr(store, "list_membership", None)
+        rows = lookup() if callable(lookup) else []
     members = {row["channel"] for row in rows if row["is_member"]}
     return members, bool(members)
 
@@ -215,7 +347,7 @@ def queue_item(store, config, view, row, now, hints=None, membership=None, owner
     `membership_view(store)`, read once per page (P15 `not_member` badge). `owner` is
     the P17 `OwnerResolver` (or None): it adds the `registry` badge data.
     """
-    membership = membership_view(store) if membership is None else membership
+    membership = membership_view(store, view) if membership is None else membership
     full = store.get_message(row["id"], include_body=True) or dict(row)
     root_ts = row.get("thread_ts") or row["ts"]
     is_reply = root_ts != row["ts"]
@@ -225,8 +357,10 @@ def queue_item(store, config, view, row, now, hints=None, membership=None, owner
         root_row = next((item for item in thread if item["ts"] == root_ts), None)
         if root_row is None:
             root = {"id": f"{row['source']}:{row['channel']}:{root_ts}", "ts": root_ts,
-                    "when": view.when_ts(root_ts), "author": view.person(None), "state": None,
-                    "lane": None, "body": None, "truncated": False, "missing": True}
+                    "when": view.when_ts(root_ts), "author": view.person(None),
+                    "author_name": None, "state": None, "lane": None, "body": None,
+                    "truncated": False, "missing": True,
+                    "permalink": view.permalink(row["channel"], root_ts)}
         else:
             root = dict(_brief(view, root_row, ROOT_CHARS), missing=False)
     others = [item for item in thread if item["ts"] != root_ts and item["id"] != row["id"]]
@@ -236,10 +370,14 @@ def queue_item(store, config, view, row, now, hints=None, membership=None, owner
     if row.get("classifier_suggestion"):
         suggestion = {"lane": row["classifier_suggestion"], "reason": row.get("suggestion_reason"),
                       "version": row.get("classifier_version")}
+    channel, author = view.channel(row["channel"]), view.person(row.get("author"))
     return {"id": row["id"], "ts": row["ts"], "when": view.when_ts(row["ts"]),
             "received_at": row.get("received_at"),
             "age_seconds": seconds_since(row.get("received_at"), now),
-            "channel": view.channel(row["channel"]), "author": view.person(row.get("author")),
+            "channel": channel, "author": author,
+            "channel_name": channel["name"] or channel["id"],
+            "author_name": author["name"] or author["id"],
+            "permalink": view.permalink(row["channel"], row["ts"], row.get("thread_ts")),
             "attention": row.get("attention"), "origin": row.get("origin"),
             "is_bot": bool(row.get("is_bot")), "has_files": bool(row.get("has_files")),
             "edited": bool(row.get("edited_at")), "followup": bool(row.get("followup")),
@@ -263,7 +401,7 @@ def queue_page(store, config, view, now, *, offset=0, limit=None, owner=None):
     rows.sort(key=lambda row: (ts_key(row["ts"]), row["id"]), reverse=True)
     page = rows[offset:offset + limit]
     hints = {}
-    membership = membership_view(store)
+    membership = membership_view(store, view)
     closed = []
     if owner is not None:
         for row in rows:
@@ -376,13 +514,17 @@ def lane_inbox(store, config, view, root, lane, *, full=False, owner=None):
                               no_body=False, show_body=False,
                               owner=config.always_human.owner_user)
     output = io.StringIO()
-    show_inbox(args, root, store, output, view.people, view.zone)
+    show_inbox(args, root, store, output, view.people, view.zone, names=view.names)
     groups = json.loads(output.getvalue() or "[]")
     for group in groups:
         group["root"]["pending"] = "kind" in group["root"]
-        group["root"]["channel_name"] = view.channels.get(group["root"].get("channel"))
+        group["root"]["channel_name"] = view.channel_name(group["root"].get("channel"))
         group["root"]["when_full"] = view.when_ts(group["root"].get("ts"))
         root_row = group["root"]
+        if view.domain:
+            # P20: the root line links to the thread root (keys only with a domain, so the
+            # root keeps the CLI JSON shape otherwise).
+            root_row["permalink"] = view.permalink(root_row.get("channel"), root_row.get("ts"))
         group["registry"] = registry_view(owner, {"channel": root_row.get("channel"),
                                                   "ts": root_row.get("ts")}) if owner else None
         for item in group["items"]:
@@ -391,6 +533,10 @@ def lane_inbox(store, config, view, root, lane, *, full=False, owner=None):
             item["lane"] = message.get("lane")
             item["when_full"] = view.when_ts(item.get("ts"))
             item["channel"] = message.get("channel") or root_row.get("channel")
+            item["channel_name"] = view.channel_name(item["channel"])
+            if view.domain:
+                item["permalink"] = view.permalink(item["channel"], item.get("ts"),
+                                                   message.get("thread_ts") or root_row.get("ts"))
             item["registry"] = registry_view(owner, message) if owner and message else None
         if "owner_replied_at" in group:
             group["owner_replied_when"] = view.when_ts(group["owner_replied_at"])
@@ -467,9 +613,13 @@ def search(store, view, query, *, limit=SEARCH_LIMIT):
     result = []
     for row in rows[:limit]:
         snippet, truncated = _clip(row.get("body"), SNIPPET_CHARS)
+        channel, author = view.channel(row["channel"]), view.person(row.get("author"))
         result.append({"id": row["id"], "ts": row["ts"], "when": view.when_ts(row["ts"]),
-                       "channel": view.channel(row["channel"]),
-                       "author": view.person(row.get("author")), "state": row["state"],
+                       "channel": channel, "author": author,
+                       "channel_name": channel["name"] or channel["id"],
+                       "author_name": author["name"] or author["id"],
+                       "permalink": view.permalink(row["channel"], row["ts"], row.get("thread_ts")),
+                       "state": row["state"],
                        "lane": row.get("lane"), "route_reason": row.get("route_reason"),
                        "note": row.get("note"), "suggestion": row.get("classifier_suggestion"),
                        "snippet": snippet, "truncated": truncated})
@@ -483,8 +633,9 @@ LIVE_STATUSES = ("open", "suggested", "confirmed")
 
 
 def scope_name(view, kind, key):
-    """Display name of a scope key: console channel names, people names for persons."""
-    return (view.people if kind == "person" else view.channels).get(key)
+    """Display name of a scope key: people names for persons, channel names otherwise
+    (P20: through the bound view's DisplayNames when there is one)."""
+    return view.user_name(key) if kind == "person" else view.channel_name(key)
 
 
 def current_default(store, config, kind, key):
@@ -539,7 +690,7 @@ def channel_exclusions(store, config, view):
     """Active ledger channel exclusions (P15) for the Learned scope panel."""
     lookup = getattr(store, "list_channel_exclusions", None)
     rows = lookup() if callable(lookup) else []
-    return [{"channel": row["channel"], "name": view.channels.get(row["channel"]),
+    return [{"channel": row["channel"], "name": view.channel_name(row["channel"]),
              "excluded_at": row["excluded_at"], "by": row["by"],
              "in_config": row["channel"] in config.excluded_channels} for row in rows]
 
@@ -553,7 +704,7 @@ def export_exclusions_yaml(store, config, view):
     lines.append("excluded_channels:" + ("" if channels else " []"))
     for channel in channels:
         added = channel not in config.excluded_channels
-        notes = [note for note in (view.channels.get(channel), "ledger" if added else None) if note]
+        notes = [note for note in (view.channel_name(channel), "ledger" if added else None) if note]
         lines.append(f"  - {channel}" + (f"  # {', '.join(notes)}" if notes else ""))
     if not ledger:
         lines.append("# No ledger channel exclusions.")
@@ -645,16 +796,19 @@ def delivery_item(store, view, message_id, cache):
         if row is None:
             parts = message_id.split(":", 2)
             channel = parts[1] if len(parts) == 3 else None
+            ts = parts[2] if len(parts) == 3 else None
             cache[message_id] = {"id": message_id, "missing": True, "channel": view.channel(channel),
                                  "is_reply": False, "author": view.person(None), "state": None,
-                                 "lane": None}
+                                 "lane": None, "permalink": view.permalink(channel, ts)}
         else:
             cache[message_id] = {"id": message_id, "missing": False,
                                  "channel": view.channel(row["channel"]),
                                  "is_reply": bool(row.get("thread_ts")
                                                   and row["thread_ts"] != row["ts"]),
                                  "author": view.person(row.get("author")),
-                                 "state": row.get("state"), "lane": row.get("lane")}
+                                 "state": row.get("state"), "lane": row.get("lane"),
+                                 "permalink": view.permalink(row["channel"], row["ts"],
+                                                             row.get("thread_ts"))}
     return dict(cache[message_id])
 
 
@@ -695,9 +849,42 @@ def deliveries_page(store, config, view, now, *, lane=None, purpose=None, status
     total = store.count_deliveries(**filters)
     rows = store.list_deliveries(**filters, limit=limit, offset=(page - 1) * limit)
     cache = {}
-    return {"hours": hours, "page": page, "page_size": limit, "total": total,
-            "rows": [delivery_row(store, view, row, cache)
-                     for row in store.delivery_receipts(rows, now)]}
+    result = {"hours": hours, "page": page, "page_size": limit, "total": total,
+              "rows": [delivery_row(store, view, row, cache)
+                       for row in store.delivery_receipts(rows, now)]}
+    result.update(delivery_log_start(store, view, now, hours=hours, lane=lane, purpose=purpose,
+                                     status=status, empty=not total))
+    return result
+
+
+def delivery_log_start(store, view, now, *, hours, lane=None, purpose=None, status=None,
+                       empty=True):
+    """P20 Deliveries empty state: when the log started and, for an empty window, how many
+    `service_deliveries` rows (the pre-P18 record: thread and lane only) fall in the window
+    before that start.
+
+    Returns `log_started_at` (UTC ISO or None), `log_started_when` (display time zone) and
+    `legacy_deliveries`: 0 unless `empty`, and 0 for the human_queue purpose or lane and for
+    statuses other than sent, since that table records lane wakes that were sent.
+    """
+    lookup = getattr(store, "delivery_log_started_at", None)
+    started = lookup() if callable(lookup) else None
+    legacy = 0
+    counter = getattr(store, "count_service_deliveries", None)
+    if (empty and callable(counter) and purpose in (None, "lane") and status in (None, "sent")
+            and lane != HUMAN_QUEUE):
+        since = max(0.0, float(now) - hours * 3600) if hours else None
+        before = None
+        if started:
+            try:
+                moment = datetime.fromisoformat(started)
+                before = (moment if moment.tzinfo else moment.astimezone()).timestamp()
+            except ValueError:
+                before = None
+        if before is None or since is None or since < before:
+            legacy = counter(since=since, before=before, lane=lane)
+    return {"log_started_at": started, "log_started_when": _full_time(view, started),
+            "legacy_deliveries": legacy}
 
 
 def deliveries_summary(store, now, *, hours=DELIVERY_DEFAULT_HOURS):
@@ -724,9 +911,18 @@ def recent_actions(store, view, now, *, limit=20):
     """The newest `console_actions` rows with `undoable` and `seconds_left` at `now`.
 
     Each row: id, at, when (display time zone), action, lane, count, ids, by, undo_until,
-    undone_at, undoable, seconds_left and the stored undo `result` (null until undone)."""
+    undone_at, undoable, seconds_left, the stored undo `result` (null until undone) and
+    (P20) `links`: `{id, permalink}` for the first RECENT_LINKS ids when permalinks are on."""
     rows = []
-    for row in store.list_console_actions(limit):
+    actions = store.list_console_actions(limit)
+    refs = {}
+    if view.domain and callable(getattr(store, "message_refs", None)):
+        wanted = []
+        for row in actions:
+            ids = _json_value(row.get("ids"), [])
+            wanted.extend(ids[:RECENT_LINKS] if isinstance(ids, list) else [])
+        refs = store.message_refs(wanted)
+    for row in actions:
         ids = _json_value(row.get("ids"), [])
         meta = _json_value(row.get("meta"), {})
         rows.append({"id": row["id"], "at": row.get("at"), "when": _full_time(view, row.get("at")),
@@ -736,8 +932,28 @@ def recent_actions(store, view, now, *, limit=20):
                      "ids": ids if isinstance(ids, list) else [], "by": row.get("by"),
                      "undo_until": row.get("undo_until"), "undone_at": row.get("undone_at"),
                      "undoable": undoable(row, now), "seconds_left": seconds_left(row, now),
-                     "result": _json_value(row.get("result"), None)})
+                     "result": _json_value(row.get("result"), None),
+                     "links": action_links(view, ids, refs)})
     return rows
+
+
+RECENT_LINKS = 5
+
+
+def action_links(view, ids, refs):
+    """`{id, permalink}` for the first RECENT_LINKS message ids of a journal row (P20)."""
+    if not view.domain or not isinstance(ids, list):
+        return []
+    links = []
+    for message_id in ids[:RECENT_LINKS]:
+        ref = refs.get(message_id)
+        if ref is None:
+            parts = str(message_id).split(":", 2)
+            ref = {"channel": parts[1], "ts": parts[2]} if len(parts) == 3 else {}
+        link = view.permalink(ref.get("channel"), ref.get("ts"), ref.get("thread_ts"))
+        if link:
+            links.append({"id": message_id, "permalink": link})
+    return links
 
 
 def _json_value(value, default):

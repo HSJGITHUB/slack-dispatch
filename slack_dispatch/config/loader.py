@@ -336,7 +336,8 @@ def owner_resolver_section(value):
 
 def user_directory_section(value):
     """Optional `user_directory` map (P16): enabled (default true), ttl_seconds
-    (positive, default 86400) and failure_cooldown_seconds (positive, default 300)."""
+    (positive, default 86400) and failure_cooldown_seconds (positive, default 300);
+    P20 resolve_names (default true)."""
     data = mapping({} if value is None else value, "user_directory")
     return UserDirectory(enabled=boolean(data.get("enabled", UserDirectory.enabled),
                                          "user_directory.enabled"),
@@ -345,7 +346,9 @@ def user_directory_section(value):
                          failure_cooldown_seconds=positive(
                              data.get("failure_cooldown_seconds",
                                       UserDirectory.failure_cooldown_seconds),
-                             "user_directory.failure_cooldown_seconds"))
+                             "user_directory.failure_cooldown_seconds"),
+                         resolve_names=boolean(data.get("resolve_names", UserDirectory.resolve_names),
+                                               "user_directory.resolve_names"))
 
 
 MEMBERSHIP_POLICIES = ("exclude", "off")
@@ -371,6 +374,10 @@ def scope_learning_section(value):
                                                "scope_learning.min_evidence"))
 
 
+# A Slack workspace subdomain (dispatch_card and, since P20, console.workspace_domain).
+WORKSPACE_DOMAIN = r"[a-z0-9][a-z0-9-]{0,62}"
+
+
 def card_options(row, kind, purpose):
     """P12 dispatch_card keys: purpose human_queue, `only_immediate`, `workspace_domain`."""
     if kind != "dispatch_card":
@@ -380,7 +387,7 @@ def card_options(row, kind, purpose):
     only_immediate = boolean(row.get("only_immediate", True), "notify_adapter.only_immediate")
     domain = row.get("workspace_domain")
     if domain is not None and (not isinstance(domain, str)
-                               or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", domain)):
+                               or not re.fullmatch(WORKSPACE_DOMAIN, domain)):
         raise ConfigError("notify_adapter.workspace_domain must be a Slack workspace subdomain")
     return only_immediate, domain
 
@@ -436,9 +443,13 @@ def console_section(value, lane_ids):
     undo = data.get("undo_seconds", Console.undo_seconds)
     if type(undo) is not int or undo < UNDO_MIN_SECONDS:
         raise ConfigError(f"console.undo_seconds must be an integer of at least {UNDO_MIN_SECONDS}")
+    domain = data.get("workspace_domain")
+    if domain is not None and (not isinstance(domain, str)
+                               or not re.fullmatch(WORKSPACE_DOMAIN, domain)):
+        raise ConfigError("console.workspace_domain must be a Slack workspace subdomain")
     return Console(host=host, port=port, base_url=base_url, page_size=page_size,
                    lane_hint_people=hint, direct_lane=direct, channels=channels,
-                   ui_language=language, undo_seconds=undo)
+                   ui_language=language, undo_seconds=undo, workspace_domain=domain)
 
 
 def timezone_name(value):
