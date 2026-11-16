@@ -69,6 +69,8 @@ class EditedTests(unittest.TestCase):
         rows = self.listing()
         self.assertEqual((rows[reply.message_id]["kind"], rows[reply.message_id]["edited"]), ("new", "no"))
         self.assertEqual(rows[root.message_id]["edited"], "no")
+        # P22: an edit wakes (and writes a followup record) only after the lane read the item.
+        self.store.set_state(reply.message_id, "acked")
         self.pipeline.handle_event(event(3, ts=event(2)["ts"], subtype="message_changed",
                                          thread_ts=event()["ts"], is_thread_reply=True))
         self.assertEqual((self.records()[-1]["kind"], self.records()[-1]["followup"]), ("followup", True))

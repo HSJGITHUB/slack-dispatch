@@ -9,7 +9,7 @@ from .schema import (
     LedgerConfig, Membership, NotifyAdapter, OwnerResolver, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
     SourceConfig, Timers, UserDirectory, WakePolicy,
 )
-from .schema import DeliveryLog
+from .schema import DeliveryLog, FOLLOWUP_POLICIES
 
 
 class ConfigError(ValueError):
@@ -114,11 +114,15 @@ def parse_config(raw):
     owner_user = wake.get("owner_user")
     if owner_user is not None:
         string(owner_user, "wake_policy.owner_user")
+    followup = wake.get("followup", "changed_after_ack")
+    if followup not in FOLLOWUP_POLICIES:
+        raise ConfigError("wake_policy.followup must be changed_after_ack, always or never")
     wake = WakePolicy("immediate", boolean(required(wake, "enabled", "wake_policy"), "wake_policy.enabled"),
                       *(positive(required(wake, k, "wake_policy"), "wake_policy." + k)
                         for k in ("debounce_seconds", "storm_per_hour", "batch_seconds")),
                       immediate_users=immediate_users, owner_user=owner_user,
-                      state_dir=string(wake.get("state_dir", "state"), "wake_policy.state_dir"))
+                      state_dir=string(wake.get("state_dir", "state"), "wake_policy.state_dir"),
+                      followup=followup)
     inbox = mapping(data.get("inbox", {"root": "inbox"}), "inbox")
     inbox = Inbox(string(required(inbox, "root", "inbox"), "inbox.root"))
     adapters = []

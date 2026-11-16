@@ -100,6 +100,8 @@ class PipelineTests(unittest.TestCase):
         reply = self.pipeline.handle_event(event(2, text="plain", thread_ts="1000.000001",
                                                  is_thread_reply=True))
         self.assertFalse(self.store.get_message(reply.message_id)["followup"])
+        # P22: an edit wakes (and writes a followup record) only after the lane read the item.
+        self.store.set_state(first.message_id, "acked")
         self.pipeline.handle_event(event(3, ts="1000.000001", subtype="message_changed"))
         self.assertTrue(self.store.get_message(first.message_id)["followup"])
         self.assertEqual(self.records()[-1]["kind"], "followup")

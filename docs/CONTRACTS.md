@@ -35,7 +35,7 @@ These contracts let three packets (ingest+ledger, router+queue, inbox+notify) be
 Constructor `LedgerStore(path)`; `open()` enables WAL and foreign keys; `migrate()` applies `schema.sql` through a `schema_version` table; `close()`. All mutations run through this single object using `BEGIN IMMEDIATE`.
 
 ```
-record_event(event: Event) -> RecordResult        # RecordResult(message_id: str | None, created: bool, duplicate: bool, kind: str)
+record_event(event: Event) -> RecordResult        # RecordResult(message_id: str | None, created: bool, duplicate: bool, kind: str, previous_body: str | None = None)
 get_message(message_id: str) -> Message | None    # Message = dict with the messages row (body omitted unless include_body=True)
 list_messages(*, state: str | None = None, lane: str | None = None, since: str | None = None, limit: int = 100) -> list[Message]
 set_route(message_id: str, lane: str, reason: str, *, state: str = "assigned") -> None
@@ -527,3 +527,27 @@ All additive; the schema version stays 2 and no table changes.
   `capped`, `already_queued`, `records_written` and `records_skipped`; explicit ids with a
   pending request are `ok` with detail `already_queued`. `backfilled_ids(root, lane, ids)`;
   `journal_wake(..., before=None)` stores the pre-wake snapshots as `before`.
+
+## P22 followup wakes
+
+- Config: `wake_policy.followup` in `changed_after_ack` (default), `always`, `never`
+  (`config.schema.FOLLOWUP_POLICIES`, `WakePolicy.followup`); any other value is a
+  `ConfigError`.
+- `LedgerStore.record_event` returns `RecordResult.previous_body`: for a `message_changed`
+  event of an existing row, the stored body before the update (None when no body was
+  stored or store_body is off); None for every other event and for duplicates. The update
+  itself (`edited_at`, `followup=1`, body when store_body) is unchanged.
+- `slack_dispatch.pipeline`: `edit_text_changed(previous_body, text)` (whitespace-trimmed
+  comparison; a missing value counts as changed), `followup_policy(config)` (default
+  `changed_after_ack` when the key is absent), `FOLLOWUP_READ_STATES = ("acked", "done")`.
+  `Pipeline._edit_verdict(mid, message, recorded, event)` returns `EDIT_IGNORE`,
+  `EDIT_FIRST` or `EDIT_WAKE` (fix1; replaces `_edit_wakes_lane`). `EDIT_FIRST` (any edit of
+  a `new` item; a text edit of a `human_pending` item under `changed_after_ack`) routes as a
+  first assignment outside the edit counters and window, and a re-routed item that stays
+  `human_pending` gets no second queue notice (counted in `edits_ignored`). `EDIT_WAKE`
+  routes with the followup inbox record and wake offer as before P22. An ignored edit is
+  recorded only and returns `HandleResult(state=<current>, lane=<current>)`. `Pipeline.edits_ignored` and `Pipeline.edits_woken` (ints) appear in
+  `snapshot()` (heartbeat counters) once either is nonzero. The per-id edit wake times are
+  process memory (`Pipeline._edit_wakes`), so a restart forgets the window.
+- Inbox records, delivery log kinds, reply followups and the `message_deleted` path are
+  unchanged.

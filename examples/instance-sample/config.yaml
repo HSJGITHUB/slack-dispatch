@@ -47,6 +47,11 @@ wake_policy:
   state_dir: state
   immediate_users: [U0000000004]
   owner_user: U0000000005
+  # Which message_changed edits wake a lane (P22). changed_after_ack (default): only a text
+  # change of an item the lane already acked or closed, once per
+  # service.followup_window_seconds; other edits update the ledger silently. always: every
+  # edit wakes (the behaviour before P22). never: edits update the ledger only.
+  followup: changed_after_ack
 inbox:
   root: inbox
 notify_adapters:

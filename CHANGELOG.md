@@ -5,6 +5,22 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P22 followup wakes
+- Edits no longer wake a lane for every `message_changed` event. New `wake_policy.followup`:
+  `changed_after_ack` (default) wakes only for a text change of an item the lane already
+  acked or closed, at most once per `service.followup_window_seconds` per message;
+  `always` keeps the old behaviour; `never` records edits only.
+- A link preview attaching (text unchanged) or an edit of an item the lane has not read yet
+  is recorded in the ledger (body, `edited_at`) with no routing, inbox record, wake offer
+  or human notice; the item keeps its state and lane.
+- `RecordResult.previous_body` exposes the stored body before an edit. Heartbeat counters
+  `edits_ignored` and `edits_woken` (present once either is nonzero) and one INFO log line
+  with the message id per edit recorded without a wake.
+- fix1: an edit of a `new` item (never routed) is routed as a first assignment under every
+  policy; a text edit of a `human_pending` item is routed again (a first assignment when it
+  now reaches a lane, ledger only with no second queue notice when it stays queued).
+  SERVICE.md states the lane and attention limits and the `store_body: false` limit.
+
 ### P21 lane sessions and wake now
 - Optional `console.sessions_table`: a Markdown table (`| last used | state | title | size |
   `claude --resume <uuid>` |`) read only and cached by mtime. `SessionResolver.describe`

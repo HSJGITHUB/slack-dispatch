@@ -15,6 +15,9 @@ class RecordResult:
     created: bool
     duplicate: bool
     kind: str
+    # P22: for a message_changed event of an existing row, the stored body before this
+    # update (None when no body was stored, store_body is off, or for other events).
+    previous_body: str | None = None
 
 
 class ProposalStateError(Exception):
@@ -217,6 +220,7 @@ class LedgerStore:
             kind, mid = "channel_meta", None
         received = event["received_at"]
         created, duplicate = False, False
+        previous_body = None
         with self._transaction() as db:
             if event_id:
                 seen = db.execute("SELECT * FROM events_seen WHERE event_id=?", (event_id,)).fetchone()
@@ -226,6 +230,11 @@ class LedgerStore:
                 exists = db.execute("SELECT 1 FROM messages WHERE id=?", (mid,)).fetchone()
                 subtype = event.get("subtype")
                 if subtype == "message_changed":
+                    if exists:
+                        # P22: the body before the edit, so the pipeline can tell a text
+                        # change from a metadata-only edit (link previews attaching).
+                        previous_body = db.execute("SELECT body FROM messages WHERE id=?",
+                                                   (mid,)).fetchone()["body"]
                     db.execute("UPDATE messages SET edited_at=?, followup=1, has_files=?, is_bot=? WHERE id=?",
                                (received, bool(event.get("has_files")), event_is_bot(event), mid))
                     if self.store_body and "text" in event:
@@ -269,7 +278,7 @@ class LedgerStore:
                 db.execute("INSERT INTO events_seen (event_id, received_at, kind, message_id, source, channel) "
                            "VALUES (?, ?, ?, ?, ?, ?)",
                            (event_id, received, kind, mid, source, channel))
-        return RecordResult(mid, created, duplicate, kind)
+        return RecordResult(mid, created, duplicate, kind, previous_body)
 
     def get_message(self, message_id, *, include_body=False):
         rows = self._rows("SELECT * FROM messages WHERE id=?", (message_id,))

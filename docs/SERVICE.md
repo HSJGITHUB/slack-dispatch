@@ -43,10 +43,53 @@ The existing suggester receives the ordinary body-free ledger read.
 File inbox adapters run before wake policy evaluation, including when wakes are
 disabled or deferred. Other lane adapters run on Deliver or due flush batches.
 A successful file inbox or lane-adapter call records the thread delivery time.
-Replies within the inclusive followup window are marked followup; edits are
-always followups, matching existing ledger behavior. File inbox records carry the
+Replies within the inclusive followup window are marked followup. Edits
+(message_changed) follow `wake_policy.followup` (P22, see below); an edit that passes
+it is a followup as before. File inbox records carry the
 marker in `followup`; kind=followup is written only for edited messages (ledger
 edited_at, set by message_changed). A recent reply keeps kind new or backfill.
+
+### Edit wakes (P22)
+
+Slack sends `message_changed` for real text edits and also when link previews attach
+(the text unchanged), often several times within seconds. Every edit of an existing row
+is recorded in the ledger first (body when store_body is on, `edited_at`, `followup=1`).
+The pipeline then compares the normalized new text with the stored body before the
+update (both whitespace-trimmed; a missing stored body or new text counts as changed)
+and applies `wake_policy.followup`:
+
+```yaml
+wake_policy:
+  followup: changed_after_ack   # or always, never
+```
+
+- `changed_after_ack` (default): the edit goes on to routing, a followup inbox record and
+  a wake offer only when the text changed, the item was `acked` or `done` before the
+  event (the lane had already read or closed it) and no edit wake was offered for the same
+  message id within `service.followup_window_seconds` (inclusive, process memory). Such an
+  edit re-routes the item as before P22, so an acked or done item becomes `assigned`
+  again. A text edit of a `human_pending` item is routed again (fix1): when it now
+  routes to a lane it is a first assignment (inbox record, wake and attention notice as
+  usual, outside the edit counters and window); when it stays `human_pending` only the
+  ledger and the queue export change, with no second queue notice. Every other edit (an
+  `assigned` item the lane has not read yet, an unfurl, an excluded item, a second
+  change inside the window) is recorded only: no routing, no inbox record, no wake
+  offer, no human notice, state and lane unchanged.
+- `always`: every edit goes on as before P22.
+- `never`: edits update the ledger only.
+- Under every policy an edit of a `new` item (recorded but never routed, for example
+  after a crash) is routed as a first assignment and is not counted as an edit (fix1).
+
+Limitations: an edit of an `assigned`, `acked` or `done` item never changes its lane
+or recomputes its attention flag unless it passes the gate (reassign by hand if needed).
+With `ledger.store_body: false` no body is stored, so every edit counts as a text change
+and an unfurl of an acked or done item still wakes the lane once per window.
+
+Reply followups (a reply within the followup window of a recent delivery) are
+unchanged. Each edit recorded without a wake logs one INFO line `Edit recorded without
+wake id=<message id>` (no text). Heartbeat counters `edits_ignored` (edits recorded
+without a wake) and `edits_woken` (edits that reached a lane wake offer) appear once
+either is nonzero.
 Storm transitions send their triggering message id to the human queue adapters.
 
 Human-pending messages overwrite state/human_queue.jsonl with ids and suggested
@@ -170,7 +213,8 @@ human_pending counts new routing outcomes in that state; delivered counts ids
 accepted by successful pipeline delivery groups (inbox and wake groups may both
 count the same id); failures includes pipeline, runtime, timer and source error
 observations. wake_skipped_no_session (present only with a session_message adapter)
-is described under lane sessions above. One error can be observed at multiple boundaries. Timers have
+is described under lane sessions above. edits_ignored and edits_woken (P22, present
+once either is nonzero) are described under edit wakes above. One error can be observed at multiple boundaries. Timers have
 separate durable receipts and do not increment the pipeline delivered counter.
 Heartbeat ok remains false after any observed failure in that process.
 

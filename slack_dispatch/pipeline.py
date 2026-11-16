@@ -10,6 +10,7 @@ import sys
 import time
 from urllib.parse import quote
 
+from slack_dispatch.config.schema import FOLLOWUP_POLICIES
 from slack_dispatch.ingest.membership import NOT_MEMBER
 from slack_dispatch.ingest.user_directory import carries_app_evidence, is_bot_message
 from slack_dispatch.notify.wake import Deliver
@@ -91,6 +92,28 @@ DIRECTORY_TTL_FALLBACK = 86400
 # the largest number of users kept in the name queue and in the checked map (oldest dropped).
 NAME_LOOKUP_BUDGET_SECONDS = 3.0
 NAME_TRACK_LIMIT = 5000
+
+
+# P22: item states in which the lane had already read (acked) or closed (done) an item, so a
+# text edit under wake_policy.followup `changed_after_ack` is worth a followup wake.
+FOLLOWUP_READ_STATES = ("acked", "done")
+# P22: Pipeline._edit_verdict outcomes.
+EDIT_IGNORE, EDIT_FIRST, EDIT_WAKE = "ignore", "first", "wake"
+
+
+def followup_policy(config):
+    """wake_policy.followup (P22); configs without the key use `changed_after_ack`."""
+    value = getattr(getattr(config, "wake_policy", None), "followup", None)
+    return value if value in FOLLOWUP_POLICIES else FOLLOWUP_POLICIES[0]
+
+
+def edit_text_changed(previous_body, text):
+    """P22: whether an edit changed the text: the normalized new text against the stored body
+    before the update, both whitespace-trimmed. A missing stored body (or a missing new text)
+    counts as changed, since equality cannot be shown."""
+    if not isinstance(previous_body, str) or not isinstance(text, str):
+        return True
+    return text.strip() != previous_body.strip()
 
 
 def _trim_oldest(entries, limit):
@@ -394,6 +417,13 @@ class Pipeline:
         self.lock = threading.RLock()
         self.counters = dict(events=0, routed=0, human_pending=0, delivered=0, failures=0,
                              duplicates=0, prehandled=0, hydrated=0)
+        # P22: edits recorded without a wake and edits that went on to a wake offer; both
+        # appear in the heartbeat once either is nonzero.
+        self.edits_ignored = 0
+        self.edits_woken = 0
+        # P22: message id -> clock time of the last followup wake offered for an edit
+        # (memory only, oldest dropped past NAME_TRACK_LIMIT).
+        self._edit_wakes = {}
         self.reconcile_source = None
         # P15: optional MembershipCache; the service sets it when membership is enabled.
         self.membership = None
@@ -478,6 +508,8 @@ class Pipeline:
             if self.owner_resolver is not None:
                 # P17: human queue items closed by an owner reply in their thread.
                 result["owner_reply_closed"] = self.owner_reply_closed
+            if self.edits_ignored or self.edits_woken:
+                result.update(edits_ignored=self.edits_ignored, edits_woken=self.edits_woken)
             return result
 
     def _thread_key(self, message, lane):
@@ -688,6 +720,19 @@ class Pipeline:
             self.store.set_state(mid, "excluded", note=NOT_MEMBER)
             self.excluded_not_member += int(event.get("channel") not in self.config.excluded_channels)
             return HandleResult(mid, recorded.kind, state="excluded")
+        verdict = (self._edit_verdict(mid, message, recorded, event)
+                   if event.get("subtype") == "message_changed" else None)
+        if verdict == EDIT_IGNORE:
+            # P22: the ledger already holds the edit (body, edited_at); no routing, inbox
+            # record, wake offer or human notice, and the item keeps its state and lane.
+            self._edit_ignored(mid)
+            return HandleResult(mid, recorded.kind, state=message.get("state"),
+                                lane=message.get("lane"))
+        # P22: only edit wakes count in the edit counters and the edit wake window; an edit
+        # routed as a first assignment (EDIT_FIRST) does not.
+        edit = verdict == EDIT_WAKE
+        # P22 fix1: a human_pending item re-routed by a text edit.
+        requeued = verdict == EDIT_FIRST and message.get("state") == "human_pending"
         self._hydrate(event)
         owner = self.config.always_human.owner_user
         note = None
@@ -748,11 +793,21 @@ class Pipeline:
                 backfill = inboxed
             else:
                 wake = self.wake_engine.offer(lane, message, message.get("author"))
+                if edit:
+                    self.edits_woken += 1
+                    self._edit_wakes.pop(mid, None)
+                    self._edit_wakes[mid] = self.clock()
+                    _trim_oldest(self._edit_wakes, NAME_TRACK_LIMIT)
                 if isinstance(wake, Deliver):
                     self._send("lane", lane, [mid], inbox=False)
                 if getattr(wake, "notice", None) is not None:
                     self._human_notice(mid, kind="storm")
                     self.wake_engine.notices.clear()
+        elif outcome.state == "human_pending" and requeued:
+            # P22 fix1: still queued after the edit: ledger (and queue export) only, no
+            # second queue notice.
+            self._edit_ignored(mid)
+            self._export_queue()
         elif outcome.state == "human_pending":
             self.counters["human_pending"] += 1
             self._export_queue()
@@ -760,6 +815,39 @@ class Pipeline:
         if outcome.state == "assigned" and decision.attention:
             self._human_notice(mid, attention=decision.attention)
         return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane, backfill=backfill)
+
+    def _edit_ignored(self, mid):
+        self.edits_ignored += 1
+        LOG.info("Edit recorded without wake id=%s", mid)
+
+    def _edit_verdict(self, mid, message, recorded, event):
+        """P22: what a message_changed event of an existing row does, per wake_policy.followup.
+
+        EDIT_FIRST: ordinary routing as a first assignment (inbox record, wake and attention
+        notice as usual, outside the edit counters and window): any edit of a `new` item
+        (fix1: an item recorded but never routed), and under `changed_after_ack` a text edit
+        of a `human_pending` item. EDIT_WAKE: routing, followup inbox record and wake offer
+        as before P22: every other edit under `always`, and under `changed_after_ack` a text
+        edit of an item that was `acked` or `done` before this event (record_event leaves
+        the state alone) with no edit wake offered for the same id within
+        service.followup_window_seconds (inclusive, like replies). EDIT_IGNORE otherwise.
+        """
+        state = message.get("state")
+        if state == "new":
+            return EDIT_FIRST
+        policy = followup_policy(self.config)
+        if policy != "changed_after_ack":
+            return EDIT_WAKE if policy == "always" else EDIT_IGNORE
+        if not edit_text_changed(getattr(recorded, "previous_body", None), event.get("text")):
+            return EDIT_IGNORE
+        if state == "human_pending":
+            return EDIT_FIRST
+        if state not in FOLLOWUP_READ_STATES:
+            return EDIT_IGNORE
+        last = self._edit_wakes.get(mid)
+        if last is not None and 0 <= self.clock() - last <= self.config.service.followup_window_seconds:
+            return EDIT_IGNORE
+        return EDIT_WAKE
 
     def _close_on_owner_reply(self, message):
         """P17: an owner reply in a thread closes the thread's earlier human queue items.

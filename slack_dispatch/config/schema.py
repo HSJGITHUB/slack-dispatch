@@ -23,6 +23,10 @@ class Timers:
     reassign_seconds: int
 
 
+# P22: values of wake_policy.followup (the first is the default).
+FOLLOWUP_POLICIES = ("changed_after_ack", "always", "never")
+
+
 @dataclass(frozen=True)
 class WakePolicy:
     mode: str
@@ -33,6 +37,9 @@ class WakePolicy:
     immediate_users: tuple[str, ...] = ()
     owner_user: str | None = None
     state_dir: str = "state"
+    # P22: which message_changed edits wake a lane: `changed_after_ack` (a text change of
+    # an acked or done item, once per followup window), `always` or `never`.
+    followup: str = "changed_after_ack"
 
 
 @dataclass(frozen=True)

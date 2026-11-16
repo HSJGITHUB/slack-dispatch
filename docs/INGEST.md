@@ -39,7 +39,10 @@ The database parent directory must already exist; deployment owns its creation.
 `message_id = source:channel:ts` is stable. Event IDs deduplicate all event types.
 A repeated ordinary message with a different event ID is a duplicate by message
 identity. Edits update only an existing row, with `edited_at` and `followup=1`;
-they never create a missing row. An edit received before the original message
+they never create a missing row. `record_event` returns the stored body from before
+an edit as `RecordResult.previous_body` (P22; None without a stored body), which the
+pipeline compares with the new text to decide whether the edit may wake a lane
+(`wake_policy.followup`, see SERVICE.md). An edit received before the original message
 is recorded as seen but is not replayed later. Reactions retain the latest
 add/remove timestamps per (message, user, reaction), including references to
 messages not yet received. File-share events with a message timestamp update
