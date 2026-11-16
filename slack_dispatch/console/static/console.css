@@ -273,3 +273,11 @@ a.permalink:hover, a.permalink:focus { text-decoration: underline; }
 .session-title { font-weight: 600; }
 .wake-wrap { display: inline-block; }
 .badge.dm { background: var(--accent); color: #fff; font-weight: 600; }
+/* P25: operator queue (undecided and direct rows), its filter and the Lanes tab link. */
+.queue-filter { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.queue-filter button { padding: 2px 8px; }
+.badge.direct-kind { background: var(--warn-soft); color: var(--warn); font-weight: 600; }
+.card.direct-row { border-left: 4px solid var(--warn); }
+.card.direct-row.staged { border-left-color: var(--accent); }
+.direct-link { margin-bottom: 12px; }
+.direct-link a { color: var(--accent); }

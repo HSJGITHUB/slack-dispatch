@@ -619,3 +619,45 @@ All additive; the schema version stays 2 and no table changes.
 - Console (fix1): `LaneActionRequest.thread: bool = False`; `POST /api/lanes/{lane}/actions`
   passes `thread=request.thread and request.action == "reroute"` to `actions.apply`. The
   console page does not send it yet.
+
+## P25 operator queue
+
+- `slack_dispatch.queue.human`: `QUEUE_KINDS = ("undecided", "direct")`,
+  `DIRECT_STATES = ("assigned", "acked")`, `direct_rows(store, direct_lane)` (open items of
+  the direct lane, oldest first, context rows and owner posts left out; [] without a
+  lane), `operator_queue(store, direct_lane)` (`{"undecided": [...], "direct": [...]}`),
+  `queue_counts(store, direct_lane)` (`{"undecided", "direct"}`) and
+  `digest_counts_text(counts, direct_lane=None)`. Existing functions are unchanged.
+- `slack_dispatch.console.actions`: `DIRECT_STATES`, `ALREADY_DIRECT`,
+  `is_direct_item(message, direct_lane)`, `operator_guard(direct_lane)` (human_pending or an
+  open item of the direct lane, else `conflict` `state is <state>`). `apply(...,
+  direct_lane=None)`: with a direct lane, `assign` of a direct-lane item reroutes it and
+  `direct` (or an assign to the direct lane) raises `ActionError("invalid", "already in the
+  direct lane")`. `queue_guard` is kept unchanged; the console now uses `operator_guard`.
+- `slack_dispatch.console.queries`: `operator_name(config)`, `direct_session(store,
+  config)`, `QUEUE_FILTERS`, `queue_rows(store, config)`, `queue_counts(store, config,
+  pairs=None)`, `direct_lane_info(store, config)`; `queue_item(..., queue_kind="undecided",
+  session_attached=False)` adds `queue_kind`, `lane`, `direct_session`; `queue_page(...,
+  kind="all")` adds `kind`, `counts`, `direct_lane`, `direct_session` (ValueError for an
+  unknown kind); `pending_ids` and `registry_closed` cover both kinds. `lane_cards` adds
+  `direct` and `listed` per card.
+- Console HTTP: `GET /api/queue?kind=all|undecided|direct`, `GET /api/queue/counts`
+  (`{undecided, direct, total}`), `GET /api/config` adds `operator_name`, `GET /api/lanes`
+  adds `direct_lane` (`{lane, session_attached, listed, queue_count}` or null).
+  `POST /api/queue/commit` and `POST /api/queue/actions` use `operator_guard` and pass
+  `direct_lane`; request shapes are unchanged.
+- Inbox CLI: `queue [--kind all|undecided|direct] [--counts]` (no `--kind` = both kinds),
+  `QUEUE_KIND_CHOICES`, `QUEUE_LIMIT = 100` (per kind, the pre-P25 cap), `queue_command`,
+  `queue_direct_lane`, `queue_line`; undecided lines unchanged, direct lines `id
+  direct:<lane> <state> channel author`, a last line `# Operator queue: ...` only with
+  `--kind` or `--counts` (fix1).
+- fix1: `pipeline.HumanQueueDelivery._send` appends `digest_counts_text(queue_counts(store,
+  lane), lane)` as the last line of a digest when `console.queries.direct_lane(config)` is
+  set (lazy import); immediate notices and cards are unchanged. `operator_queue(store,
+  direct_lane, limit=None)` and `direct_rows(store, direct_lane, limit=None)` take a per
+  kind cap. Console: `queue_page(..., session_live=None)` adds `direct_session_live` and item
+  `direct_session_down`; lane cards add `session_down`; `direct_lane_info(store, config,
+  session_live=None)` adds `session_down`.
+- Dispatch cards: eligibility unchanged (`human_pending` only); documented for direct-lane
+  attention items.
+- No ledger schema change and no new store method.

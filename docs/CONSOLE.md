@@ -3,7 +3,9 @@
 The console is a local web page for the human queue. Deterministic items still go to
 lane sessions; items the router could not place wait in `human_pending`, and the
 operator picks the lane with one click while the message body, the thread context
-and the classifier suggestion are on screen. It also shows the lane inboxes, the
+and the classifier suggestion are on screen. Since P25 the queue also lists the open items
+of the direct lane (`console.direct_lane`), so it holds everything only the operator can
+handle (see "P25 operator queue"). It also shows the lane inboxes, the
 service state and a ledger search.
 
 It is a local operator tool: no login, bound to 127.0.0.1 by default.
@@ -79,8 +81,8 @@ step, no external assets). The page polls the current view every 20 seconds.
 
 ### Triage (`/`)
 
-`GET /api/queue?offset=0&limit=50` lists `human_pending` messages newest first by
-message time, `page_size` per page, with: when (display time zone), channel (name
+`GET /api/queue?offset=0&limit=50` lists `human_pending` messages (P25: plus the open
+items of the direct lane, see "P25 operator queue") newest first by message time, `page_size` per page, with: when (display time zone), channel (name
 from `console.channels`, else id), author (name from `people`, else id), attention,
 origin, age, edited, files, bot, the queue reason (`note`), the classifier
 suggestion and reason when stored, the author lane hints, the full body, and for a
@@ -258,8 +260,9 @@ assignment. The human queue digest drops handled items on its next flush, and
 When `console.base_url` is set the service changes the human-queue notice text only:
 
 - digests become `Human queue digest: N item(s); channels: C1=2, C2=1` (plus any
-  assignment FYI and timer counts) and a last line `Open: <base_url>/`; the id list,
-  the CLI commands and the lane id line are omitted;
+  assignment FYI and timer counts) and the line `Open: <base_url>/`; the id list,
+  the CLI commands and the lane id line are omitted (P25 fix1: with a direct lane the
+  digest ends with `Operator queue: undecided=N, direct=M (lane <direct lane>)`);
 - immediate notices keep their text and end with `Open: <base_url>/#msg=<id>`, which
   opens the triage view and highlights that item (or searches for it when it has
   left the queue).
@@ -705,3 +708,82 @@ writes the confirmed claim that routes later DMs of that conversation to the lan
   proposals and learned rows. The Scope tab lists DM proposals under `DM scope proposals`
   (`DM 범위 제안`) and confirmed DM claims under `DM claims` (`DM 소관 확정`), each with a
   Partner column.
+
+## P25 operator queue
+
+The triage queue is everything the operator must handle. Messages from the operator's own
+channels are routed to the direct lane (`console.direct_lane`), which normally has no
+session, so before P25 they waited in the Lanes tab while the queue said 0. Both sets are
+now one queue.
+
+### Rows
+
+`queries.queue_page` (and `GET /api/queue`) returns, newest first by message time, both:
+
+| `queue_kind` | Rows |
+| --- | --- |
+| `undecided` | `human_pending` messages (no lane could be resolved) |
+| `direct` | messages whose lane is the configured direct lane, in state `assigned` or `acked` (context rows and owner posts left out) |
+
+Without a configured direct lane (`console.direct_lane` not a configured lane) the queue is
+`human_pending` only, as before. Each item adds `queue_kind`, `lane` (null for undecided
+rows) and `direct_session` (true for a direct row while a session is attached to the
+direct lane). Search, the registry badge and `Done per registry`, owner lookup, author
+hints, names and permalinks work for both kinds.
+
+`GET /api/queue?kind=all|undecided|direct` (default `all`; anything else is 422) filters
+the rows. The payload adds `kind`, `counts: {undecided, direct}`, `direct_lane` and
+`direct_session`; `total` is the filtered total. `counts`, `pending_ids` (every queue id of
+both kinds, so a staged row hidden by the filter is not dropped) and `registry_closed`
+always cover the whole queue. `GET /api/queue/counts` returns `{undecided, direct, total}`;
+the page polls it on every view for the tab label. `GET /api/config` adds `operator_name`:
+the `people` name of `always_human.owner_user`, or null.
+
+### Actions
+
+The row verbs are the same for both kinds (`Assign`, `Direct`, `Done`, `Exclude`, plus
+`Exclude channel`) with the P14 staging, GO and `Apply now`. `POST /api/queue/commit` and
+`POST /api/queue/actions` accept both kinds through `actions.operator_guard(direct lane)`:
+an item still in `human_pending`, or an `assigned` or `acked` item of the direct lane.
+Anything else is `conflict` with detail `state is <state>` as before.
+
+| Decision | Undecided row | Direct row |
+| --- | --- | --- |
+| assign LANE | P10 assign | reroute to LANE (`reroute:<direct lane>`, `reroute` record, wake request, thread binding by the P24 rule, scope evidence); assign to the direct lane itself is an error |
+| direct | assign to the direct lane | error `invalid`, detail `already in the direct lane` (commit status `error`); the page hides the button |
+| done, exclude, exclude_channel | as before | as before |
+
+Every write is journaled (P19) and can be undone; undoing a reroute puts the row back in
+the direct lane and so back in the queue.
+
+### Page
+
+- The tab label counts both kinds: `Triage (N)` (`큐 (N)` in `ko`, UI key `tabQueueCount`).
+- The queue header shows the split: `Lane needed N · <operator> direct N` (`레인 결정 필요 N ·
+  <operator> 직접 N`, UI key `queueSplit`), where `<operator>` is `operator_name` or
+  `Operator` (`운영자`). A filter toggle (`All`, `Lane needed`, `<operator> direct`; `전체`,
+  `레인 결정 필요`, `<operator> 직접`) shows one kind or both; default both. The choice is kept
+  in localStorage (`slack-dispatch.console.queue-kind.v1`) for this browser only.
+- A direct row has a direct badge and a left border; it shows no `Direct` button and its
+  lane buttons leave out the direct lane. A direct row cannot be staged as direct again
+  (`Already in the direct lane`, `이미 직접 레인에 있음`). With a session attached to the
+  direct lane the row shows `session attached` (`세션 있음`); when that session is not live
+  (fix1) it shows `session down` (`세션 꺼짐`, item `direct_session_down`, page
+  `direct_session_live`) instead. A row whose kind changed
+  elsewhere (for example sent to the direct lane from the CLI) is rebuilt on the next poll,
+  and a staged `Direct` of a row that is now direct is dropped.
+- Lanes tab: `GET /api/lanes` keeps every lane card and adds per card `direct` and `listed`,
+  plus `direct_lane: {lane, session_attached, listed, queue_count}` (null without a direct
+  lane). While no session value (config or ledger claim) is attached to the direct lane,
+  its card is not listed and the tab shows one line instead, `Operator items are in the
+  queue` (`<operator> 직접 글은 큐에 있습니다` in `ko`), linking to the queue filtered to direct
+  rows. When a session is attached (a future assistant session) the card is listed again
+  and the queue still includes its items with the `session attached` note. fix1: when the
+  attached session is not live the card stays listed with a `session down` (`세션 꺼짐`)
+  badge (card `session_down`, `direct_lane.session_down`), so a dead session stays visible.
+
+Notices and cards: the heartbeat `human_pending` counter and the immediate human queue
+notices are unchanged; digests end with the operator queue counts line (fix1). Dispatch cards stay for `human_pending` attention items only; an attention item
+routed to the direct lane gets the usual human-queue notice on the other adapters (`FYI,
+assigned to lane <direct lane>`) and waits in the queue as a direct row. The inbox CLI
+`queue` command lists both kinds (INBOX.md).

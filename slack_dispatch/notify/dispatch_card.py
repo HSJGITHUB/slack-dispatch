@@ -7,6 +7,12 @@ as a decision file that `slack_dispatch.decisions` consumes. Cards are only for 
 still in the human queue (state `human_pending`), and the direct lane gets no lane button
 because the fixed `direct` button already stands for it.
 
+P25: the console queue also lists the open items of the direct lane (the operator queue),
+but card eligibility is unchanged: cards stay for `human_pending` items only. An attention
+item the router put in the direct lane gets the usual human-queue notice on the other
+adapters ("FYI, assigned to lane <direct lane>") and waits in the console queue as a
+`direct` row; it never gets a card, since the operator already owns it.
+
 The request is written to `<dir>/cards/.tmp/<name>.part` and then renamed into
 `cards/`, so Jarvis never reads a partial file. Digests, timers and storm notices never
 produce cards; the ids-only `notify` is a no-op. Bodies are never logged.
@@ -46,7 +52,8 @@ def card_wanted(spec, kind, immediate, mode, state=None):
     `only_immediate: false` and `human_queue.mode: immediate`, ordinary per-item notices
     produce cards too. Timer, storm and digest notices never do. Only a message still in
     the human queue (`state == "human_pending"`) gets a card: an attention item the router
-    already assigned to a lane keeps its FYI notice on the other adapters but no card.
+    already assigned to a lane keeps its FYI notice on the other adapters but no card. P25:
+    this includes the direct lane, whose open items are `direct` rows of the console queue.
     """
     if state != "human_pending":
         return False

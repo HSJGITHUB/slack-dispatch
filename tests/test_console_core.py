@@ -281,15 +281,18 @@ class NoticeTextTests(unittest.TestCase):
         digest = drops["digest"]["body"].splitlines()
         self.assertTrue(digest[0].startswith("Human queue digest: 2 item(s); channels: "
                                              "C0000000002=1, C0000000003x=1; ids: "))
-        self.assertIn("inbox.cli assign ID LANE", digest[-2])
-        self.assertEqual(digest[-1], "Lane ids for assign: owner, support, content")
+        # P25 fix1: a digest ends with the operator queue counts (direct lane configured).
+        self.assertIn("inbox.cli assign ID LANE", digest[-3])
+        self.assertEqual(digest[-2], "Lane ids for assign: owner, support, content")
+        self.assertEqual(digest[-1], "Operator queue: undecided=3, direct=0 (lane owner)")
         self.assertNotIn("Open:", drops["digest"]["body"] + drops["notice"]["body"])
 
     def test_with_base_url_digest_is_short_and_notice_links_message(self):
         drops = self.build("http://127.0.0.1:8811")
         self.assertEqual(drops["digest"]["body"],
                          "Human queue digest: 2 item(s); channels: C0000000002=1, C0000000003x=1\n"
-                         "Open: http://127.0.0.1:8811/")
+                         "Open: http://127.0.0.1:8811/\n"
+                         "Operator queue: undecided=3, direct=0 (lane owner)")  # P25 fix1
         self.assertEqual(len(drops["digest"]["ids"]), 2)  # payload ids are unchanged
         notice = drops["notice"]["body"].splitlines()
         self.assertEqual(notice[-1], "Open: http://127.0.0.1:8811/#msg=slack:C0000000002:1000.000001")

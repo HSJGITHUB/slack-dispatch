@@ -142,6 +142,8 @@ class LaneIdLineTests(TempRoot):
         self.assertEqual(len(bodies), 2)
         for body in bodies:
             lines = body.splitlines()
+            if lines[-1].startswith("Operator queue: "):
+                lines = lines[:-1]  # P25 fix1: digests end with the operator queue counts
             self.assertIn("inbox.cli assign ID LANE", lines[-2])
             self.assertEqual(lines[-1], "Lane ids for assign: owner, support, content")
             self.assertNotIn("human_queue", lines[-1])

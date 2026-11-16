@@ -23,6 +23,7 @@ from slack_dispatch.notify import effective_lane, wake_switch_path
 from slack_dispatch.notify.dispatch_card import permalink as card_permalink
 from slack_dispatch.notify.session_resolve import is_session_id
 from slack_dispatch.pipeline import HUMAN_QUEUE
+from slack_dispatch.queue.human import QUEUE_KINDS, operator_queue
 from slack_dispatch.runtime.heartbeat import SCHEMA, is_stale, read_heartbeat
 
 LOG = logging.getLogger(__name__)
@@ -81,6 +82,24 @@ def direct_lane(config):
     """The configured direct lane, or None when console.direct_lane is not a configured lane."""
     lane = config.console.direct_lane
     return lane if lane in lane_ids(config) else None
+
+
+def operator_name(config):
+    """P25: the display name of `always_human.owner_user` from `people`, or None."""
+    owner = getattr(getattr(config, "always_human", None), "owner_user", None)
+    return dict(getattr(config, "people", None) or {}).get(owner) if owner else None
+
+
+def direct_session(store, config):
+    """P25: True when a session value (config or ledger claim) is attached to the direct lane.
+
+    Normally the direct lane has none: its items wait in the console queue and the Lanes tab
+    shows a link to the queue instead of the lane card."""
+    lane = direct_lane(config)
+    if lane is None:
+        return False
+    session, _ = effective_lane(config, store, lane)
+    return bool(session)
 
 
 def ts_key(ts):
@@ -339,8 +358,15 @@ def registry_view(owner, row):
         return None
 
 
-def queue_item(store, config, view, row, now, hints=None, membership=None, owner=None):
+def queue_item(store, config, view, row, now, hints=None, membership=None, owner=None,
+               queue_kind="undecided", session_attached=False, session_live=None):
     """One triage item: metadata, full body, thread root and recent thread context.
+
+    P25: `queue_kind` is `undecided` (a `human_pending` item, no lane) or `direct` (an open
+    item of the direct lane); a direct row adds `lane` and, with `session_attached` (a
+    session is attached to the direct lane), `direct_session: true`. fix1: with
+    `session_live` False (the attached session is not live) a direct row also has
+    `direct_session_down: true`.
 
     `hints` caches author lane hints per page (pending items own no lane, so the
     author's lane history is the same for each of their items). `membership` is
@@ -388,34 +414,75 @@ def queue_item(store, config, view, row, now, hints=None, membership=None, owner
             "suggestion": suggestion, "hints": author_hints(store, config, row, hints),
             "is_reply": is_reply, "body": full.get("body"), "root": root,
             "context": context, "thread_size": len(thread),
-            "registry": registry_view(owner, row)}
+            "registry": registry_view(owner, row),
+            "queue_kind": queue_kind, "lane": row.get("lane"),
+            "direct_session": bool(session_attached) and queue_kind == "direct",
+            "direct_session_down": (bool(session_attached) and queue_kind == "direct"
+                                    and session_live is False)}
 
 
-def queue_page(store, config, view, now, *, offset=0, limit=None, owner=None):
-    """human_pending messages, newest first by message time, one page at a time.
+QUEUE_FILTERS = ("all",) + QUEUE_KINDS
 
-    With the P17 owner resolver, `registry_closed` lists every pending item (all pages)
-    whose registry row is closed at or after the item's ts, with the staged done note
-    `registry:<status>:<registry id>`. Nothing is written here.
+
+def queue_rows(store, config):
+    """P25 operator queue rows, newest first by message time: (row, queue_kind) pairs.
+
+    `undecided` = `human_pending` (no lane resolved); `direct` = `assigned` or `acked` items
+    of the configured direct lane (none when `console.direct_lane` is not a configured lane).
     """
+    rows = operator_queue(store, direct_lane(config))
+    pairs = [(row, kind) for kind in QUEUE_KINDS for row in rows[kind]]
+    pairs.sort(key=lambda pair: (ts_key(pair[0]["ts"]), pair[0]["id"]), reverse=True)
+    return pairs
+
+
+def queue_counts(store, config, pairs=None):
+    """`{undecided, direct}` counts of the operator queue (P25 tab label and header)."""
+    pairs = queue_rows(store, config) if pairs is None else pairs
+    counts = Counter(kind for _, kind in pairs)
+    return {kind: counts[kind] for kind in QUEUE_KINDS}
+
+
+def queue_page(store, config, view, now, *, offset=0, limit=None, owner=None, kind="all",
+               session_live=None):
+    """The operator queue, newest first by message time, one page at a time (P25).
+
+    Rows are `human_pending` messages (`queue_kind` `undecided`) and open items of the
+    direct lane (`queue_kind` `direct`). `kind` (`all`, `undecided`, `direct`) filters the
+    page; `counts` (`{undecided, direct}`), `pending_ids` (P14, every queue id of both
+    kinds so the page keeps staged rows hidden by the filter) and `registry_closed` always
+    cover the whole queue. With the P17 owner resolver, `registry_closed` lists every queue
+    item (all pages) whose registry row is closed at or after the item's ts, with the staged
+    done note `registry:<status>:<registry id>`. Nothing is written here.
+
+    fix1: `session_live` (the console passes the direct lane identity's `live`) adds
+    `direct_session_live` and, for direct rows, `direct_session_down`.
+    """
+    if kind not in QUEUE_FILTERS:
+        raise ValueError("Unknown queue kind")
     limit = config.console.page_size if limit is None else limit
-    rows = store.list_messages(state="human_pending", limit=ALL_ROWS)
-    rows.sort(key=lambda row: (ts_key(row["ts"]), row["id"]), reverse=True)
-    page = rows[offset:offset + limit]
+    pairs = queue_rows(store, config)
+    shown = [pair for pair in pairs if kind == "all" or pair[1] == kind]
+    page = shown[offset:offset + limit]
     hints = {}
     membership = membership_view(store, view)
+    attached = direct_session(store, config)
     closed = []
     if owner is not None:
-        for row in rows:
+        for row, _ in pairs:
             info = registry_view(owner, row)
             if info and info["registry_closed"]:
                 closed.append({"id": row["id"], "note": info["note"]})
-    # P14: every pending id (all pages), so the page can drop staged ids that left the queue.
-    return {"total": len(rows), "offset": offset, "limit": limit,
-            "pending_ids": [row["id"] for row in rows],
+    return {"total": len(shown), "offset": offset, "limit": limit, "kind": kind,
+            "counts": queue_counts(store, config, pairs),
+            "direct_lane": direct_lane(config), "direct_session": attached,
+            "direct_session_live": bool(session_live) if attached else None,
+            "pending_ids": [row["id"] for row, _ in pairs],
             "registry_closed": closed,
-            "items": [queue_item(store, config, view, row, now, hints, membership, owner)
-                      for row in page]}
+            "items": [queue_item(store, config, view, row, now, hints, membership, owner,
+                                 queue_kind=row_kind, session_attached=attached,
+                                 session_live=session_live)
+                      for row, row_kind in page]}
 
 
 CHANNEL_ID = re.compile(r"[CDG][A-Z0-9]{2,63}")
@@ -586,7 +653,33 @@ def lane_card(store, config, view, resolver, root, lane, now):
 
 
 def lane_cards(store, config, view, resolver, root, now):
-    return [lane_card(store, config, view, resolver, root, lane, now) for lane in lane_ids(config)]
+    """Every configured lane card. P25: the direct lane card carries `direct: true` and
+    `listed` (false while no session is attached; the Lanes tab then links to the queue)."""
+    direct = direct_lane(config)
+    attached = direct_session(store, config)
+    cards = []
+    for lane in lane_ids(config):
+        card = lane_card(store, config, view, resolver, root, lane, now)
+        card["direct"] = lane == direct
+        card["listed"] = lane != direct or attached
+        # fix1: a session value is attached to the direct lane but that session is not live.
+        card["session_down"] = (lane == direct and attached
+                                and not (card.get("identity") or {}).get("live"))
+        cards.append(card)
+    return cards
+
+
+def direct_lane_info(store, config, session_live=None):
+    """P25 `GET /api/lanes` `direct_lane`: `{lane, session_attached, listed, queue_count,
+    session_down}`, or None without a configured direct lane. fix1: `session_down` is true
+    when a session is attached but `session_live` is False."""
+    lane = direct_lane(config)
+    if lane is None:
+        return None
+    attached = direct_session(store, config)
+    return {"lane": lane, "session_attached": attached, "listed": attached,
+            "queue_count": queue_counts(store, config)["direct"],
+            "session_down": attached and session_live is False}
 
 
 def lane_inbox(store, config, view, root, lane, *, full=False, owner=None):

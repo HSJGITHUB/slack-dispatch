@@ -49,6 +49,10 @@ WAKE_ACTION = "lane_wake"
 WAKE_LIMIT = 20
 WAKE_CLOCK = time.time
 DEFAULT_UNDO_SECONDS = 30
+# P25 `queue --kind`: undecided (human_pending), direct (open items of the direct lane), all.
+QUEUE_KIND_CHOICES = ("all", "undecided", "direct")
+# The listing cap of `queue` per kind (the pre-P25 listing stopped at 100 rows too).
+QUEUE_LIMIT = 100
 LOG = logging.getLogger(__name__)
 
 
@@ -99,6 +103,12 @@ def build_parser():
             sub.add_argument("lane")
         if command == "claim":
             sub.add_argument("--session")
+        if command == "queue":
+            # P25: the operator queue: human_pending (undecided) and the direct lane (direct).
+            # fix1: without --kind the listing is both kinds; the counts line is printed
+            # only with --kind or --counts, so the default output keeps its old shape.
+            sub.add_argument("--kind", choices=QUEUE_KIND_CHOICES, default=None)
+            sub.add_argument("--counts", action="store_true")
         if command == "inbox":
             sub.add_argument("--include-done", action="store_true")
             sub.add_argument("--thread", action="store_true")
@@ -882,6 +892,55 @@ def repair_command(args, root, store, stdout, stderr, *, delivery=None, now=None
 def claimant():
     """Who records a scope claim: SLACK_DISPATCH_SESSION, CLAUDE_SESSION_ID, else `cli`."""
     return os.environ.get("SLACK_DISPATCH_SESSION") or os.environ.get("CLAUDE_SESSION_ID") or "cli"
+
+
+def queue_direct_lane(store, config):
+    """P25: the direct lane of `queue`: `console.direct_lane` when it is a configured lane;
+    without a config the default direct lane when the ledger has that lane; else None."""
+    if config is not None:
+        from slack_dispatch.console.queries import direct_lane
+        return direct_lane(config)
+    from slack_dispatch.config.schema import Console
+    lane = Console.direct_lane
+    lookup = getattr(store, "get_lane", None)
+    return lane if callable(lookup) and lookup(lane) is not None else None
+
+
+def queue_command(args, store, config, stdout):
+    """`queue [--kind all|undecided|direct] [--counts] [--show-body]` (P25 operator queue).
+
+    Undecided rows (`human_pending`) print as before: `id suggestion reason channel_name
+    author_name` (P20 fix1: display names, spaces become `_`). Direct rows (open items of
+    the direct lane) follow with `direct:<lane>` and the state in the suggestion and reason
+    columns. Each kind lists at most QUEUE_LIMIT rows (oldest first). fix1: only with
+    `--kind` or `--counts` a last line `# Operator queue: undecided=N, direct=M (lane X)`
+    gives both full counts whatever the filter.
+    """
+    from slack_dispatch.queue.human import digest_counts_text, operator_queue, queue_counts
+    direct = queue_direct_lane(store, config)
+    names = display_names(config, store)
+    rows = operator_queue(store, direct, QUEUE_LIMIT)
+    kind = args.kind or "all"
+    if kind in ("all", "undecided"):
+        for row in rows["undecided"]:
+            queue_line(store, names, row, row.get("classifier_suggestion", row.get("suggested_lane")) or "none",
+                       row.get("suggestion_reason") or "none", args.show_body, stdout)
+    if kind in ("all", "direct"):
+        for row in rows["direct"]:
+            queue_line(store, names, row, "direct:" + str(direct), row.get("state") or "none",
+                       args.show_body, stdout)
+    if args.kind is not None or args.counts:
+        print("# " + digest_counts_text(queue_counts(store, direct), direct), file=stdout)
+
+
+def queue_line(store, names, row, second, third, show_body, stdout):
+    message_id = row.get("id", row.get("message_id"))
+    print(message_id, second, third, text_label(names.channel(row.get("channel"))),
+          text_label(names.user(row.get("author"))), file=stdout)
+    if show_body:
+        full = store.get_message(message_id, include_body=True)
+        if full and full.get("text", full.get("body")) is not None:
+            print(message_id, full.get("text", full.get("body")), file=stdout)
 
 
 def optional_config(args, *, strict=True):
@@ -1689,19 +1748,7 @@ def main(argv=None, *, store=None, stdout=None, stderr=None, client=None):
                 error_reported = code != 0
                 return code
             elif args.command == "queue":
-                # P20 fix1: the existing `id suggestion reason`, then the channel and author
-                # display names (people, directory, id; spaces become `_`).
-                names = display_names(config, store)
-                for row in store.list_messages(state="human_pending"):
-                    message_id = row.get("id", row.get("message_id"))
-                    print(message_id,
-                          row.get("classifier_suggestion", row.get("suggested_lane")) or "none", row.get("suggestion_reason") or "none",
-                          text_label(names.channel(row.get("channel"))),
-                          text_label(names.user(row.get("author"))), file=stdout)
-                    if args.show_body:
-                        full = store.get_message(message_id, include_body=True)
-                        if full and full.get("text", full.get("body")) is not None:
-                            print(message_id, full.get("text", full.get("body")), file=stdout)
+                queue_command(args, store, config, stdout)
             elif args.command == "claim":
                 # The value is stored verbatim: a session name, a session id or an id prefix.
                 store.upsert_lane(args.lane, session_pointer=session)

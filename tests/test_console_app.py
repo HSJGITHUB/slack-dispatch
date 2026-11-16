@@ -228,7 +228,10 @@ class QueueTests(ConsoleCase):
                          ("excluded", "human:console"))
         self.assertEqual((self.store.get_message(ids[5])["state"], self.store.get_message(ids[5])["note"]),
                          ("done", "dummy done"))
-        self.assertEqual(self.get("/api/queue")["total"], 0)
+        # P25: the item sent to the direct lane stays in the operator queue as a direct row.
+        queue = self.get("/api/queue")
+        self.assertEqual((queue["total"], queue["counts"]), (1, {"undecided": 0, "direct": 1}))
+        self.assertEqual(self.get("/api/queue?kind=undecided")["total"], 0)
         again = self.post("/api/queue/actions", {"action": "assign", "ids": [ids[0], "slack:C1:1.0"],
                                                  "lane": "owner"})
         self.assertEqual([(row["ok"], row["error"]) for row in again["results"]],

@@ -12,6 +12,9 @@ table per request, and message rows carry Slack permalinks when
 Since P21 lanes carry the session identity (`SessionResolver.describe`: sessions table title,
 live name, id8) and `POST /api/lanes/{lane}/wake` re-delivers a lane's open items and queues
 wake requests (journaled, undoable), refused while the lane is paused or not live.
+Since P25 the triage queue is the operator queue: `human_pending` items plus the open items
+of the direct lane (`queue_kind` `undecided` or `direct`, `GET /api/queue?kind=`, `GET
+/api/queue/counts`); queue writes accept both kinds (an assign of a direct row reroutes it).
 Nothing here logs request lines, queries or message bodies.
 """
 import logging
@@ -209,15 +212,32 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                 "lane_hint_people": config.console.lane_hint_people,
                 "ui_language": config.console.ui_language,
                 "owner_resolver": owner is not None, "undo_seconds": undo_seconds,
-                "permalinks": view.domain is not None}
+                "permalinks": view.domain is not None,
+                # P25: the operator's name (people name of always_human.owner_user) for labels.
+                "operator_name": queries.operator_name(config)}
 
     @app.get("/api/queue")
-    def queue(offset: int = Query(0, ge=0), limit: int | None = Query(None, ge=1, le=500)):
-        data = queries.queue_page(store, config, view.bind(store), clock(), offset=offset,
-                                  limit=limit, owner=owner)
+    def queue(offset: int = Query(0, ge=0), limit: int | None = Query(None, ge=1, le=500),
+              kind: Literal["all", "undecided", "direct"] = "all"):
         # P21: lane button tooltips name each lane's session.
-        data["lane_sessions"] = queries.lane_identities(store, config, resolver)
+        identities = queries.lane_identities(store, config, resolver)
+        direct = queries.direct_lane(config)
+        live = identities[direct]["live"] if direct in identities else None
+        # P25: kind filters the rows; counts and pending_ids always cover both kinds.
+        data = queries.queue_page(store, config, view.bind(store), clock(), offset=offset,
+                                  limit=limit, owner=owner, kind=kind, session_live=live)
+        data["lane_sessions"] = identities
         return data
+
+    @app.get("/api/queue/counts")
+    def queue_counts():
+        """P25: `{undecided, direct, total}` for the queue tab label (polled on every view)."""
+        counts = queries.queue_counts(store, config)
+        return dict(counts, total=sum(counts.values()))
+
+    def queue_guard():
+        """P25: the operator queue guard (human_pending, or open items of the direct lane)."""
+        return actions.operator_guard(queries.direct_lane(config))
 
     @app.post("/api/queue/actions")
     def queue_actions(request: QueueActionRequest):
@@ -234,7 +254,8 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
         note = (request.note or "").strip() or None
         journal = actions.Journal(store, request.action, lane=lane)
         results = actions.apply(store, root, request.action, request.ids, lane=lane, note=note,
-                                guard=actions.queue_guard, min_evidence=threshold, journal=journal)
+                                guard=queue_guard(), min_evidence=threshold, journal=journal,
+                                direct_lane=queries.direct_lane(config))
         undo = journal.finish(undo_seconds, clock())
         bound = view.bind(store)  # P20: one name cache for the whole response
         if request.action == "exclude":
@@ -299,8 +320,9 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                 continue
             note = (decision.note or "").strip() or None
             result = actions.apply(store, root, decision.action, [decision.id], lane=lane,
-                                   note=note, guard=actions.queue_guard,
-                                   min_evidence=threshold, journal=journal)[0]
+                                   note=note, guard=queue_guard(),
+                                   min_evidence=threshold, journal=journal,
+                                   direct_lane=queries.direct_lane(config))[0]
             status = actions.commit_status(result)
             row.update(lane=lane, status=status,
                        detail=result["detail"] or (result["error"] if status == "error" else None))
@@ -318,7 +340,12 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
 
     @app.get("/api/lanes")
     def lane_list():
-        return {"lanes": queries.lane_cards(store, config, view, resolver, root, clock())}
+        # P25: `direct_lane` says whether the direct lane card is listed or the Lanes tab
+        # links to the queue instead (no session attached).
+        cards = queries.lane_cards(store, config, view, resolver, root, clock())
+        direct = next((card for card in cards if card["direct"]), None)
+        live = (direct.get("identity") or {}).get("live") if direct else None
+        return {"lanes": cards, "direct_lane": queries.direct_lane_info(store, config, live)}
 
     @app.get("/api/lanes/{lane}/inbox")
     def lane_inbox(lane: str, full: bool = False):

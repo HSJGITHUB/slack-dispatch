@@ -26,6 +26,10 @@ Since P15 `exclude_channel` (console only, no CLI command) writes a ledger chann
 exclusion that the router reads at runtime like `excluded_channels`, and moves every open
 item of the channel to `excluded` with note `human:console:channel`.
 
+Since P25 the triage queue is the operator queue: `human_pending` items plus the open
+items of the direct lane (`operator_guard`); `apply(..., direct_lane=...)` turns an assign of
+a direct-lane item into a reroute (see `apply`).
+
 Since P19 every console write that changes message rows is journaled in the ledger table
 `console_actions` (see `Journal`) and can be undone for `console.undo_seconds` with `undo`
 or `undo_last`, from the console or with
@@ -235,6 +239,28 @@ def queue_guard(message):
         raise ActionError("conflict", "state is " + str(message["state"]))
 
 
+DIRECT_STATES = ("assigned", "acked")
+ALREADY_DIRECT = "already in the direct lane"
+
+
+def is_direct_item(message, direct_lane):
+    """P25: an open item of the direct lane (`assigned` or `acked`), a `direct` queue row."""
+    return (bool(direct_lane) and message.get("lane") == direct_lane
+            and message.get("state") in DIRECT_STATES)
+
+
+def operator_guard(direct_lane):
+    """P25 queue guard: items still in `human_pending`, or open items of the direct lane.
+
+    Anything else (handled meanwhile, moved to another lane) is a conflict with the P10
+    detail `state is <state>`, so a stale page cannot reopen handled work."""
+    def check(message):
+        if message["state"] == "human_pending" or is_direct_item(message, direct_lane):
+            return
+        raise ActionError("conflict", "state is " + str(message["state"]))
+    return check
+
+
 def lane_guard(lane):
     """Lane inbox actions apply only to open items the lane still owns."""
     def check(message):
@@ -246,8 +272,14 @@ def lane_guard(lane):
 
 
 def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, min_evidence=None,
-          journal=None, thread=False):
+          journal=None, thread=False, direct_lane=None):
     """Apply one action to each unique id in order; return one result per id.
+
+    P25: with `direct_lane` (the operator queue) a `direct` queue row (an open item of the
+    direct lane) takes `assign` as a reroute to the chosen lane (reason `reroute:<direct
+    lane>`, `reroute` inbox record, wake request, journaled like any write), refuses an
+    assign to the direct lane itself and `direct` with error `invalid` (detail `already in
+    the direct lane`); `done`, `exclude` and `exclude_channel` work as for `human_pending`.
 
     P24: `thread` (reroute only) also moves the open items of each id's thread that are in
     its old lane and the thread binding (see `reroute`); the journal watches them too.
@@ -274,7 +306,11 @@ def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, m
                 journal.watch(journal.channel_items(message))
             if journal is not None and action == "reroute" and thread:
                 journal.watch(thread_items(store, message, message.get("lane")))
-            if action in ("assign", "direct"):
+            if action in ("assign", "direct") and is_direct_item(message, direct_lane):
+                if action == "direct" or lane == direct_lane:
+                    raise ActionError("invalid", ALREADY_DIRECT)
+                reroute(store, inbox_root, message_id, lane, min_evidence=min_evidence)
+            elif action in ("assign", "direct"):
                 assign(store, inbox_root, message_id, lane, note=note, min_evidence=min_evidence)
             elif action == "reroute":
                 reroute(store, inbox_root, message_id, lane, min_evidence=min_evidence,

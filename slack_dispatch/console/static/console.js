@@ -115,6 +115,19 @@ const UI_TEXT = Object.freeze({
     refreshed: (when) => "Updated " + when,
     refresh: "Refresh",
     queueTitle: (total) => total + " item(s) waiting for a lane",
+    tabQueueCount: (count) => "Triage (" + count + ")",
+    queueSplit: (undecided, direct, name) => "Lane needed " + undecided + " · " + (name || "Operator") + " direct " + direct,
+    queueFilterLabel: "Show",
+    queueFilterAll: "All",
+    queueFilterUndecided: "Lane needed",
+    queueFilterDirect: (name) => (name || "Operator") + " direct",
+    directRowTitle: (lane) => "In the direct lane " + lane + ": only you handle it. Assign moves it to another lane (reroute); Done and Exclude close it",
+    sessionAttached: "session attached",
+    sessionAttachedTitle: "A session is attached to the direct lane; it may handle this item too",
+    directInQueue: (name) => "Operator items are in the queue",
+    directAlready: "Already in the direct lane",
+    sessionDown: "session down",
+    sessionDownTitle: "A session is attached to the direct lane but it is not live; nobody else is handling this item",
     queueEmpty: "The human queue is empty.",
     showing: (first, last, total) => "Showing " + first + "-" + last + " of " + total,
     previous: "Previous",
@@ -362,6 +375,19 @@ const UI_TEXT = Object.freeze({
     refreshed: (when) => "갱신 " + when,
     refresh: "새로고침",
     queueTitle: (total) => "레인 배정 대기 " + total + "건",
+    tabQueueCount: (count) => "큐 (" + count + ")",
+    queueSplit: (undecided, direct, name) => "레인 결정 필요 " + undecided + " · " + (name || "운영자") + " 직접 " + direct,
+    queueFilterLabel: "보기",
+    queueFilterAll: "전체",
+    queueFilterUndecided: "레인 결정 필요",
+    queueFilterDirect: (name) => (name || "운영자") + " 직접",
+    directRowTitle: (lane) => "직접 레인 " + lane + " 항목: 내가 처리할 글. 배정 = 다른 레인으로 재배정, 끝·제외 = 닫기",
+    sessionAttached: "세션 있음",
+    sessionAttachedTitle: "직접 레인에 세션이 연결돼 있어 그 세션도 이 항목을 볼 수 있음",
+    directInQueue: (name) => (name || "운영자") + " 직접 글은 큐에 있습니다",
+    directAlready: "이미 직접 레인에 있음",
+    sessionDown: "세션 꺼짐",
+    sessionDownTitle: "직접 레인에 세션 값은 있지만 꺼져 있어 이 항목을 보는 세션이 없음",
     queueEmpty: "사람 큐가 비어 있음.",
     showing: (first, last, total) => total + "건 중 " + first + "-" + last,
     previous: "이전",
@@ -524,7 +550,12 @@ const state = {
   // P21: lane -> session identity (queue lane button titles) and the open lane's wake state.
   laneSessions: {},
   laneWake: null,
+  // P25: the queue filter (all, undecided, direct) and the last counts for the tab label.
+  queueKind: "all",
+  queueCounts: null,
 };
+const QUEUE_KINDS = ["all", "undecided", "direct"];
+const QUEUE_KIND_KEY = "slack-dispatch.console.queue-kind.v1";
 // P19 undo: the bottom toast of the latest immediate action or GO commit, and lane rows
 // that show "Handled · Undo" inline until their window ends (node -> entry).
 const undoState = { toast: null, inline: new Map(), ticker: null, busy: false };
@@ -714,6 +745,8 @@ function showView(name, push) {
 }
 
 function refresh() {
+  // P25: the queue tab label counts both kinds whatever view is open.
+  if (state.view !== "queue") loadQueueCounts();
   if (state.view === "queue") return loadQueue();
   if (state.view === "lanes") return state.lane ? loadLaneInbox() : loadLanes();
   if (state.view === "service") return loadService();
@@ -769,6 +802,7 @@ function queueRoot() {
     const c = UI.queueColumns;
     const header = el("div", { className: "toolbar" },
       el("strong", { className: "queue-total", text: UI.loading }),
+      queueFilter(),
       el("span", { className: "muted small queue-updated" }),
       el("button", { className: "registry-all", hidden: true, onclick: () => stageRegistryClosed() }),
       el("span", { className: "spacer" }),
@@ -781,6 +815,69 @@ function queueRoot() {
     section.append(goBar(), header, head, el("div", { className: "queue-list" }));
   }
   return section;
+}
+
+// P25: filter toggle (all, undecided, direct); the choice is a per-viewer convenience.
+function queueFilter() {
+  const name = state.config ? state.config.operator_name : null;
+  const labels = { all: UI.queueFilterAll, undecided: UI.queueFilterUndecided, direct: UI.queueFilterDirect(name) };
+  return el("span", { className: "queue-filter small", role: "group", "aria-label": UI.queueFilterLabel },
+    el("span", { className: "muted", text: UI.queueFilterLabel }),
+    QUEUE_KINDS.map((kind) => el("button", { className: "filter-" + kind + (state.queueKind === kind ? " chosen" : ""),
+      "aria-pressed": state.queueKind === kind ? "true" : "false", text: labels[kind],
+      onclick: () => setQueueKind(kind) })));
+}
+
+function paintQueueFilter() {
+  const section = document.getElementById("view-queue");
+  for (const kind of QUEUE_KINDS) {
+    const button = section.querySelector(".queue-filter .filter-" + kind);
+    if (!button) continue;
+    button.classList.toggle("chosen", kind === state.queueKind);
+    button.setAttribute("aria-pressed", kind === state.queueKind ? "true" : "false");
+  }
+}
+
+function setQueueKind(kind) {
+  if (!QUEUE_KINDS.includes(kind)) return;
+  state.queueKind = kind;
+  state.queueOffset = 0;
+  try {
+    window.localStorage.setItem(QUEUE_KIND_KEY, kind);
+  } catch (error) {
+    // Storage can be unavailable; the filter still works for this page.
+  }
+  paintQueueFilter();
+  if (state.view === "queue") loadQueue();
+}
+
+function loadQueueKind() {
+  try {
+    const kind = window.localStorage.getItem(QUEUE_KIND_KEY);
+    if (QUEUE_KINDS.includes(kind)) state.queueKind = kind;
+  } catch (error) {
+    // Default: both kinds.
+  }
+}
+
+// P25: the tab label `Triage (N)` counts undecided and direct rows.
+function paintQueueTab(counts) {
+  state.queueCounts = counts || null;
+  const tab = document.querySelector(".tabs a[data-view=queue]");
+  if (!tab) return;
+  tab.textContent = counts ? UI.tabQueueCount((counts.undecided || 0) + (counts.direct || 0)) : UI.tabQueue;
+}
+
+async function loadQueueCounts() {
+  try {
+    paintQueueTab(await api("/api/queue/counts"));
+  } catch (error) {
+    // The tab keeps its last label; the open view reports its own errors.
+  }
+}
+
+function isDirectRow(item) {
+  return Boolean(item) && item.queue_kind === "direct";
 }
 
 function goBar() {
@@ -815,7 +912,8 @@ async function loadQueue() {
   updateGoBar();
   let data;
   try {
-    data = await api("/api/queue?offset=" + state.queueOffset + "&limit=" + state.config.page_size);
+    data = await api("/api/queue?offset=" + state.queueOffset + "&limit=" + state.config.page_size +
+      "&kind=" + encodeURIComponent(state.queueKind));
   } catch (error) {
     status(error.message, true);
     return;
@@ -830,7 +928,11 @@ async function loadQueue() {
   const registryAll = section.querySelector(".registry-all");
   registryAll.hidden = !state.registryClosed.length;
   registryAll.textContent = UI.registryDoneAll(state.registryClosed.length);
-  section.querySelector(".queue-total").textContent = data.total ? UI.queueTitle(data.total) : UI.queueEmpty;
+  // P25: the header shows the split of both kinds; the tab label counts them together.
+  const counts = data.counts || { undecided: data.total, direct: 0 };
+  paintQueueTab(counts);
+  section.querySelector(".queue-total").textContent = counts.undecided + counts.direct
+    ? UI.queueSplit(counts.undecided, counts.direct, state.config.operator_name) : UI.queueEmpty;
   section.querySelector(".queue-updated").textContent = UI.refreshed(nowText());
   const first = data.items.length ? data.offset + 1 : 0;
   section.querySelector(".queue-range").textContent = data.total ? UI.showing(first, data.offset + data.items.length, data.total) : "";
@@ -867,7 +969,21 @@ function renderQueue(list, items) {
   }
   let ref = list.firstChild;
   for (const item of items) {
+    // P25: a row that became direct meanwhile drops a staged Direct (it is already direct).
+    const staged = state.staged.get(item.id);
+    if (isDirectRow(item) && staged && (staged.action === "direct" ||
+        (staged.action === "assign" && staged.lane === state.config.direct_lane))) {
+      state.staged.delete(item.id);
+      saveStaged();
+    }
     let card = state.queueCards.get(item.id);
+    if (card && (card.item.queue_kind || "undecided") !== (item.queue_kind || "undecided")) {
+      // P25: the row changed kind (sent to or out of the direct lane elsewhere): rebuild it.
+      if (card.node === ref) ref = ref.nextSibling;
+      card.node.remove();
+      state.queueCards.delete(item.id);
+      card = null;
+    }
     if (card) {
       card.age.textContent = UI.age(age(item.age_seconds));
     } else {
@@ -893,7 +1009,8 @@ function paintLaneTitles(card) {
 }
 
 function laneOrder(item) {
-  const lanes = state.config.lanes.slice();
+  // P25: a direct row is already in the direct lane, so that lane is not offered again.
+  const lanes = state.config.lanes.filter((lane) => !isDirectRow(item) || lane !== state.config.direct_lane);
   const suggested = item.suggestion && lanes.includes(item.suggestion.lane) ? item.suggestion.lane : null;
   return suggested ? [suggested].concat(lanes.filter((lane) => lane !== suggested)) : lanes;
 }
@@ -907,6 +1024,13 @@ function queueCard(item) {
     chip,
     el("strong", { title: c.when, text: item.when || item.ts }),
     linkIcon(item.permalink),
+    isDirectRow(item) ? el("span", { className: "badge direct-kind", title: UI.directRowTitle(item.lane || state.config.direct_lane),
+      text: UI.queueFilterDirect(state.config.operator_name) }) : null,
+    // fix1: an attached session that is not live shows `session down` instead.
+    isDirectRow(item) && item.direct_session && item.direct_session_down
+      ? el("span", { className: "badge bad", title: UI.sessionDownTitle, text: UI.sessionDown }) : null,
+    isDirectRow(item) && item.direct_session && !item.direct_session_down
+      ? el("span", { className: "badge ok", title: UI.sessionAttachedTitle, text: UI.sessionAttached }) : null,
     el("span", { title: c.channel + ": " + item.channel.id, text: channelText(item.channel) }),
     item.is_dm ? el("span", { className: "badge dm", title: UI.dmBadgeTitle, text: UI.dmBadge }) : null,
     item.not_member ? el("span", { className: "badge warn", title: UI.notMemberTitle, text: UI.notMember }) : null,
@@ -979,7 +1103,8 @@ function queueCard(item) {
   parts.push(el("div", { className: "actions" },
     el("span", { className: "muted small group-label", text: UI.assign }),
     laneButtons,
-    state.config.direct_lane ? button("direct", null, { text: UI.direct, title: UI.directTitle(state.config.direct_lane) }) : null,
+    // P25: a direct row is already direct, so the Direct button is not shown.
+    state.config.direct_lane && !isDirectRow(item) ? button("direct", null, { text: UI.direct, title: UI.directTitle(state.config.direct_lane) }) : null,
     button("exclude", null, { className: "danger", text: UI.exclude }),
     button("exclude_channel", null, { className: "danger", text: UI.excludeChannel, title: UI.excludeChannelTitle }),
     note,
@@ -991,7 +1116,7 @@ function queueCard(item) {
   parts.push(ownerBox);
   const outcome = el("div", { className: "outcome small", hidden: true });
   parts.push(outcome);
-  const node = el("article", { className: "card", "data-id": item.id, tabindex: "0" }, parts);
+  const node = el("article", { className: "card" + (isDirectRow(item) ? " direct-row" : ""), "data-id": item.id, tabindex: "0" }, parts);
   return { node, item, age: ageNode, chip, note, buttons, applyNow, outcome, registryBadge,
     registrySlot, registryNote: null };
 }
@@ -1048,6 +1173,11 @@ function stage(id, decision) {
 function toggleStage(id, action, lane) {
   if (state.committing) return;
   const card = state.queueCards.get(id);
+  // P25: a direct row cannot be staged as direct again (nor assigned to the direct lane).
+  if (card && isDirectRow(card.item) && (action === "direct" || (action === "assign" && lane === state.config.direct_lane))) {
+    status(UI.directAlready, true);
+    return;
+  }
   if (sameDecision(state.staged.get(id), action, lane)) {
     stage(id, null);
     return;
@@ -1284,7 +1414,14 @@ async function loadLanes() {
     el("span", { className: "muted small", text: UI.refreshed(nowText()) }),
     el("span", { className: "spacer" }),
     el("button", { text: UI.refresh, onclick: () => loadLanes() })));
-  section.append(el("div", { className: "grid" }, data.lanes.map(laneCard)));
+  // P25: without a session the direct lane is not a lane card; its items are in the queue.
+  const direct = data.direct_lane;
+  if (direct && !direct.listed) {
+    section.append(el("div", { className: "direct-link" },
+      el("a", { href: "/", text: UI.directInQueue(state.config.operator_name) + (direct.queue_count ? " (" + direct.queue_count + ")" : ""),
+        onclick: (event) => { event.preventDefault(); setQueueKind("direct"); showView("queue", true); } })));
+  }
+  section.append(el("div", { className: "grid" }, data.lanes.filter((card) => card.listed !== false).map(laneCard)));
 }
 
 function laneCard(card) {
@@ -1304,6 +1441,8 @@ function laneCard(card) {
   return el("article", { className: "card" },
     el("div", { className: "meta" },
       el("strong", { text: card.lane }),
+      // P25 fix1: the direct lane card says when its attached session is down.
+      card.session_down ? el("span", { className: "badge bad", title: UI.sessionDownTitle, text: UI.sessionDown }) : null,
       card.paused ? el("span", { className: "badge warn", text: UI.paused }) : null,
       card.registered ? null : el("span", { className: "badge bad", text: UI.unregistered })),
     el("dl", { className: "kv small" }, rows.map(([key, value]) => [el("dt", { text: key }), el("dd", {}, value)])),
@@ -2046,6 +2185,7 @@ async function start() {
   UI = UI_TEXT[state.config.ui_language] || UI_TEXT.en;
   applyStaticText();
   state.staged = loadStaged();
+  loadQueueKind();
   trackTopHeight();
   if (state.config.timezone_warning) status(state.config.timezone_warning, true);
   for (const link of document.querySelectorAll(".tabs a")) {

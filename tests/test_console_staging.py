@@ -72,8 +72,10 @@ class CommitTests(ConsoleCase):
         self.assertEqual(self.store.get_message(ids[2])["state"], "excluded")
         self.assertEqual(self.store.get_message(handled)["lane"], "support")
         self.assertEqual(dict(self.store.get_message(untouched)), before)
-        queue = self.get("/api/queue")
-        self.assertEqual(([row["id"] for row in queue["items"]], queue["pending_ids"]), ([untouched], [untouched]))
+        # P25: the directed item stays in the operator queue as a direct row.
+        queue = self.get("/api/queue?kind=undecided")
+        self.assertEqual(([row["id"] for row in queue["items"]], queue["pending_ids"]),
+                         ([untouched], [untouched, ids[1]]))
         records = [json.loads(line) for line in
                    (self.inbox / "support.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual([row["id"] for row in records], [ids[0]])

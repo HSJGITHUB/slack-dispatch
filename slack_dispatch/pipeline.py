@@ -20,7 +20,7 @@ from slack_dispatch.notify.dispatch_card import card_wanted
 from slack_dispatch.notify.session_resolve import SessionResolver
 from slack_dispatch.notify.base import DeliveryRecorder, error_detail
 from slack_dispatch.notify.session_resolve import AMBIGUOUS
-from slack_dispatch.queue.human import export_jsonl
+from slack_dispatch.queue.human import digest_counts_text, export_jsonl, queue_counts
 from slack_dispatch.resolver.owner import VERSION as OWNER_VERSION, OwnerResolver, suggestion_for
 from slack_dispatch.router.apply import apply_decision
 from slack_dispatch.router.classifier import Suggestion
@@ -355,6 +355,13 @@ class HumanQueueDelivery:
             # Immediate notices keep their text and end with a link to the message.
             target = "#msg=" + quote(ids[0], safe=":._-") if len(ids) == 1 else ""
             summary += "\nOpen: " + base_url + "/" + target
+        if digest:
+            # P25: digests end with the operator queue counts (undecided and direct lane);
+            # without a configured direct lane the line is omitted.
+            from slack_dispatch.console.queries import direct_lane  # lazy: queries imports this module
+            dl = direct_lane(self.config)
+            if dl:
+                summary += "\n" + digest_counts_text(queue_counts(self.store, dl), dl)
         metadata = dict(count=len(messages), channels=counts, ids=ids, summary=summary,
                         timer_counts=timer_counts,
                         timers=sorted({row["kind"] for row in rows

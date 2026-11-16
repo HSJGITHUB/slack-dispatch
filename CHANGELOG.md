@@ -5,6 +5,28 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P25 operator queue
+- The console queue is the operator queue: `human_pending` items (`queue_kind` `undecided`)
+  plus the `assigned` and `acked` items of the direct lane (`console.direct_lane`,
+  `queue_kind` `direct`), newest first. Live case: the queue showed 0 while 16 direct-lane
+  items waited in the Lanes tab.
+- The tab label counts both (`큐 (N)`), the header shows the split (`레인 결정 필요 N · <operator>
+  직접 N`) and a filter toggle shows one kind or both. `GET /api/queue?kind=`, `counts`,
+  `GET /api/queue/counts`, `operator_name` in `GET /api/config`.
+- Same row verbs for both kinds with staging and GO: `Assign` on a direct row reroutes it
+  (journaled, undoable), `Direct` is hidden and refused for a direct row, `Done` and
+  `Exclude` as before.
+- Lanes tab: without a session the direct lane card is replaced by one line linking to the
+  queue; with a session attached the card is back and queue rows say `session attached`.
+- Inbox CLI `queue --kind all|undecided|direct` with direct rows; a counts line only with
+  `--kind` or `--counts`, and the 100 row cap kept (fix1). `queue.human` helpers
+  `operator_queue`, `queue_counts`, `digest_counts_text`.
+- fix1: human queue digests end with `Operator queue: undecided=N, direct=M (lane X)` when a
+  direct lane is configured. Card eligibility, immediate notices and the heartbeat
+  `human_pending` counter are unchanged.
+- fix1: an attached direct lane session that is not live shows `session down` (`세션 꺼짐`) on
+  the lane card and on direct queue rows.
+
 ### P24 edit and reroute guards
 - An edit (`message_changed`) of an item that already has a lane (`assigned`, `acked` or
   `done`, rerouted or assigned by hand included) is never routed again: lane,

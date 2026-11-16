@@ -41,7 +41,9 @@ store. This CLI consumes the shared LedgerStore API.
   stored but prints `warning: lane <lane> has a configured session; config wins ...`
   to stderr. An unreadable config returns 2 without writing. Without a config the
   CLI cannot tell and prints no warning.
-- `queue`: show human-pending ids and classifier suggestions.
+- `queue [--kind all|undecided|direct]`: show human-pending ids and classifier
+  suggestions; since P25 also the open items of the direct lane (below, "P25 operator
+  queue").
 - `import-bindings PATH [--replace]`: import UTF-8 JSONL objects containing
   source, channel, thread_ts, and lane. Extra keys and blank lines are ignored.
   Validate all rows before writing. Keep existing bindings by default; --replace
@@ -201,7 +203,10 @@ human_queue defaults to mode=digest, digest_seconds=1800 and immediate_flags
 share one durable batch per adapter. The first pending item starts the interval;
 no empty digest is sent. Counts include every unique pending message per channel,
 while ids list at most 20 examples. Summaries include queue and assign commands,
-followed by a last line `Lane ids for assign: <lane ids from config>`.
+followed by the line `Lane ids for assign: <lane ids from config>`. Since P25 fix1 a
+digest (not an immediate notice) ends with `Operator queue: undecided=N, direct=M (lane
+<direct lane>)` when a direct lane is configured (`console.direct_lane` is a configured
+lane); without one the digest ends with the lane ids line as before.
 Immediate attention notices contain one id and report the assigned lane if any.
 mode=immediate restores per-item notices. Human adapters bypass the global wake
 switch; their dry_run still applies. A human_queue session_message adapter targets
@@ -562,3 +567,26 @@ badge. A lane that owns a person's DMs proposes the scope with
 `scope add <lane> --dm D...`; the operator confirms the proposal in the console Scope tab
 (listed under `DM scope proposals` with the partner's display name), which routes later
 DMs of that conversation to the lane. `dm` claims are never applied automatically.
+
+## P25 operator queue
+
+`queue [--kind all|undecided|direct] [--counts] [--show-body]` lists the operator queue:
+`undecided` rows (`human_pending`) and `direct` rows (items of the direct lane in state
+`assigned` or `acked`, context rows and owner posts left out). Without `--kind` both kinds
+are listed; another value returns 2.
+
+- Undecided rows print first, unchanged: `id suggestion reason channel_name author_name`.
+- Direct rows follow as `id direct:<lane> <state> channel_name author_name`.
+- Only with `--kind` or `--counts` (fix1) a last line gives both full counts, whatever
+  the filter: `# Operator queue: undecided=N, direct=M (lane <direct lane>)` (without
+  `(lane ...)` when there is no direct lane). The default output keeps its pre-P25 shape.
+- Each kind lists at most 100 rows, oldest first (the pre-P25 cap, kept by fix1).
+- To see direct rows, pass `--config` (or set `SLACK_DISPATCH_CONFIG`): the live direct
+  lane is named in the config, and without it only a lane called `owner-direct` is found.
+
+The direct lane is `console.direct_lane` of `--config` (or `SLACK_DISPATCH_CONFIG`) when it
+is a configured lane; without a config it is the default `owner-direct` when the ledger has
+that lane; otherwise there are no direct rows. `slack_dispatch.queue.human` has the
+shared helpers (`operator_queue`, `queue_counts`, `digest_counts_text`). Digests end with
+the counts line (above); immediate notices and the heartbeat `human_pending` counter still
+count `human_pending` only.
