@@ -180,6 +180,25 @@ class UserDirectory:
     failure_cooldown_seconds: int = 300
 
 
+DEFAULT_CLOSED_STATUSES = ("closed", "answered", "answered_action_ours",
+                           "sent_closed_no_action_ours", "delivered")
+
+
+@dataclass(frozen=True)
+class OwnerResolver:
+    """Owner resolver and registry sync (P17). With `enabled: false` only the inbox CLI
+    `owner` command uses this section, on demand. `registry_path` is the session thread
+    registry JSON and `harvest_path` an optional scope harvest jsonl; both are read-only
+    local files that only the instance config names."""
+    enabled: bool = False
+    registry_path: str | None = None
+    harvest_path: str | None = None
+    refresh_seconds: int = 300
+    closed_statuses: tuple[str, ...] = DEFAULT_CLOSED_STATUSES
+    close_queue_on_owner_reply: bool = True
+    activity_days: int = 60
+
+
 @dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
@@ -217,3 +236,5 @@ class Config:
     membership: Membership = field(default_factory=Membership)
     # Optional user directory section (P16).
     user_directory: UserDirectory = field(default_factory=UserDirectory)
+    # Optional owner resolver section (P17).
+    owner_resolver: OwnerResolver = field(default_factory=OwnerResolver)

@@ -5,6 +5,28 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P17 owner resolver and registry sync
+- `slack_dispatch.resolver`: a read-only index of the session thread registry JSON
+  (field aliases `ch`/`channel_id`/`channel` and `root_ts`/`thread_ts`, name strings,
+  `-` roots, duplicate rows, session ids from owner texts, `_meta` sweep scopes, routing
+  rules), cached per file version; a parse failure keeps the previous index and logs the
+  class only. An owner resolver orders candidates by tier: certain (binding, scope claim,
+  config default), declared (registry session ids, sweep scope, routing rule), recorded
+  (owner text without a session id), observed (ledger activity, optional harvest jsonl).
+  Local files and the ledger only; no Slack, model or network calls.
+- Human queue items get the resolver's lane as their suggestion (`owner-resolver/1`)
+  before the classifier, which now fills only rows the resolver left empty.
+- An owner reply in a thread closes the thread's earlier `human_pending` items (note
+  `owner_reply`) and drops their unsent notices; lane items are untouched
+  (`owner_resolver.close_queue_on_owner_reply`).
+- Console: registry badges on queue and lane rows, `Done per registry (stage)` and
+  `Stage all registry-closed (N)` for items the registry closed after their ts (staged,
+  written on GO), `Find owner` on queue and lane rows and an `Owner lookup` card in the
+  Scope tab, backed by `GET /api/owner`.
+- Inbox CLI `owner CHANNEL [--ts TS]`, `owner --pending [--apply]` (backfill suggestions)
+  and `registry check [--lane LANE]`.
+- Config: optional `owner_resolver` section (off by default).
+
 ### P16 bot flag and user directory
 - One bot rule (`user_directory.is_bot_message`): no author, subtype `bot_message`,
   `bot_messages.known_bot_users`, or a bot per `users.info`. `bot_id`, `app_id` and

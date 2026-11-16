@@ -392,3 +392,30 @@ unconsumed `backfill` record for it (the message is open, still the lane's, and 
 done after that record). Such items print `already_backfilled=N` and are not counted in
 `redelivered`. The service's own first `backfill` delivery of a reconcile message does
 not count, so a first cutover still delivers it once.
+
+## P17 owner lookup and registry check
+
+Both commands need a config (`--config` or `SLACK_DISPATCH_CONFIG`) and read the files
+named by `owner_resolver`. They run on demand even with `owner_resolver.enabled: false`.
+
+### `owner CHANNEL [--ts TS] [--json]`
+
+Prints the owner candidates of a channel, or of a message or thread with `--ts` (a ledger
+message with that ts supplies its thread root): the best lane with tier and source, the
+matching registry row, then one line per candidate (`confidence lane session source
+evidence`). `--json` prints the `GET /api/owner` shape without `lanes`. Read-only.
+
+### `owner --pending [--apply] [--json]`
+
+Resolves every current `human_pending` item and prints a table `id channel thread
+best_lane confidence source` and a summary line. The default is a dry run; `--apply`
+writes each best lane with `set_suggestion(..., version="owner-resolver/1")` (replacing a
+classifier suggestion on that row). Items without a lane are left unchanged.
+
+### `registry check [--lane LANE] [--json]`
+
+Lists open ledger items (`human_pending`, `assigned`, `acked`, optionally of one lane)
+whose registry row is closed: `id state lane channel thread registry_id status last_ts
+message_ts compare`, where `compare` is `newer` (registry `last_ts` at or after the item:
+a `registry_closed` candidate), `older` or `unknown` (no `last_ts`). Nothing is written.
+Without `owner_resolver.registry_path` it exits 2.

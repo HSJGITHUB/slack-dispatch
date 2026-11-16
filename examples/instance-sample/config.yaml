@@ -194,3 +194,20 @@ user_directory:
   enabled: true
   ttl_seconds: 86400
   failure_cooldown_seconds: 300
+# Optional owner resolver and registry sync (P17). registry_path is the session thread
+# registry JSON (the instance supplies the real path; the file is only read). harvest_path
+# is an optional scope harvest jsonl (null: no harvest evidence). With enabled true the
+# service suggests an owner lane on human queue items (before the classifier), closes
+# earlier human queue items of a thread when the owner replies in it
+# (close_queue_on_owner_reply), and the console shows registry badges, registry-closed
+# staging and Find owner. refresh_seconds bounds how often the registry file is checked;
+# activity_days bounds the ledger activity evidence. With enabled false only the inbox CLI
+# owner and registry check commands read this section, on demand.
+owner_resolver:
+  enabled: false
+  registry_path: dummy/registry.json
+  harvest_path: null
+  refresh_seconds: 300
+  closed_statuses: [closed, answered, answered_action_ours, sent_closed_no_action_ours, delivered]
+  close_queue_on_owner_reply: true
+  activity_days: 60

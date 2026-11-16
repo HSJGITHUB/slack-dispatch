@@ -6,7 +6,7 @@ import yaml
 
 from .schema import (
     AlwaysHuman, BotMessages, Classifier, Config, Console, Decisions, HumanQueue, Inbox, Lane,
-    LedgerConfig, Membership, NotifyAdapter, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
+    LedgerConfig, Membership, NotifyAdapter, OwnerResolver, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
     SourceConfig, Timers, UserDirectory, WakePolicy,
 )
 
@@ -266,6 +266,7 @@ def parse_config(raw):
     learning = scope_learning_section(data.get("scope_learning", {}))
     membership = membership_section(data.get("membership", {}))
     directory = user_directory_section(data.get("user_directory", {}))
+    resolver = owner_resolver_section(data.get("owner_resolver", {}))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
@@ -273,7 +274,37 @@ def parse_config(raw):
                   human_queue=queue, bot_messages=bots, owner_signals=signals,
                   sessions_dir=sessions_dir, people=people, display_timezone=zone,
                   console=console, decisions=decisions, scope_learning=learning,
-                  membership=membership, user_directory=directory)
+                  membership=membership, user_directory=directory, owner_resolver=resolver)
+
+
+def owner_resolver_section(value):
+    """Optional `owner_resolver` map (P17). Every key is optional: enabled (default false),
+    registry_path and harvest_path (strings or null), refresh_seconds (positive, default
+    300), closed_statuses (non-empty string list), close_queue_on_owner_reply (default
+    true) and activity_days (positive, default 60)."""
+    data = mapping({} if value is None else value, "owner_resolver")
+    paths = {}
+    for key in ("registry_path", "harvest_path"):
+        path = data.get(key)
+        if path is not None:
+            string(path, "owner_resolver." + key)
+        paths[key] = path
+    statuses = data.get("closed_statuses", list(OwnerResolver.closed_statuses))
+    if not isinstance(statuses, list) or not statuses:
+        raise ConfigError("owner_resolver.closed_statuses must be a non-empty list")
+    statuses = tuple(string(item, "owner_resolver.closed_statuses entry").strip().lower()
+                     for item in statuses)
+    return OwnerResolver(
+        enabled=boolean(data.get("enabled", OwnerResolver.enabled), "owner_resolver.enabled"),
+        registry_path=paths["registry_path"], harvest_path=paths["harvest_path"],
+        refresh_seconds=positive(data.get("refresh_seconds", OwnerResolver.refresh_seconds),
+                                 "owner_resolver.refresh_seconds"),
+        closed_statuses=statuses,
+        close_queue_on_owner_reply=boolean(
+            data.get("close_queue_on_owner_reply", OwnerResolver.close_queue_on_owner_reply),
+            "owner_resolver.close_queue_on_owner_reply"),
+        activity_days=positive(data.get("activity_days", OwnerResolver.activity_days),
+                               "owner_resolver.activity_days"))
 
 
 def user_directory_section(value):

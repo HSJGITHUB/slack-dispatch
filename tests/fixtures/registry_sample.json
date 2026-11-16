@@ -1,0 +1,53 @@
+{
+  "_meta": {
+    "sweep_scope_000001": {
+      "channels": ["C0DUMMY0005", "C0DUMMY0007 #dummy-seven"],
+      "dms": ["D0DUMMY0003"],
+      "session": "0000aaaa",
+      "root_horizon_days": 120,
+      "last_sweep_run_ts": "1794528000.000100"
+    },
+    "sweep_scope_content_2222cccc": {"channels": ["C0DUMMY0008"], "dms": []},
+    "last_sweep_scope_bbbb2222": "string memo only, not a sweep scope",
+    "other_meta": {"channels": ["C0DUMMY0099"]}
+  },
+  "identities": {"channels": {"dummy-general": "C0000000002"}},
+  "threads": [
+    {"id": "DUMMY-ROOT-OPEN", "ch": "C0000000002", "root_ts": "1794528100.000100",
+     "status": "open", "owner": "Dummy Person (session 0000aaaa)", "title": "Dummy open thread",
+     "waiting_on": "dummy reply", "next_action": "dummy next step",
+     "notes": "long free text with ts=1794528100.000100 that is never parsed"},
+    {"id": "DUMMY-CLOSED-NEWER", "channel_id": "C0000000002 #dummy-general",
+     "thread_ts": "1794528200.000100", "status": "closed", "owner": "Dummy Person",
+     "title": "Dummy closed thread", "last_out_ts": "1794528300.000100",
+     "last_in_ts": "1794528250.000100", "last_event": "2026-11-13 dummy note"},
+    {"id": "DUMMY-CLOSED-NOTS", "channel": "C0000000002", "root_ts": "1794528400.000100",
+     "status": "answered", "owner": "Dummy Person", "title": "Dummy answered thread"},
+    {"id": "DUMMY-CLOSED-OLDER", "ch": "C0000000002", "root_ts": "1794528450.000100",
+     "status": "Delivered", "owner": "Dummy Owner", "last_event": "1794528440.000100"},
+    {"id": "DUMMY-DUP-A", "ch": "C0DUMMY0004", "root_ts": "1794528500.000100", "status": "open",
+     "owner_session": "bbbb2222 dummy observer", "last_event": "1794528500.000200"},
+    {"id": "DUMMY-DUP-B", "ch": "C0DUMMY0004", "root_ts": "1794528500.000100",
+     "status": "closed", "session": "0000aaaa", "last_out_ts": "1794528600.000100"},
+    {"id": "DUMMY-DUP-C", "ch": "C0DUMMY0004", "root_ts": "1794528500.000100",
+     "status": "open", "owner": "Dummy Person"},
+    {"id": "DUMMY-FLAT-DM", "ch": "D0DUMMY0002", "root_ts": "-", "status": "open",
+     "owner": "Dummy Owner"},
+    {"id": "DUMMY-NAME-ONLY", "ch": "DM Dummy Person", "status": "open", "owner": "Dummy Person"},
+    {"id": "DUMMY-MULTI", "ch": "#dummy-a · #dummy-b", "root_ts": "1794528700.000100",
+     "status": "hold"},
+    {"id": "DUMMY-NO-CHANNEL", "root_ts": "1794528800.000100", "status": "open", "owner": ""},
+    {"id": "DUMMY-UNKNOWN-SESSION", "ch": "C0DUMMY0009", "root_ts": "1794528900.000100",
+     "status": "open", "owner": "Dummy role (session bbbb2222)"},
+    "not a row"
+  ],
+  "routing_rules": [
+    {"trigger": "Dummy audit follow-up in C0DUMMY0005",
+     "route": "DUMMY-LANE (session 0000aaaa, folder dummy) and observer session bbbb2222"},
+    {"if": "#dummy-ab (C0DUMMY0006) new post", "then": "DUMMY-AB-LANE (session 2222cccc)",
+     "added": "2026-11-04"},
+    {"trigger": "no ids here", "route": "nobody"}
+  ],
+  "recurring": [],
+  "updated_kst": "2026-11-16 00:00"
+}

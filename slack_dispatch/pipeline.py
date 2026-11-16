@@ -15,7 +15,9 @@ from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
 from slack_dispatch.notify.dispatch_card import card_wanted
 from slack_dispatch.notify.session_resolve import SessionResolver
 from slack_dispatch.queue.human import export_jsonl
+from slack_dispatch.resolver.owner import VERSION as OWNER_VERSION, OwnerResolver, suggestion_for
 from slack_dispatch.router.apply import apply_decision
+from slack_dispatch.router.classifier import Suggestion
 from slack_dispatch.router.engine import route
 
 LOG = logging.getLogger(__name__)
@@ -219,6 +221,40 @@ def routing_config(config, store):
     return replace(config, excluded_channels=tuple(config.excluded_channels) + tuple(added))
 
 
+def build_owner_resolver(config):
+    """The P17 owner resolver when `owner_resolver.enabled`, else None."""
+    settings = getattr(config, "owner_resolver", None)
+    return OwnerResolver(config) if settings is not None and settings.enabled else None
+
+
+class OwnerFirstSuggester:
+    """P17: the owner resolver suggests first; the wrapped classifier fills only rows the
+    resolver left without a lane. Suggestions never assign a lane (classifier contract)."""
+    enabled = True
+
+    def __init__(self, resolver, store, inner):
+        self.resolver, self.store, self.inner = resolver, store, inner
+        self.ran = False
+
+    def suggest(self, message):
+        self.ran = True
+        found = owner_suggestion(self.resolver, self.store, message)
+        if found is not None:
+            return Suggestion(found[0], found[1], OWNER_VERSION)
+        if self.inner is None or not getattr(self.inner, "enabled", True):
+            return None
+        return self.inner.suggest(message)
+
+
+def owner_suggestion(resolver, store, message):
+    """(lane, reason) from the resolver, or None; a resolver failure is logged by class only."""
+    try:
+        return suggestion_for(resolver, store, message)
+    except Exception as error:
+        LOG.warning("Owner resolver skipped class=%s", type(error).__name__)
+        return None
+
+
 @dataclass(frozen=True)
 class HandleResult:
     message_id: str | None
@@ -250,6 +286,9 @@ class Pipeline:
         self._retry = {}
         self._export_pending = False
         self.human = HumanQueueDelivery(config, store, self.notifiers, clock)
+        # P17: optional owner resolver (owner_resolver.enabled).
+        self.owner_resolver = build_owner_resolver(config)
+        self.owner_reply_closed = 0
         # Keep the package's v1 migration compatible. This table is service-owned.
         with store._transaction() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS service_deliveries (
@@ -279,6 +318,9 @@ class Pipeline:
                 # P16 counters appear with the directory, like the P15 membership counters.
                 result.update(self.directory.snapshot(), app_posts_human=self.app_posts_human,
                               bot_posts=self.bot_posts)
+            if self.owner_resolver is not None:
+                # P17: human queue items closed by an owner reply in their thread.
+                result["owner_reply_closed"] = self.owner_reply_closed
             return result
 
     def _thread_key(self, message, lane):
@@ -422,12 +464,24 @@ class Pipeline:
             self.store.set_state(mid, "done", note=note)
             if note.startswith("prehandled:"):
                 self.counters["prehandled"] += 1
+            if note == "owner_post":
+                self._close_on_owner_reply(message)
             return HandleResult(mid, recorded.kind, state="done", lane=message.get("lane"))
         if "text" in event:
             message["text"] = event["text"]
         message["is_bot"] = event["is_bot"]
         decision = route(message, self.routing_config(), self.store.lookup_binding)
-        outcome = apply_decision(self.store, mid, decision, self.suggester)
+        suggester = self.suggester
+        if self.owner_resolver is not None:
+            suggester = OwnerFirstSuggester(self.owner_resolver, self.store, self.suggester)
+        outcome = apply_decision(self.store, mid, decision, suggester)
+        if (outcome.state == "human_pending" and self.owner_resolver is not None
+                and not suggester.ran):
+            # apply_decision asks a suggester only for rule `none`; other queued items
+            # (for example always_human) still get the resolver's suggestion.
+            found = owner_suggestion(self.owner_resolver, self.store, message)
+            if found is not None:
+                self.store.set_suggestion(mid, found[0], found[1], OWNER_VERSION)
         self.counters["routed"] += 1
         backfill = False
         if outcome.state == "assigned":
@@ -460,6 +514,40 @@ class Pipeline:
         if outcome.state == "assigned" and decision.attention:
             self._human_notice(mid, attention=decision.attention)
         return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane, backfill=backfill)
+
+    def _close_on_owner_reply(self, message):
+        """P17: an owner reply in a thread closes the thread's earlier human queue items.
+
+        Only `human_pending` items of the same thread with a lower ts become `done` with
+        note `owner_reply`; their unsent human notices are dropped so a pending digest no
+        longer lists them, and the queue export is rewritten. Lane items are untouched
+        (the lane inbox shows `owner replied at`). Needs `owner_resolver.enabled` and
+        `owner_resolver.close_queue_on_owner_reply`.
+        """
+        settings = getattr(self.config, "owner_resolver", None)
+        root, ts = message.get("thread_ts"), message.get("ts")
+        if (self.owner_resolver is None or not settings.close_queue_on_owner_reply
+                or not root or root == ts):
+            return 0
+        lookup = getattr(self.store, "pending_in_thread", None)
+        if not callable(lookup):
+            return 0
+        try:
+            owner_ts = Decimal(str(ts))
+            closed = [row["id"] for row in lookup(message["source"], message["channel"], root)
+                      if Decimal(str(row["ts"])) < owner_ts]
+        except Exception:
+            self.failure("owner_reply_close")
+            return 0
+        for mid in closed:
+            self.store.set_state(mid, "done", note="owner_reply")
+        if closed:
+            with self.store._transaction() as db:
+                for mid in closed:
+                    db.execute("DELETE FROM human_notices WHERE message_id=? AND sent_at IS NULL", (mid,))
+            self.owner_reply_closed += len(closed)
+            self._export_queue()
+        return len(closed)
 
     def _owner_reaction(self, event, mid):
         owner = self.config.always_human.owner_user

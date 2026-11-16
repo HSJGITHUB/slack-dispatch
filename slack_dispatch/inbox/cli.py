@@ -139,6 +139,21 @@ def build_parser():
     sub.add_argument("--lane", required=True)
     sub.add_argument("--thread", dest="root_ts", metavar="ROOT_TS")
     sub.add_argument("--kind", choices=("reply", "root", "dm"))
+    # P17: owner lookup and registry sync (read the registry named by owner_resolver).
+    sub = commands.add_parser("owner")
+    options(sub)
+    sub.add_argument("channel", nargs="?")
+    sub.add_argument("--ts", dest="owner_ts", metavar="TS")
+    sub.add_argument("--pending", action="store_true")
+    sub.add_argument("--apply", action="store_true")
+    sub.add_argument("--json", action="store_true")
+    sub = commands.add_parser("registry")
+    options(sub)
+    registry = sub.add_subparsers(dest="registry_command", required=True)
+    target = registry.add_parser("check")
+    options(target)
+    target.add_argument("--lane")
+    target.add_argument("--json", action="store_true")
     return parser
 
 
@@ -981,6 +996,117 @@ def sent(args, store, config, stdout, stderr):
     return 0
 
 
+OWNER_COLUMNS = ("id", "channel", "thread", "best_lane", "confidence", "source")
+REGISTRY_COLUMNS = ("id", "state", "lane", "channel", "thread", "registry_id", "status",
+                    "last_ts", "message_ts", "compare")
+
+
+def owner_resolver(config):
+    """The P17 resolver for on-demand CLI use (works with owner_resolver.enabled false)."""
+    from slack_dispatch.resolver.owner import OwnerResolver
+    return OwnerResolver(config)
+
+
+def owner_command(args, store, config, stdout, stderr):
+    """CLI `owner CHANNEL [--ts TS] [--json]` and `owner --pending [--apply] [--json]`."""
+    from slack_dispatch.resolver.owner import VERSION
+    if config is None:
+        print("Config is required (--config or SLACK_DISPATCH_CONFIG)", file=stderr)
+        return 2
+    if bool(args.pending) == bool(args.channel) or (args.apply and not args.pending):
+        raise BadInput("Supply a channel or --pending")
+    resolver = owner_resolver(config)
+    if not args.pending:
+        if not CONVERSATION.fullmatch(args.channel) or (
+                args.owner_ts is not None and not SLACK_TS.fullmatch(args.owner_ts)):
+            raise BadInput("Invalid channel or ts")
+        thread_ts = None
+        if args.owner_ts:
+            message = store.get_message(f"slack:{args.channel}:{args.owner_ts}") or {}
+            if message.get("thread_ts") and message["thread_ts"] != args.owner_ts:
+                thread_ts = message["thread_ts"]
+        result = resolver.resolve(store, args.channel, args.owner_ts, thread_ts).as_dict()
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False), file=stdout)
+            return 0
+        best = result["best"]
+        print(f"channel {args.channel} root {result['root'] or '-'} best "
+              + (f"{best['lane']} ({best['confidence']}, {best['source']})" if best else "none"),
+              file=stdout)
+        row = result["registry_row"]
+        if row:
+            print("registry", row["id"] or "-", "status", row["status"] or "-",
+                  "closed", "yes" if row["closed"] else "no", "last_ts", row["last_ts"] or "-",
+                  file=stdout)
+        print("confidence lane session source evidence", file=stdout)
+        for candidate in result["candidates"]:
+            print(candidate["confidence"], candidate["lane"] or "-", candidate["session"] or "-",
+                  candidate["source"], candidate["evidence"], file=stdout)
+        return 0
+    rows = []
+    for message in store.list_messages(state="human_pending", limit=2**63 - 1):
+        resolution = resolver.resolve(store, message["channel"], message.get("ts"),
+                                      message.get("thread_ts"))
+        best = resolution.best
+        rows.append({"id": message["id"], "channel": message["channel"],
+                     "thread": message.get("thread_ts") or "-",
+                     "best_lane": best.lane if best else None,
+                     "confidence": best.tier if best else None,
+                     "source": best.source if best else None,
+                     "reason": resolution.reason()})
+    applied = 0
+    if args.apply:
+        for row in rows:
+            if row["best_lane"]:
+                store.set_suggestion(row["id"], row["best_lane"], row["reason"], VERSION)
+                applied += 1
+    if args.json:
+        print(json.dumps({"mode": "apply" if args.apply else "dry-run", "rows": rows,
+                          "applied": applied}, ensure_ascii=False), file=stdout)
+        return 0
+    print(" ".join(OWNER_COLUMNS), file=stdout)
+    for row in rows:
+        print(*(row[key] or "-" for key in OWNER_COLUMNS), file=stdout)
+    found = sum(1 for row in rows if row["best_lane"])
+    print(f"pending={len(rows)} with_lane={found} applied={applied}", file=stdout)
+    if not args.apply:
+        print("dry run: nothing changed; rerun with --apply to write the suggestions", file=stdout)
+    return 0
+
+
+def registry_check(args, store, config, stdout, stderr):
+    """CLI `registry check [--lane LANE] [--json]`: open items whose registry row is closed."""
+    if config is None:
+        print("Config is required (--config or SLACK_DISPATCH_CONFIG)", file=stderr)
+        return 2
+    if not config.owner_resolver.registry_path:
+        print("owner_resolver.registry_path is not configured", file=stderr)
+        return 2
+    resolver = owner_resolver(config)
+    rows = []
+    for message in store.open_messages(lane=args.lane):
+        info = resolver.registry_for(message)
+        if not info or not info["closed"]:
+            continue
+        compare = {True: "newer", False: "older", None: "unknown"}[info["last_ts_newer"]]
+        rows.append({"id": message["id"], "state": message["state"], "lane": message.get("lane"),
+                     "channel": message["channel"], "thread": message.get("thread_ts"),
+                     "registry_id": info["id"], "status": info["status"],
+                     "last_ts": info["last_ts"], "message_ts": message["ts"], "compare": compare,
+                     "registry_closed": info["registry_closed"], "note": info["note"]})
+    candidates = sum(1 for row in rows if row["registry_closed"])
+    if args.json:
+        print(json.dumps({"rows": rows, "count": len(rows), "registry_closed": candidates},
+                         ensure_ascii=False), file=stdout)
+        return 0
+    print(" ".join(REGISTRY_COLUMNS), file=stdout)
+    for row in rows:
+        print(*(row[key] or "-" for key in REGISTRY_COLUMNS), file=stdout)
+    print(f"closed_in_registry={len(rows)} registry_closed={candidates} (last_ts at or after "
+          "the message); nothing changed", file=stdout)
+    return 0
+
+
 def configured_session(config_path, lane):
     """Return the lane's configured session from an optional config file, else None."""
     if not config_path:
@@ -1024,7 +1150,7 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
             # P13: scope and sent read the optional config strictly (scope:auto, min_evidence);
             # assign and reroute only borrow min_evidence and never fail on the config.
             config = None
-            if args.command in ("scope", "sent"):
+            if args.command in ("scope", "sent", "owner", "registry"):
                 config = optional_config(args)
             elif args.command in ("assign", "reroute"):
                 config = optional_config(args, strict=False)
@@ -1085,6 +1211,13 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                     code = scope_remove(args, store, stdout, stderr)
                 else:
                     code = scope_import(args, store, config, stdout)
+                error_reported = code != 0
+                return code
+            elif args.command in ("owner", "registry"):
+                if args.command == "owner":
+                    code = owner_command(args, store, config, stdout, stderr)
+                else:
+                    code = registry_check(args, store, config, stdout, stderr)
                 error_reported = code != 0
                 return code
             elif args.command == "cutover":

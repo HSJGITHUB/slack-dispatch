@@ -313,3 +313,33 @@ ends the override only: items it closed stay `excluded`. The export button (`GET
 /api/channel-exclusions/export`, `{"yaml"}`) returns an `excluded_channels` list: the
 config entries plus the ledger ones (marked `# ledger`), to replace the config key. The
 exclude follow-through hint is not shown for a channel the ledger already excludes.
+
+## P17 owner lookup and registry sync
+
+Available when `owner_resolver.enabled` (`GET /api/config` returns `owner_resolver:
+true`).
+
+- Registry badge. Queue items (`GET /api/queue`) and lane inbox groups and items
+  (`GET /api/lanes/{lane}/inbox`) carry `registry` when a registry row matches the
+  message's (channel, thread root or ts): `{id, title, status, owner, waiting_on,
+  next_action, closed, last_ts, last_ts_newer, registry_closed, note}`, else null. The row
+  shows a `registry <status>` badge (UI key `registryBadge`, both languages); hovering
+  shows title, owner and next action.
+- Registry closed. An item is `registry_closed` when its row is closed and `last_ts` is
+  at or after the item's ts. Such a row gets `Done per registry (stage)` (UI key
+  `registryDone`), which stages Done with note `registry:<status>:<registry id>`.
+  `GET /api/queue` returns `registry_closed: [{id, note}]` for every pending item on all
+  pages, and the queue toolbar shows `Stage all registry-closed (N)` (UI key
+  `registryDoneAll`), which stages them all. Nothing is written until GO (P14). When
+  `last_ts` is missing or older than the item, only the badge shows: the registry may be
+  stale relative to the new post.
+- Find owner (UI key `findOwner`). Queue rows and lane rows call `GET
+  /api/owner?channel=...&ts=...` and show the candidates (tier, lane, session, source,
+  evidence) under the row. On a queue row a candidate lane button stages the assign
+  decision for that row. On a lane row it sets the Reroute target; Reroute applies it.
+  The Scope tab has an `Owner lookup` card that takes a channel id and an optional ts.
+- `GET /api/owner?channel=C...&ts=TS` (ts optional) returns `{channel, ts, thread_ts, root,
+  best, candidates, registry_row, lanes}`. A ledger message with that ts supplies its
+  thread root. `best` is `{lane, confidence, source, evidence}` or null; each candidate is
+  `{lane, session, confidence, source, evidence}`. Invalid channel or ts: 400; resolver
+  disabled: 404. It is read-only.

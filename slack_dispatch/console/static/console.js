@@ -66,6 +66,24 @@ const UI_TEXT = Object.freeze({
     channelHint: "If posts from this channel keep coming, you can propose excluding the channel in the Scope tab",
     openScope: "Open the Scope tab",
     noSuggestionToStage: "This item has no suggested lane",
+    registryBadge: (status) => "registry " + status,
+    registryTitle: (row) => [row.id, row.title, row.owner ? "owner: " + row.owner : null,
+      row.next_action ? "next: " + row.next_action : null].filter(Boolean).join(" / "),
+    registryDone: "Done per registry (stage)",
+    registryDoneTitle: (note) => "Stage Done with note " + note,
+    registryDoneAll: (count) => "Stage all registry-closed (" + count + ")",
+    findOwner: "Find owner",
+    findOwnerTitle: "Look up who owns this channel or thread (ledger, config, registry, harvest)",
+    ownerBest: (lane, tier, source) => "Best: " + lane + " (" + tier + ", " + source + ")",
+    ownerNone: "No candidate with a lane.",
+    ownerPick: (lane) => "Stage assign to " + lane,
+    ownerRerouteSet: (lane) => "Reroute target set to " + lane + "; press Reroute to apply",
+    ownerRegistry: (row) => "Registry: " + (row.id || "-") + " / " + (row.status || "-") + (row.owner ? " / " + row.owner : ""),
+    ownerLookupTitle: "Owner lookup",
+    ownerLookupHint: "Channel id, optional message or thread ts. Read-only.",
+    ownerChannelPlaceholder: "Channel id",
+    ownerTsPlaceholder: "ts (optional)",
+    ownerLookupButton: "Find owner",
     keysHelp: "Keys: g = focus GO; Enter on a focused row = stage the suggested lane; Esc = unstage the focused row",
     queueColumns: {
       when: "When",
@@ -153,7 +171,7 @@ const UI_TEXT = Object.freeze({
       lastEvent: "Last event", resumed: "Resumed", catchup: "Caught up", key: "Field", value: "Value",
       scopeKey: "Key", name: "Name", evidence: "Evidence", firstSeen: "First seen", lastSeen: "Last seen",
       status: "Status", lanes: "Lanes", current: "Current default", actions: "Actions", by: "By",
-      inConfig: "In config",
+      inConfig: "In config", confidence: "Tier", session: "Session",
     },
     yes: "yes",
     no: "no",
@@ -221,6 +239,24 @@ const UI_TEXT = Object.freeze({
     channelHint: "이 채널 글이 계속 오면 Scope 탭에서 채널 제외를 제안할 수 있음",
     openScope: "범위(Scope) 탭 열기",
     noSuggestionToStage: "이 항목에는 제안 레인이 없음",
+    registryBadge: (status) => "레지스트리 " + status,
+    registryTitle: (row) => [row.id, row.title, row.owner ? "소유: " + row.owner : null,
+      row.next_action ? "다음: " + row.next_action : null].filter(Boolean).join(" / "),
+    registryDone: "레지스트리대로 끝 예약",
+    registryDoneTitle: (note) => "메모 " + note + " 로 끝 예약",
+    registryDoneAll: (count) => "레지스트리 종결 전부 예약 (" + count + ")",
+    findOwner: "소관 찾기",
+    findOwnerTitle: "이 채널·스레드의 소관 찾기 (원장, 설정, 레지스트리, 수확)",
+    ownerBest: (lane, tier, source) => "최선: " + lane + " (" + tier + ", " + source + ")",
+    ownerNone: "레인이 있는 후보 없음.",
+    ownerPick: (lane) => lane + " 배정 예약",
+    ownerRerouteSet: (lane) => "재배정 대상을 " + lane + "(으)로 설정함. 재배정을 눌러 적용",
+    ownerRegistry: (row) => "레지스트리: " + (row.id || "-") + " / " + (row.status || "-") + (row.owner ? " / " + row.owner : ""),
+    ownerLookupTitle: "소관 찾기",
+    ownerLookupHint: "채널 id, 선택으로 메시지·스레드 ts. 읽기 전용.",
+    ownerChannelPlaceholder: "채널 id",
+    ownerTsPlaceholder: "ts (선택)",
+    ownerLookupButton: "소관 찾기",
     keysHelp: "단축키: g = GO로 이동 · 행에서 Enter = 제안 레인 배정 예정 · Esc = 행의 예정 취소",
     queueColumns: {
       when: "시각",
@@ -308,7 +344,7 @@ const UI_TEXT = Object.freeze({
       lastEvent: "마지막 이벤트", resumed: "재개", catchup: "따라잡음", key: "항목", value: "값",
       scopeKey: "키", name: "이름", evidence: "근거", firstSeen: "처음 확인", lastSeen: "마지막 확인",
       status: "상태", lanes: "레인", current: "현재 기본값", actions: "작업", by: "확정자",
-      inConfig: "설정에 있음",
+      inConfig: "설정에 있음", confidence: "단계", session: "세션",
     },
     yes: "예",
     no: "아니오",
@@ -335,6 +371,8 @@ const state = {
   lane: null,
   laneFull: false,
   previousView: "queue",
+  registryClosed: [],
+  ownerCard: null,
 };
 
 // ---------- helpers ----------
@@ -506,6 +544,7 @@ function queueRoot() {
     const header = el("div", { className: "toolbar" },
       el("strong", { className: "queue-total", text: UI.loading }),
       el("span", { className: "muted small queue-updated" }),
+      el("button", { className: "registry-all", hidden: true, onclick: () => stageRegistryClosed() }),
       el("span", { className: "spacer" }),
       el("span", { className: "muted small queue-range" }),
       el("button", { className: "queue-prev", text: UI.previous, onclick: () => pageQueue(-1) }),
@@ -560,6 +599,10 @@ async function loadQueue() {
     return loadQueue();
   }
   pruneStaged(data.pending_ids);
+  state.registryClosed = Array.isArray(data.registry_closed) ? data.registry_closed : [];
+  const registryAll = section.querySelector(".registry-all");
+  registryAll.hidden = !state.registryClosed.length;
+  registryAll.textContent = UI.registryDoneAll(state.registryClosed.length);
   section.querySelector(".queue-total").textContent = data.total ? UI.queueTitle(data.total) : UI.queueEmpty;
   section.querySelector(".queue-updated").textContent = UI.refreshed(nowText());
   const first = data.items.length ? data.offset + 1 : 0;
@@ -605,6 +648,7 @@ function renderQueue(list, items) {
       state.queueCards.set(item.id, card);
     }
     paintCard(card);
+    paintRegistry(card, item);
     if (card.node === ref) ref = ref.nextSibling;
     else list.insertBefore(card.node, ref);
   }
@@ -620,6 +664,7 @@ function queueCard(item) {
   const c = UI.queueColumns;
   const ageNode = el("span", { text: UI.age(age(item.age_seconds)) });
   const chip = el("span", { className: "badge chip", hidden: true });
+  const registryBadge = el("span", { className: "badge registry", hidden: true });
   const meta = el("div", { className: "meta" },
     chip,
     el("strong", { title: c.when, text: item.when || item.ts }),
@@ -632,6 +677,7 @@ function queueCard(item) {
     item.edited ? el("span", { className: "badge warn", text: UI.edited }) : null,
     item.has_files ? el("span", { className: "badge", text: UI.files }) : null,
     item.is_bot ? el("span", { className: "badge", text: UI.bot }) : null,
+    registryBadge,
     ageNode,
     el("span", { className: "mono small", text: item.id }));
   const parts = [meta];
@@ -681,6 +727,13 @@ function queueCard(item) {
   });
   const applyNow = el("button", { className: "link apply-now", text: UI.applyNow, title: UI.applyNowTitle,
     onclick: () => applyNowRow(item.id) });
+  const ownerBox = el("div", { className: "owner-panel small", hidden: true });
+  const registrySlot = el("span", { className: "registry-slot" });
+  const findOwner = state.config.owner_resolver
+    ? el("button", { className: "link", text: UI.findOwner, title: UI.findOwnerTitle,
+      onclick: () => toggleOwner(ownerBox, item.channel.id, item.ts, (lane) => {
+        if (!sameDecision(state.staged.get(item.id), "assign", lane)) toggleStage(item.id, "assign", lane);
+      }) }) : null;
   parts.push(el("div", { className: "actions" },
     el("span", { className: "muted small group-label", text: UI.assign }),
     laneButtons,
@@ -689,12 +742,36 @@ function queueCard(item) {
     button("exclude_channel", null, { className: "danger", text: UI.excludeChannel, title: UI.excludeChannelTitle }),
     note,
     button("done", null, { text: UI.done }),
+    registrySlot,
     el("span", { className: "spacer" }),
+    findOwner,
     applyNow));
+  parts.push(ownerBox);
   const outcome = el("div", { className: "outcome small", hidden: true });
   parts.push(outcome);
   const node = el("article", { className: "card", "data-id": item.id, tabindex: "0" }, parts);
-  return { node, item, age: ageNode, chip, note, buttons, applyNow, outcome };
+  return { node, item, age: ageNode, chip, note, buttons, applyNow, outcome, registryBadge,
+    registrySlot, registryNote: null };
+}
+
+// P17: the registry badge and the row's "Done per registry" button follow every poll.
+// The button uses the same data as the header button (GET /api/queue registry_closed).
+function paintRegistry(card, item) {
+  const info = item.registry;
+  card.registryBadge.hidden = !info;
+  card.registryBadge.className = "badge registry" + (info && info.closed ? " ok" : "");
+  card.registryBadge.textContent = info ? UI.registryBadge(info.status || UI.none) : "";
+  if (info) card.registryBadge.title = UI.registryTitle(info);
+  else card.registryBadge.removeAttribute("title");
+  const row = state.registryClosed.find((entry) => entry && entry.id === card.item.id && entry.note);
+  const note = row ? row.note : null;
+  if (note === card.registryNote) return;
+  card.registryNote = note;
+  clear(card.registrySlot);
+  if (note) {
+    card.registrySlot.append(el("button", { className: "registry-done", text: UI.registryDone,
+      title: UI.registryDoneTitle(note), onclick: () => stageRegistryDone(card.item.id, note) }));
+  }
 }
 
 function paintCard(card) {
@@ -752,6 +829,52 @@ function stageSuggested(id) {
     return;
   }
   if (!sameDecision(state.staged.get(id), "assign", suggestion.lane)) toggleStage(id, "assign", suggestion.lane);
+}
+
+// P17: stage Done with the registry note; nothing is written until GO.
+function stageRegistryDone(id, note) {
+  if (state.committing || !note) return;
+  const card = state.queueCards.get(id);
+  if (card) card.note.value = note;
+  stage(id, { action: "done", lane: null, note });
+}
+
+function stageRegistryClosed() {
+  if (state.committing) return;
+  for (const row of state.registryClosed) {
+    if (row && row.id && row.note) stageRegistryDone(row.id, row.note);
+  }
+}
+
+// P17: owner candidates from GET /api/owner, shown in a panel under the row.
+function ownerPanel(data, onPick) {
+  const c = UI.columns;
+  const best = data.best;
+  const parts = [el("div", { text: best ? UI.ownerBest(best.lane, best.confidence, best.source) : UI.ownerNone })];
+  if (data.registry_row) parts.push(el("div", { className: "muted", text: UI.ownerRegistry(data.registry_row) }));
+  parts.push(table([c.confidence, c.lane, c.session, c.source, c.evidence], data.candidates.map((row) => [
+    row.confidence,
+    row.lane && onPick && state.config.lanes.includes(row.lane)
+      ? el("button", { text: row.lane, title: UI.ownerPick(row.lane), onclick: () => onPick(row.lane) })
+      : (row.lane || (row.session ? "session:" + row.session : UI.none)),
+    row.session, row.source, row.evidence])));
+  return parts;
+}
+
+async function toggleOwner(box, channel, ts, onPick) {
+  if (!box.hidden) {
+    box.hidden = true;
+    return;
+  }
+  let data;
+  try {
+    data = await api("/api/owner?channel=" + encodeURIComponent(channel || "") + (ts ? "&ts=" + encodeURIComponent(ts) : ""));
+  } catch (error) {
+    status(error.message, true);
+    return;
+  }
+  clear(box).append(...ownerPanel(data, onPick));
+  box.hidden = false;
 }
 
 function cancelAll() {
@@ -988,9 +1111,11 @@ function laneGroup(lane, group) {
     root.pending && root.kind ? el("span", { className: "badge", text: UI.kind(root.kind) }) : null,
     root.pending && root.edited === "yes" ? el("span", { className: "badge warn", text: UI.edited }) : null,
     root.pending && root.attention && root.attention !== "-" ? el("span", { className: "badge attention", text: UI.attention(root.attention) }) : null,
+    group.registry ? el("span", { className: "badge registry" + (group.registry.closed ? " ok" : ""),
+      title: UI.registryTitle(group.registry), text: UI.registryBadge(group.registry.status || UI.none) }) : null,
     el("span", { className: "mono small", text: root.id }))];
   if ("body" in root) parts.push(el("div", { className: "body" }, root.body));
-  if (root.pending) parts.push(laneActions(lane, root.id));
+  if (root.pending) parts.push(...laneActions(lane, root.id, root.channel, root.ts));
   for (const item of group.items) {
     parts.push(el("div", { className: "item" },
       el("div", { className: "meta small" },
@@ -1002,7 +1127,7 @@ function laneGroup(lane, group) {
         item.attention && item.attention !== "-" ? el("span", { className: "badge attention", text: UI.attention(item.attention) }) : null,
         el("span", { className: "mono", text: item.id })),
       "body" in item ? el("div", { className: "body" }, item.body) : null,
-      laneActions(lane, item.id)));
+      laneActions(lane, item.id, item.channel || root.channel, item.ts)));
   }
   if (group.owner_replied_at) {
     parts.push(el("div", { className: "suggest small" }, el("span", { className: "badge ok", text: UI.ownerReplied(group.owner_replied_when || group.owner_replied_at) })));
@@ -1010,17 +1135,28 @@ function laneGroup(lane, group) {
   return el("article", { className: "card" }, parts);
 }
 
-function laneActions(lane, id) {
+function laneActions(lane, id, channel, ts) {
   const note = el("input", { type: "text", placeholder: UI.notePlaceholder, maxlength: "2000" });
   const target = el("select", { "aria-label": UI.rerouteTo },
     state.config.lanes.filter((other) => other !== lane).map((other) => el("option", { value: other, text: other })));
-  return el("div", { className: "actions" },
+  // P17: picking an owner candidate only sets the reroute target; Reroute applies it.
+  const ownerBox = el("div", { className: "owner-panel small", hidden: true });
+  const pick = (picked) => {
+    if (picked === lane) return;
+    target.value = picked;
+    status(UI.ownerRerouteSet(picked));
+  };
+  const findOwner = state.config.owner_resolver && channel
+    ? el("button", { className: "link", text: UI.findOwner, title: UI.findOwnerTitle,
+      onclick: () => toggleOwner(ownerBox, channel, ts, pick) }) : null;
+  return [el("div", { className: "actions" },
     el("button", { text: UI.ack, onclick: () => laneAction(lane, "ack", id) }),
     note,
     el("button", { text: UI.done, onclick: () => laneAction(lane, "done", id, { note: note.value }) }),
     el("span", { className: "muted small", text: UI.rerouteTo }),
     target,
-    el("button", { text: UI.reroute, onclick: () => laneAction(lane, "reroute", id, { lane: target.value }) }));
+    el("button", { text: UI.reroute, onclick: () => laneAction(lane, "reroute", id, { lane: target.value }) }),
+    findOwner), ownerBox];
 }
 
 async function laneAction(lane, action, id, extra) {
@@ -1124,6 +1260,11 @@ async function loadProposals() {
     el("span", { className: "muted small", text: UI.refreshed(nowText()) }),
     el("span", { className: "spacer" }),
     el("button", { text: UI.refresh, onclick: () => loadProposals() })));
+  // The lookup card node is kept across polls so typed input and results survive a refresh.
+  if (state.config.owner_resolver) {
+    if (!state.ownerCard) state.ownerCard = ownerLookupCard();
+    section.append(state.ownerCard);
+  }
   const list = el("article", { className: "card" });
   if (!data.proposals.length) {
     list.append(el("div", { className: "muted", text: UI.proposalsEmpty }));
@@ -1156,6 +1297,22 @@ async function loadProposals() {
     el("span", { className: "muted small", text: UI.exportHint })), output);
   section.append(learned);
   section.append(exclusionsCard(data.channel_exclusions || []));
+}
+
+// P17: standalone owner lookup (GET /api/owner) with a channel id and an optional ts.
+function ownerLookupCard() {
+  const channel = el("input", { type: "text", maxlength: "100", placeholder: UI.ownerChannelPlaceholder });
+  const ts = el("input", { type: "text", maxlength: "40", placeholder: UI.ownerTsPlaceholder });
+  const box = el("div", { className: "owner-panel small", hidden: true });
+  const run = async (event) => {
+    event.preventDefault();
+    box.hidden = true;
+    await toggleOwner(box, channel.value.trim(), ts.value.trim(), null);
+  };
+  return el("article", { className: "card" }, el("h2", { text: UI.ownerLookupTitle }),
+    el("form", { className: "toolbar", onsubmit: run }, channel, ts,
+      el("button", { type: "submit", text: UI.ownerLookupButton }),
+      el("span", { className: "muted small", text: UI.ownerLookupHint })), box);
 }
 
 // P15: ledger channel exclusions written by the triage `Exclude channel` action.

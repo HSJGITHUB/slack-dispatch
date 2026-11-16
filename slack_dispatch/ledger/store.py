@@ -682,6 +682,31 @@ class LedgerStore:
     def set_is_bot(self, message_id, value):
         self._update(message_id, {"is_bot": int(bool(value))})
 
+    # P17 owner resolver reads (additive queries only).
+
+    def channel_lane_activity(self, channel, *, source="slack"):
+        """Lane, state, ack_at and done_at of the channel's lane-owned items that a lane acked
+        or completed (states acked and done). No bodies; the resolver filters by time."""
+        return self._rows("SELECT id, lane, state, ack_at, done_at FROM messages WHERE source=? "
+                          "AND channel=? AND lane IS NOT NULL AND state IN ('acked', 'done') "
+                          "ORDER BY id", (source, channel))
+
+    def pending_in_thread(self, source, channel, root):
+        """`human_pending` rows of a thread (the root itself included), oldest first. No bodies."""
+        rows = self._rows("SELECT * FROM messages WHERE source=? AND channel=? AND (ts=? OR thread_ts=?) "
+                          "AND state='human_pending'", (source, channel, root, root))
+        for row in rows:
+            row.pop("body", None)
+        return sorted(rows, key=lambda row: (_numeric(row["ts"]), row["id"]))
+
+    def open_messages(self, *, lane=None):
+        """Open items (human_pending, assigned, acked), optionally of one lane. No bodies."""
+        rows = self._rows("SELECT * FROM messages WHERE state IN ('human_pending', 'assigned', 'acked') "
+                          "AND (? IS NULL OR lane=?) ORDER BY received_at, id", (lane, lane))
+        for row in rows:
+            row.pop("body", None)
+        return rows
+
 
 def event_is_bot(event):
     """The stored bot flag: the pipeline's `is_bot` when the event carries it, else the

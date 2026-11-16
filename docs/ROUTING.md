@@ -281,3 +281,59 @@ for a rerun; that row prints `error` and the exit code is 1. Human notices are q
 once, others with the digest; a notice for an `acked` row is dropped by the flush as
 usual). Without a body in the ledger (`ledger.store_body: false`) only author checks
 apply to attention. `--json` prints `{"mode", "since_days", "rows", "counts"}`.
+
+## P17 owner resolver and registry sync
+
+`slack_dispatch.resolver` answers "who owns this channel or thread?" from local evidence:
+the ledger, the config, the session thread registry JSON (`owner_resolver.registry_path`)
+and an optional scope harvest jsonl (`owner_resolver.harvest_path`). It never calls Slack,
+a model or the network, and its answers are suggestions only: routing (`route()`) is
+unchanged and never reads the registry.
+
+Candidates, in order (`resolve(store, config, registry, channel, ts=None,
+thread_ts=None)`; the root is `thread_ts`, else `ts`):
+
+1. `certain`: the ledger binding of (channel, root) (`binding`); a confirmed scope claim
+   for the thread key `CHANNEL:ROOT`, the channel or the dm (`scope_claim`); the config
+   channel or dm default (`channel_default`, `dm_default`; a null default adds nothing).
+2. `declared`: a registry row for (channel, root) whose session ids map to configured
+   lanes (`registry`); when no row has that root, rows of the conversation without a
+   root (flat channel or DM rows, `registry_channel`); a registry `_meta.sweep_scope*`
+   entry that lists the conversation (`sweep_scope`); a registry routing rule whose text
+   names the conversation id and a session id (`routing_rule`).
+3. `recorded`: a registry row with an owner text but no session id (lane none; the
+   evidence carries the owner text, title and status).
+4. `observed`: lanes that acked or completed ledger items of the conversation within
+   `owner_resolver.activity_days` (`activity`, by count), then the harvest file
+   aggregated per lane with strong and weak file counts (`harvest`). Only configured
+   lanes count.
+
+A session id maps to the lane whose `lanes[].session` starts with it (8 hex prefix).
+Unknown session ids stay candidates with lane none (shown as `session:<8hex>`).
+`Resolution.best` is the first candidate with a lane. Evidence is at most 160
+characters and never contains a ledger message body.
+
+Registry reading. The registry is parsed once per file version (mtime and size) and the
+file is checked at most every `owner_resolver.refresh_seconds`. A parse failure keeps the
+previous index and logs one WARNING with the exception class only. Field aliases: channel
+under `ch`, `channel_id` or `channel` (the first token that starts with a conversation id;
+a name-only value means no channel), root under `root_ts` or `thread_ts` (`-`, missing or
+not `digits.digits` means no root). Duplicate (channel, root) rows are all kept; the row
+with the newest `last_ts`, then the later one in the file, speaks for status. A row is
+closed when its status (lower case) is in `owner_resolver.closed_statuses`; `last_ts` is
+the largest Slack ts among `last_out_ts`, `last_in_ts` and `last_event`.
+
+Suggestion hook. When a message stays `human_pending` and `owner_resolver.enabled`, the
+resolver runs first; a best lane is stored with `set_suggestion(mid, lane, "<source>:
+<evidence>", "owner-resolver/1")` (one line, at most 200 characters). The classifier, if
+enabled, is asked only when the resolver found no lane, and only for rule `none` as
+before; queued `always_human` items get the resolver suggestion too. A resolver failure is
+logged by class and the item is queued as usual.
+
+Owner reply close. With `owner_resolver.enabled` and `close_queue_on_owner_reply: true`,
+an owner post (`always_human.owner_user`, recorded as `owner_post`) that is a thread reply
+sets every `human_pending` item of that thread with a lower ts to `done` with note
+`owner_reply`, drops their unsent human notices (a pending digest no longer lists them)
+and rewrites the queue export. Assigned and acked lane items are not touched; the lane
+inbox shows `owner replied at`. Heartbeat counter `owner_reply_closed` when the resolver
+is enabled.

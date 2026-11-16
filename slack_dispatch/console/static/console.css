@@ -235,3 +235,8 @@ h2:first-child { margin-top: 0; }
 
 .item { margin: 10px 0 0; padding-top: 10px; border-top: 1px dashed var(--line); }
 .empty-state { padding: 30px; text-align: center; color: var(--muted); }
+
+/* P17 owner lookup panel and registry badge */
+.owner-panel { margin-top: 6px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
+.owner-panel table { margin-top: 4px; }
+.badge.registry { border-style: dashed; }

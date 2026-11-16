@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import io
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from slack_dispatch.notify.session_resolve import is_session_id
 from slack_dispatch.pipeline import HUMAN_QUEUE
 from slack_dispatch.runtime.heartbeat import SCHEMA, is_stale, read_heartbeat
 
+LOG = logging.getLogger(__name__)
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 ALL_ROWS = 2**63 - 1  # SQLite's largest LIMIT, as the timer sweep uses.
 ROOT_CHARS = 300
@@ -191,12 +193,24 @@ def not_member(row, membership):
     return member_status(row.get("channel"), members, loaded, row.get("channel_type")) is False
 
 
-def queue_item(store, config, view, row, now, hints=None, membership=None):
+def registry_view(owner, row):
+    """P17 registry badge data for a ledger row, or None (no resolver, no match, failure)."""
+    if owner is None:
+        return None
+    try:
+        return owner.registry_for(row)
+    except Exception as error:
+        LOG.warning("Registry lookup skipped class=%s", type(error).__name__)
+        return None
+
+
+def queue_item(store, config, view, row, now, hints=None, membership=None, owner=None):
     """One triage item: metadata, full body, thread root and recent thread context.
 
     `hints` caches author lane hints per page (pending items own no lane, so the
     author's lane history is the same for each of their items). `membership` is
-    `membership_view(store)`, read once per page (P15 `not_member` badge).
+    `membership_view(store)`, read once per page (P15 `not_member` badge). `owner` is
+    the P17 `OwnerResolver` (or None): it adds the `registry` badge data.
     """
     membership = membership_view(store) if membership is None else membership
     full = store.get_message(row["id"], include_body=True) or dict(row)
@@ -230,21 +244,60 @@ def queue_item(store, config, view, row, now, hints=None, membership=None):
             "not_member": not_member(row, membership),
             "suggestion": suggestion, "hints": author_hints(store, config, row, hints),
             "is_reply": is_reply, "body": full.get("body"), "root": root,
-            "context": context, "thread_size": len(thread)}
+            "context": context, "thread_size": len(thread),
+            "registry": registry_view(owner, row)}
 
 
-def queue_page(store, config, view, now, *, offset=0, limit=None):
-    """human_pending messages, newest first by message time, one page at a time."""
+def queue_page(store, config, view, now, *, offset=0, limit=None, owner=None):
+    """human_pending messages, newest first by message time, one page at a time.
+
+    With the P17 owner resolver, `registry_closed` lists every pending item (all pages)
+    whose registry row is closed at or after the item's ts, with the staged done note
+    `registry:<status>:<registry id>`. Nothing is written here.
+    """
     limit = config.console.page_size if limit is None else limit
     rows = store.list_messages(state="human_pending", limit=ALL_ROWS)
     rows.sort(key=lambda row: (ts_key(row["ts"]), row["id"]), reverse=True)
     page = rows[offset:offset + limit]
     hints = {}
     membership = membership_view(store)
+    closed = []
+    if owner is not None:
+        for row in rows:
+            info = registry_view(owner, row)
+            if info and info["registry_closed"]:
+                closed.append({"id": row["id"], "note": info["note"]})
     # P14: every pending id (all pages), so the page can drop staged ids that left the queue.
     return {"total": len(rows), "offset": offset, "limit": limit,
             "pending_ids": [row["id"] for row in rows],
-            "items": [queue_item(store, config, view, row, now, hints, membership) for row in page]}
+            "registry_closed": closed,
+            "items": [queue_item(store, config, view, row, now, hints, membership, owner)
+                      for row in page]}
+
+
+CHANNEL_ID = re.compile(r"[CDG][A-Z0-9]{2,63}")
+TS_VALUE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,9})?")
+
+
+def owner_lookup(store, config, owner, channel, ts=None):
+    """P17 `GET /api/owner`: the owner candidates of a channel or a message.
+
+    `ts` may be a message ts or a thread root ts. A ledger message with that ts supplies
+    its thread_ts, so a reply resolves by its thread root. Raises ValueError for an
+    invalid channel or ts.
+    """
+    if not CHANNEL_ID.fullmatch(channel or ""):
+        raise ValueError("Invalid channel")
+    if ts is not None and not TS_VALUE.fullmatch(ts):
+        raise ValueError("Invalid ts")
+    thread_ts = None
+    if ts is not None:
+        message = store.get_message(f"slack:{channel}:{ts}")
+        if message and message.get("thread_ts") and message["thread_ts"] != ts:
+            thread_ts = message["thread_ts"]
+    result = owner.resolve(store, channel, ts, thread_ts).as_dict()
+    result["lanes"] = lane_ids(config)
+    return result
 
 
 def channel_hint(store, config, message):
@@ -312,8 +365,10 @@ def lane_cards(store, config, view, resolver, root, now):
     return [lane_card(store, config, view, resolver, root, lane, now) for lane in lane_ids(config)]
 
 
-def lane_inbox(store, config, view, root, lane, *, full=False):
-    """The lane inbox as thread groups, produced by the CLI's own `inbox LANE --thread --json`."""
+def lane_inbox(store, config, view, root, lane, *, full=False, owner=None):
+    """The lane inbox as thread groups, produced by the CLI's own `inbox LANE --thread --json`.
+
+    With the P17 owner resolver each group and item carries `registry` badge data."""
     args = argparse.Namespace(lane=lane, include_done=False, thread=True, json=True, full=full,
                               no_body=False, show_body=False,
                               owner=config.always_human.owner_user)
@@ -324,11 +379,16 @@ def lane_inbox(store, config, view, root, lane, *, full=False):
         group["root"]["pending"] = "kind" in group["root"]
         group["root"]["channel_name"] = view.channels.get(group["root"].get("channel"))
         group["root"]["when_full"] = view.when_ts(group["root"].get("ts"))
+        root_row = group["root"]
+        group["registry"] = registry_view(owner, {"channel": root_row.get("channel"),
+                                                  "ts": root_row.get("ts")}) if owner else None
         for item in group["items"]:
             message = store.get_message(item["id"]) or {}
             item["state"] = message.get("state")
             item["lane"] = message.get("lane")
             item["when_full"] = view.when_ts(item.get("ts"))
+            item["channel"] = message.get("channel") or root_row.get("channel")
+            item["registry"] = registry_view(owner, message) if owner and message else None
         if "owner_replied_at" in group:
             group["owner_replied_when"] = view.when_ts(group["owner_replied_at"])
     return groups

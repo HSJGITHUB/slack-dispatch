@@ -19,6 +19,7 @@ from slack_dispatch import __version__
 from slack_dispatch.console import actions, queries
 from slack_dispatch.ledger.store import ProposalStateError
 from slack_dispatch.notify.session_resolve import SessionResolver
+from slack_dispatch.resolver.owner import OwnerResolver
 
 LOG = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -137,8 +138,11 @@ class ConsoleMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
-def create_app(config, store, *, clock=time.time, resolver=None, host=None):
-    """Build the console app around an open ledger store and a loaded config."""
+def create_app(config, store, *, clock=time.time, resolver=None, host=None, owner=None):
+    """Build the console app around an open ledger store and a loaded config.
+
+    `owner` is the P17 `OwnerResolver`; by default one is built when
+    `owner_resolver.enabled` (registry badges, `registry_closed`, `GET /api/owner`)."""
     app = FastAPI(title="slack-dispatch console", version=__version__, docs_url=None,
                   redoc_url=None, openapi_url=None)
     view = queries.View(config)
@@ -146,7 +150,10 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
     resolver = resolver or SessionResolver(config.sessions_dir)
     lanes = queries.lane_ids(config)
     threshold = config.scope_learning.min_evidence
+    if owner is None and config.owner_resolver.enabled:
+        owner = OwnerResolver(config)
     app.state.config, app.state.store, app.state.view = config, store, view
+    app.state.owner = owner
 
     def checked_lane(lane, *, registered=True):
         if lane not in lanes:
@@ -176,11 +183,13 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
                 "display_timezone": config.display_timezone,
                 "timezone_warning": view.zone_warning, "store_body": config.ledger.store_body,
                 "lane_hint_people": config.console.lane_hint_people,
-                "ui_language": config.console.ui_language}
+                "ui_language": config.console.ui_language,
+                "owner_resolver": owner is not None}
 
     @app.get("/api/queue")
     def queue(offset: int = Query(0, ge=0), limit: int | None = Query(None, ge=1, le=500)):
-        return queries.queue_page(store, config, view, clock(), offset=offset, limit=limit)
+        return queries.queue_page(store, config, view, clock(), offset=offset, limit=limit,
+                                  owner=owner)
 
     @app.post("/api/queue/actions")
     def queue_actions(request: QueueActionRequest):
@@ -278,7 +287,8 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
     @app.get("/api/lanes/{lane}/inbox")
     def lane_inbox(lane: str, full: bool = False):
         checked_lane(lane, registered=False)
-        return {"lane": lane, "groups": queries.lane_inbox(store, config, view, root, lane, full=full)}
+        return {"lane": lane, "groups": queries.lane_inbox(store, config, view, root, lane, full=full,
+                                                           owner=owner)}
 
     @app.post("/api/lanes/{lane}/actions")
     def lane_actions(lane: str, request: LaneActionRequest):
@@ -303,6 +313,18 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
         if len(query) < 2:
             raise HTTPException(400, "Query needs at least 2 characters")
         return queries.search(store, view, query)
+
+    @app.get("/api/owner")
+    def owner_candidates(channel: str = Query(..., max_length=100),
+                         ts: str | None = Query(None, max_length=40)):
+        """P17: owner candidates of a channel, or of a message or thread with `ts`. Read-only."""
+        if owner is None:
+            raise HTTPException(404, "Owner resolver is disabled")
+        try:
+            return queries.owner_lookup(store, config, owner, channel.strip(),
+                                        (ts or "").strip() or None)
+        except ValueError:
+            raise HTTPException(400, "Invalid channel or ts") from None
 
     @app.get("/api/proposals")
     def proposal_list():

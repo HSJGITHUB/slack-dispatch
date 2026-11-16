@@ -329,3 +329,40 @@ All additive; the schema version stays 2.
   keyword `failure_cooldown_seconds`; a failed refresh keeps an expired cached value.
 - Heartbeat counters `directory_lookups`, `directory_failures`, `app_posts_human`,
   `bot_posts` when the directory exists.
+
+## P17 owner resolver and registry sync
+
+All additive; the schema version stays 2 and no table changes.
+
+- `slack_dispatch.resolver.registry`: `RegistryIndex.load(path, *, closed_statuses)`
+  (cached per mtime and size, failure keeps the previous index), `RegistryIndex.parse(data,
+  ...)`, `rows_for(channel, root)`, `channel_rows(channel)`, `match(channel, ts,
+  thread_ts)`, `effective(rows)`, `sweep_for(conversation)`, `rules_for(conversation)`;
+  `RegistryRow` (`session_ids`, `closed`, `last_ts`, `summary()`), `lane_for_session(config,
+  session)`, `registry_info(row, message_ts)` (badge data with `registry_closed` and the
+  done note `registry:<status>:<registry id>`).
+- `slack_dispatch.resolver.owner`: `resolve(store, config, registry, channel, ts=None,
+  thread_ts=None, *, harvest=None, now=None) -> Resolution` with `candidates`
+  (`Candidate(tier, lane, source, evidence, session)`), `best`, `confidence`, `reason()`,
+  `registry_row`, `as_dict()`; `OwnerResolver(config, *, clock)` with `registry()`,
+  `resolve(store, channel, ts, thread_ts)`, `registry_for(message)`; `HarvestIndex.load(path)`;
+  `VERSION = "owner-resolver/1"`. Tiers: `certain`, `declared`, `recorded`, `observed`.
+  Sources: `binding`, `scope_claim`, `channel_default`, `dm_default`, `registry`,
+  `registry_channel`, `sweep_scope`, `routing_rule`, `activity`, `harvest`.
+- `LedgerStore` adds reads only: `channel_lane_activity(channel, *, source="slack")`,
+  `pending_in_thread(source, channel, root)` and `open_messages(*, lane=None)`.
+- Pipeline: `Pipeline.owner_resolver` (None unless enabled), `OwnerFirstSuggester`
+  (resolver first, classifier for rows without a lane), `build_owner_resolver(config)`;
+  an owner thread reply closes earlier `human_pending` items of the thread (note
+  `owner_reply`). `route()` and `apply_decision()` are unchanged.
+- Console: `create_app(..., owner=None)`; `GET /api/config` adds `owner_resolver`;
+  `GET /api/queue` adds `registry_closed` and item `registry`; lane inbox groups and items
+  add `registry` (items also `channel`); new `GET /api/owner`. Staged registry decisions
+  use the existing `done` commit with the registry note.
+- Inbox CLI: `owner CHANNEL [--ts TS] [--json]`, `owner --pending [--apply] [--json]`,
+  `registry check [--lane LANE] [--json]`.
+- Config: optional `owner_resolver: {enabled: false, registry_path: null, harvest_path:
+  null, refresh_seconds: 300, closed_statuses: [closed, answered, answered_action_ours,
+  sent_closed_no_action_ours, delivered], close_queue_on_owner_reply: true,
+  activity_days: 60}`.
+- Heartbeat counter `owner_reply_closed` when the resolver is enabled.
