@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 from slack_dispatch.console.actions import seconds_left, undoable
-from slack_dispatch.inbox.cli import display_zone, show_inbox
+from slack_dispatch.inbox.cli import display_zone, show_inbox, wake_candidates
 from slack_dispatch.ingest.membership import member_status
 from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.ledger.store import delivery_item_ids
@@ -383,6 +383,8 @@ def queue_item(store, config, view, row, now, hints=None, membership=None, owner
             "edited": bool(row.get("edited_at")), "followup": bool(row.get("followup")),
             "state": row["state"], "pending_reason": row.get("note"),
             "not_member": not_member(row, membership),
+            # P21: a direct message (channel type `im`) gets the DM badge on the page.
+            "is_dm": row.get("channel_type") == "im",
             "suggestion": suggestion, "hints": author_hints(store, config, row, hints),
             "is_reply": is_reply, "body": full.get("body"), "root": root,
             "context": context, "thread_size": len(thread),
@@ -420,12 +422,13 @@ CHANNEL_ID = re.compile(r"[CDG][A-Z0-9]{2,63}")
 TS_VALUE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,9})?")
 
 
-def owner_lookup(store, config, owner, channel, ts=None):
+def owner_lookup(store, config, owner, channel, ts=None, *, titles=None):
     """P17 `GET /api/owner`: the owner candidates of a channel or a message.
 
     `ts` may be a message ts or a thread root ts. A ledger message with that ts supplies
     its thread_ts, so a reply resolves by its thread root. Raises ValueError for an
-    invalid channel or ts.
+    invalid channel or ts. P21: with `titles` (`session_titles(resolver)`, set only when a
+    sessions table is configured) each candidate adds `session_title` (None when unknown).
     """
     if not CHANNEL_ID.fullmatch(channel or ""):
         raise ValueError("Invalid channel")
@@ -438,6 +441,9 @@ def owner_lookup(store, config, owner, channel, ts=None):
             thread_ts = message["thread_ts"]
     result = owner.resolve(store, channel, ts, thread_ts).as_dict()
     result["lanes"] = lane_ids(config)
+    if titles is not None:
+        for candidate in result.get("candidates") or []:
+            candidate["session_title"] = titles(candidate.get("session"))
     return result
 
 
@@ -471,8 +477,84 @@ def session_state(resolver, lane, session):
             "state": "live" if live else "not_live", "target": session}
 
 
+# P21 lane session identity and wake now.
+
+WAKE_REFUSALS = {
+    "unregistered": "Lane is not in the ledger",
+    "paused": "Lane is paused",
+    "no_session": "Lane has no session",
+    "not_live": "Lane session is not live",
+    "ambiguous": "Lane session id matches several live sessions",
+    "wake_off": "Wakes are switched off (wake.off or wake_policy.enabled false)",
+}
+
+
+def session_identity(resolver, session, paused=False):
+    """`SessionResolver.describe` of a lane session value (P21), or a minimal fallback for
+    resolvers without it (test doubles)."""
+    describe = getattr(resolver, "describe", None)
+    if callable(describe):
+        return describe(session, paused=bool(paused))
+    return {"id8": None, "id": None, "value": session or None, "addressed_by": None,
+            "name": None, "live": False, "title": None,
+            "state": "no_session" if not session else ("paused" if paused else "not_live"),
+            "table_state": None}
+
+
+def session_titles(resolver):
+    """`resolver.title` when a sessions table is configured (P21), else None. Payloads add
+    title keys only when this is set, so their shape is unchanged without a table."""
+    if getattr(resolver, "table", None) is None or not callable(getattr(resolver, "title", None)):
+        return None
+    return resolver.title
+
+
+def wake_refusal(config, store, resolver, lane):
+    """(code, reason) when `Wake now` must be refused for the lane, else None (P21).
+
+    Refused: lane not in the ledger, paused, no session value, a session that is not live
+    (or an id prefix matching several live sessions), and wakes switched off (`wake.off`
+    or `wake_policy.enabled: false`), since the service would drop the request then.
+    """
+    if store.get_lane(lane) is None:
+        return "unregistered", WAKE_REFUSALS["unregistered"]
+    session, paused = effective_lane(config, store, lane)
+    if paused:
+        return "paused", WAKE_REFUSALS["paused"]
+    identity = session_identity(resolver, session)
+    if identity["state"] == "no_session":
+        return "no_session", WAKE_REFUSALS["no_session"]
+    if not identity["live"]:
+        code = "ambiguous" if identity["state"] == "ambiguous" else "not_live"
+        return code, WAKE_REFUSALS[code]
+    if not config.wake_policy.enabled or wake_switch_path(config).exists():
+        return "wake_off", WAKE_REFUSALS["wake_off"]
+    return None
+
+
+def lane_wake_info(config, store, resolver, lane):
+    """`{allowed, reason, detail, assigned, acked}` for the lane header button (P21)."""
+    counts = Counter(row["state"] for row in wake_candidates(store, lane))
+    refusal = wake_refusal(config, store, resolver, lane)
+    return {"allowed": refusal is None, "reason": refusal[0] if refusal else None,
+            "detail": refusal[1] if refusal else None,
+            "assigned": counts["assigned"], "acked": counts["acked"]}
+
+
+def lane_identities(store, config, resolver):
+    """{lane: describe result} for every configured lane (queue lane button titles, P21)."""
+    result = {}
+    for lane in lane_ids(config):
+        session, paused = effective_lane(config, store, lane)
+        result[lane] = session_identity(resolver, session, paused)
+    return result
+
+
 def lane_card(store, config, view, resolver, root, lane, now):
-    """One lane: session, pause, today's counts, open work and delivery times."""
+    """One lane: session, pause, today's counts, open work and delivery times.
+
+    P21 adds `identity` (`SessionResolver.describe`: title, live name, id8, state) and
+    `wake` (`lane_wake_info`: whether `Wake now` is allowed and why not)."""
     session, paused = effective_lane(config, store, lane)
     today = datetime.fromtimestamp(now, view.zone).date()
     today_counts = {"new": 0, "assigned": 0, "acked": 0, "done": 0}
@@ -499,7 +581,8 @@ def lane_card(store, config, view, resolver, root, lane, now):
             "today": today_counts, "open": open_count, "oldest_unacked_seconds": oldest,
             "last_delivery": view.when_epoch(delivery), "last_delivery_epoch": delivery,
             "last_reminder": view.when_epoch(reminder), "last_reminder_epoch": reminder,
-            "inbox_bytes": size}
+            "inbox_bytes": size, "identity": session_identity(resolver, session, paused),
+            "wake": lane_wake_info(config, store, resolver, lane)}
 
 
 def lane_cards(store, config, view, resolver, root, now):
@@ -638,6 +721,18 @@ def scope_name(view, kind, key):
     return view.user_name(key) if kind == "person" else view.channel_name(key)
 
 
+def dm_partner(view, kind, key):
+    """P21: `{id, name}` of the person on the other side of a DM scope key (the
+    `channel_membership` partner of an `im` row, named through the user order), `{id: None,
+    name: None}` when unknown, and None for keys that are not DMs."""
+    if kind != "dm":
+        return None
+    names = getattr(view, "names", None)
+    row = names.membership().get(key) if names is not None else None
+    partner = row.get("partner_user") if row and row.get("kind") == "im" else None
+    return {"id": partner, "name": view.user_name(partner) if partner else None}
+
+
 def current_default(store, config, kind, key):
     """The lane that routes this key today: a ledger override first, then the config."""
     claim = store.lookup_scope_claim(kind, key)
@@ -670,6 +765,7 @@ def proposals(store, config, view):
                       "last_seen": row["last_seen"], "status": row["status"],
                       "conflict": bool(row["conflict"]), "last_evidence": row["last_evidence"],
                       "imported": bool(row["imported"]),
+                      "partner": dm_partner(view, row["kind"], row["key"]),
                       "lanes": involved.get((row["kind"], row["key"]), []), "current": current,
                       "effective": bool(current and current["source"] != "config"
                                         and current["lane"] == row["lane"])})
@@ -717,6 +813,7 @@ def learned_scope(store, config, view):
         table = {"channel": config.channel_defaults, "dm": config.dm_defaults}.get(claim["kind"], {})
         rows.append({"kind": claim["kind"], "key": claim["key"], "lane": claim["lane"],
                      "name": scope_name(view, claim["kind"], claim["key"]),
+                     "partner": dm_partner(view, claim["kind"], claim["key"]),
                      "confirmed_by": claim["confirmed_by"], "confirmed_at": claim["confirmed_at"],
                      "in_config": claim["key"] in table and table[claim["key"]] == claim["lane"]})
     return rows
@@ -812,13 +909,17 @@ def delivery_item(store, view, message_id, cache):
     return dict(cache[message_id])
 
 
-def delivery_row(store, view, row, cache):
-    """A delivery_log row with receipt fields (from `delivery_receipts`) for display."""
+def delivery_row(store, view, row, cache, titles=None):
+    """A delivery_log row with receipt fields (from `delivery_receipts`) for display.
+
+    P21: with `titles` (only when a sessions table is configured) the target adds `title`."""
     session_id, name = row.get("target_session_id"), row.get("target_session_name")
     target = None
     if session_id or name:
         target = {"session_id": session_id, "short_id": session_id[:8] if session_id else None,
                   "name": name}
+        if titles is not None:
+            target["title"] = titles(session_id) if session_id else None
     ids = delivery_item_ids(row.get("item_ids"))
     return {"id": row["id"], "created_at": row.get("created_at"),
             "when": _full_time(view, row.get("created_at")),
@@ -841,8 +942,10 @@ def delivery_row(store, view, row, cache):
 
 
 def deliveries_page(store, config, view, now, *, lane=None, purpose=None, status=None,
-                    hours=DELIVERY_DEFAULT_HOURS, page=1, limit=None):
-    """delivery_log rows newest first with receipts, `limit` (default page_size) per page."""
+                    hours=DELIVERY_DEFAULT_HOURS, page=1, limit=None, titles=None):
+    """delivery_log rows newest first with receipts, `limit` (default page_size) per page.
+
+    `titles` (P21, `session_titles(resolver)`) adds the session title to each target."""
     limit = config.console.page_size if limit is None else limit
     since = delivery_since(now, hours)
     filters = dict(since=since, lane=lane or None, purpose=purpose or None, status=status or None)
@@ -850,7 +953,7 @@ def deliveries_page(store, config, view, now, *, lane=None, purpose=None, status
     rows = store.list_deliveries(**filters, limit=limit, offset=(page - 1) * limit)
     cache = {}
     result = {"hours": hours, "page": page, "page_size": limit, "total": total,
-              "rows": [delivery_row(store, view, row, cache)
+              "rows": [delivery_row(store, view, row, cache, titles)
                        for row in store.delivery_receipts(rows, now)]}
     result.update(delivery_log_start(store, view, now, hours=hours, lane=lane, purpose=purpose,
                                      status=status, empty=not total))

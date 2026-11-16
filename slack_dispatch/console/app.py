@@ -9,6 +9,9 @@ Since P20 every page build binds the view to the store (`view.bind(store)`), so 
 channel names follow `queries.DisplayNames` (config, then ledger, then id) with one read per
 table per request, and message rows carry Slack permalinks when
 `console.workspace_domain` is set.
+Since P21 lanes carry the session identity (`SessionResolver.describe`: sessions table title,
+live name, id8) and `POST /api/lanes/{lane}/wake` re-delivers a lane's open items and queues
+wake requests (journaled, undoable), refused while the lane is paused or not live.
 Nothing here logs request lines, queries or message bodies.
 """
 import logging
@@ -23,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from slack_dispatch import __version__
 from slack_dispatch.console import actions, queries
+from slack_dispatch.inbox.cli import wake_lane
 from slack_dispatch.ledger.store import ProposalStateError, UndoStateError
 from slack_dispatch.notify.session_resolve import SessionResolver
 from slack_dispatch.resolver.owner import OwnerResolver
@@ -76,6 +80,11 @@ class LaneActionRequest(BaseModel):
 
 class UndoRequest(BaseModel):
     """P19 undo: the body is an empty JSON object, so a cross-site form cannot post it."""
+
+
+class WakeRequest(BaseModel):
+    """P21 wake now: the ids to wake, or every assigned and acked item of the lane."""
+    ids: list[str] | None = Field(default=None, min_length=1, max_length=actions.MAX_IDS)
 
 
 def allowed_hosts(config, host=None):
@@ -157,7 +166,9 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                   redoc_url=None, openapi_url=None)
     view = queries.View(config)
     root = queries.inbox_root(config)
-    resolver = resolver or SessionResolver(config.sessions_dir)
+    resolver = resolver or SessionResolver(config.sessions_dir,
+                                           sessions_table=config.console.sessions_table)
+    titles = queries.session_titles(resolver)  # P21: None without a sessions table
     lanes = queries.lane_ids(config)
     threshold = config.scope_learning.min_evidence
     undo_seconds = config.console.undo_seconds
@@ -200,8 +211,11 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
 
     @app.get("/api/queue")
     def queue(offset: int = Query(0, ge=0), limit: int | None = Query(None, ge=1, le=500)):
-        return queries.queue_page(store, config, view.bind(store), clock(), offset=offset,
+        data = queries.queue_page(store, config, view.bind(store), clock(), offset=offset,
                                   limit=limit, owner=owner)
+        # P21: lane button tooltips name each lane's session.
+        data["lane_sessions"] = queries.lane_identities(store, config, resolver)
+        return data
 
     @app.post("/api/queue/actions")
     def queue_actions(request: QueueActionRequest):
@@ -307,8 +321,25 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
     @app.get("/api/lanes/{lane}/inbox")
     def lane_inbox(lane: str, full: bool = False):
         checked_lane(lane, registered=False)
+        session, paused = queries.effective_lane(config, store, lane)
         return {"lane": lane, "groups": queries.lane_inbox(store, config, view.bind(store), root,
-                                                           lane, full=full, owner=owner)}
+                                                           lane, full=full, owner=owner),
+                # P21: the lane header shows the session identity and the Wake now state.
+                "identity": queries.session_identity(resolver, session, paused),
+                "wake": queries.lane_wake_info(config, store, resolver, lane)}
+
+    @app.post("/api/lanes/{lane}/wake")
+    def lane_wake(lane: str, request: WakeRequest):
+        """P21 Wake now: re-deliver the given ids (default every assigned and acked item of
+        the lane) as `backfill` inbox records and queue one wake request each, journaled as
+        `lane_wake` so P19 undo removes the unconsumed requests. 409 when refused."""
+        checked_lane(lane)
+        refusal = queries.wake_refusal(config, store, resolver, lane)
+        if refusal:
+            raise HTTPException(409, refusal[1])
+        result = wake_lane(store, root, lane, request.ids, source=actions.JOURNAL_BY,
+                           undo_seconds=undo_seconds, now=clock())
+        return result
 
     @app.post("/api/lanes/{lane}/actions")
     def lane_actions(lane: str, request: LaneActionRequest):
@@ -372,7 +403,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
             raise HTTPException(404, "Owner resolver is disabled")
         try:
             return queries.owner_lookup(store, config, owner, channel.strip(),
-                                        (ts or "").strip() or None)
+                                        (ts or "").strip() or None, titles=titles)
         except ValueError:
             raise HTTPException(400, "Invalid channel or ts") from None
 
@@ -428,7 +459,8 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                    page: int = Query(1, ge=1, le=100000)):
         lane, purpose, status = delivery_filters(lane, purpose, status)
         return queries.deliveries_page(store, config, view.bind(store), clock(), lane=lane,
-                                       purpose=purpose, status=status, hours=hours, page=page)
+                                       purpose=purpose, status=status, hours=hours, page=page,
+                                       titles=titles)
 
     @app.get("/api/deliveries/summary")
     def deliveries_summary(hours: int = Query(queries.DELIVERY_DEFAULT_HOURS, ge=0, le=24 * 366)):

@@ -2,6 +2,7 @@
 import argparse
 from collections import Counter
 import json
+import logging
 from pathlib import Path
 import os
 import re
@@ -41,6 +42,14 @@ DELIVERY_CLOCK = time.time
 # P19 `undo`: the clock of the undo window (tests patch it).
 UNDO_CLOCK = time.time
 BOT_NOTE = "excluded:bot"
+# P21 `wake`: the open states a wake re-delivers, the journal action and the clock.
+WAKE_STATES = ("assigned", "acked")
+WAKE_ACTION = "lane_wake"
+# fix1: the default Wake now selection wakes at most this many items (newest first).
+WAKE_LIMIT = 20
+WAKE_CLOCK = time.time
+DEFAULT_UNDO_SECONDS = 30
+LOG = logging.getLogger(__name__)
 
 
 class BadInput(ValueError):
@@ -183,6 +192,12 @@ def build_parser():
     target = sub.add_mutually_exclusive_group(required=True)
     target.add_argument("--last", action="store_true")
     target.add_argument("action_id", nargs="?", type=int)
+    sub.add_argument("--json", action="store_true")
+    # P21: wake a lane session now for items already in its inbox (same rules as the console).
+    sub = commands.add_parser("wake")
+    options(sub)
+    sub.add_argument("lane")
+    sub.add_argument("ids", nargs="*")
     sub.add_argument("--json", action="store_true")
     return parser
 
@@ -1337,6 +1352,193 @@ def directory_refresh(args, store, config, stdout, stderr, *, client=None):
     return 1 if failed else 0
 
 
+# P21 wake now: re-deliver items a lane already holds and ask the service to wake it.
+
+def wake_candidates(store, lane):
+    """Ledger rows a lane wake re-delivers: owned by the lane, `assigned` or `acked`, not
+    deleted, and not a context row or owner post."""
+    return [row for row in store.lane_messages(lane)
+            if row["state"] in WAKE_STATES and not is_deleted(row)
+            and not inbox_refusal(dict(row))]
+
+
+def wake_check(store, lane, message_id):
+    """The ledger row of an explicitly named id, or raise ActionError (P21)."""
+    message = store.get_message(message_id)
+    if message is None:
+        raise actions.ActionError("not_found")
+    if message.get("lane") != lane:
+        raise actions.ActionError("conflict", "owned by lane " + str(message.get("lane")))
+    if message.get("state") not in WAKE_STATES:
+        raise actions.ActionError("conflict", "state is " + str(message.get("state")))
+    if is_deleted(message):
+        raise actions.ActionError("conflict", "message deleted")
+    refusal = inbox_refusal(dict(message, id=message_id))
+    if refusal:
+        raise actions.ActionError("not_inbox_item", refusal)
+    return message
+
+
+def journal_wake(store, lane, ids, wake_ids, *, by, undo_seconds, now, before=None):
+    """One `console_actions` row (action `lane_wake`) for a wake, so P19 undo can remove its
+    unconsumed wake requests. `before` (fix1) holds the snapshots taken before the wake;
+    `after` is read now. Message rows do not change, so both normally match and an undo
+    writes back the pre-wake values. Returns (undo info or None, `ok` or `failed`); a
+    journal failure never changes the wake (one WARNING with the exception class)."""
+    if not ids or not callable(getattr(store, "add_console_action", None)):
+        return None, "ok"
+    try:
+        from slack_dispatch.ledger.store import SNAPSHOT_FIELDS
+        after = store.message_snapshots(ids)
+        before = after if before is None else before
+
+        def entries(snapshots):
+            return [dict({name: snapshots[mid].get(name) for name in SNAPSHOT_FIELDS}, id=mid)
+                    for mid in ids if mid in snapshots and mid in after]
+        before_rows, after_rows = entries(before), entries(after)
+        if not after_rows:
+            return None, "ok"
+        at = actions.stamp_at(now)
+        until = actions.stamp_at(float(now) + undo_seconds)
+        action_id = store.add_console_action(
+            at=at, action=WAKE_ACTION, ids=[entry["id"] for entry in after_rows],
+            before=before_rows, after=after_rows, by=by, undo_until=until,
+            meta={"lane": lane, "wake_requests": list(wake_ids), "channel_exclusions": []})
+    except Exception as error:
+        LOG.warning("Console journal failed action=%s class=%s", WAKE_ACTION, type(error).__name__)
+        return None, "failed"
+    return {"action_id": action_id, "action": WAKE_ACTION, "lane": lane, "count": len(after_rows),
+            "at": at, "undo_until": until, "seconds_left": int(undo_seconds)}, "ok"
+
+
+def _ts_order(row):
+    try:
+        value = Decimal(str(row.get("ts")))
+        return value if value.is_finite() else Decimal(0)
+    except (InvalidOperation, ValueError):
+        return Decimal(0)
+
+
+def backfilled_ids(root, lane, ids):
+    """Ids (of `ids`) that already have a `backfill` record in the lane inbox file (fix1)."""
+    wanted = set(ids)
+    if not wanted:
+        return set()
+    return {row["id"] for row in read(root, lane, include_done=True)
+            if row.get("id") in wanted and row.get("kind") == "backfill"}
+
+
+def wake_lane(store, root, lane, ids=None, *, source, undo_seconds=DEFAULT_UNDO_SECONDS,
+              now=None, limit=None):
+    """Re-deliver lane items and queue one `wake_now` wake request each (P21 `Wake now`).
+
+    `ids` None means the newest `limit` (default WAKE_LIMIT) `wake_candidates` items of the
+    lane by message ts; `capped` says more were eligible and `total` how many. Items that
+    already have an unconsumed wake request are skipped and counted in `already_queued`
+    (explicit ids too: their result is ok with detail `already_queued`). Each woken id gets
+    one `wake_requests` row (`source` = `console` or `cli`, kind `wake_now`, which lets the
+    service wake it also while acked) and a `backfill` inbox record unless the lane inbox
+    already holds one for it (`records_skipped`). The caller checks
+    `queries.wake_refusal` first. Returns `{lane, queued, assigned, acked, total, capped,
+    already_queued, records_written, records_skipped, results, wake_requests, undo,
+    journal}`; `results` has one row per explicit id and is empty for the default selection.
+    """
+    from slack_dispatch.ledger.store import WAKE_KIND_NOW
+    now = WAKE_CLOCK() if now is None else now
+    limit = WAKE_LIMIT if limit is None else limit
+    pending_lookup = getattr(store, "pending_wake_ids", None)
+    pending = pending_lookup(lane) if callable(pending_lookup) else set()
+    results, targets, skipped = [], [], 0
+    if ids is None:
+        rows = sorted(wake_candidates(store, lane), key=_ts_order, reverse=True)
+        fresh = [row for row in rows if row["id"] not in pending]
+        skipped = len(rows) - len(fresh)
+        total, capped = len(fresh), len(fresh) > limit
+        for row in fresh[:limit]:
+            targets.append(dict(store.get_message(row["id"]) or row, id=row["id"]))
+    else:
+        capped = False
+        for message_id in dict.fromkeys(ids):
+            try:
+                message = wake_check(store, lane, message_id)
+            except actions.ActionError as error:
+                results.append({"id": message_id, "ok": False, "error": error.code,
+                                "detail": error.detail})
+                continue
+            if message_id in pending:
+                skipped += 1
+                results.append({"id": message_id, "ok": True, "error": None,
+                                "detail": "already_queued"})
+                continue
+            targets.append(dict(message, id=message_id))
+            results.append({"id": message_id, "ok": True, "error": None, "detail": None})
+        total = len(targets)
+    target_ids = [message["id"] for message in targets]
+    before = store.message_snapshots(target_ids) if (
+        target_ids and callable(getattr(store, "message_snapshots", None))) else None
+    have = backfilled_ids(root, lane, target_ids)
+    records = [record(message, "backfill") for message in targets if message["id"] not in have]
+    if records:
+        append(root, lane, records)
+    wake_ids = []
+    request = getattr(store, "request_wake", None)
+    for message in targets if callable(request) else []:
+        wake_ids.append(request(lane, message["id"], source, WAKE_KIND_NOW))
+    undo, journal = journal_wake(store, lane, target_ids, wake_ids, by=source,
+                                 undo_seconds=undo_seconds, now=now, before=before)
+    states = Counter(message.get("state") for message in targets)
+    return {"lane": lane, "queued": len(wake_ids), "assigned": states["assigned"],
+            "acked": states["acked"], "total": total, "capped": capped,
+            "already_queued": skipped, "records_written": len(records),
+            "records_skipped": len(targets) - len(records), "results": results,
+            "wake_requests": wake_ids, "undo": undo, "journal": journal}
+
+
+def wake_text(result):
+    """CLI text: one summary line, one line per id that was not woken, the undo hint."""
+    lines = [f"wake {result['lane']} queued={result['queued']} assigned={result['assigned']} "
+             f"acked={result['acked']} already_queued={result['already_queued']}"]
+    if result["capped"]:
+        lines.append(f"  capped: woke the newest {result['queued']} of {result['total']} items; "
+                     "run wake again for the rest")
+    for row in result["results"]:
+        if not row["ok"]:
+            lines.append(f"  {row['id']} {row['error']}" + (f" ({row['detail']})" if row["detail"] else ""))
+    if result["undo"]:
+        lines.append(f"undo: action {result['undo']['action_id']} until {result['undo']['undo_until']}")
+    elif result["journal"] == "failed":
+        lines.append("undo: not available (journal failed)")
+    return "\n".join(lines)
+
+
+def wake_command(args, root, store, config, stdout, stderr, *, now=None):
+    """`wake LANE [IDS...] [--json]` (P21): the console `Wake now` rules for an operator.
+
+    Exit codes: 0 queued (also when the lane holds nothing to wake), 1 refused (paused, no
+    live session, wakes off), 2 invalid arguments or configuration (a config is required for
+    the session and pause checks), 3 lane not found or an id that could not be woken.
+    """
+    from slack_dispatch.console import queries
+    from slack_dispatch.notify.session_resolve import SessionResolver
+    if config is None:
+        print("Configuration is required for wake (--config or SLACK_DISPATCH_CONFIG)", file=stderr)
+        return 2
+    if args.lane not in queries.lane_ids(config) or store.get_lane(args.lane) is None:
+        print("Lane not found", file=stderr)
+        return 3
+    resolver = SessionResolver(config.sessions_dir, sessions_table=config.console.sessions_table)
+    refusal = queries.wake_refusal(config, store, resolver, args.lane)
+    if refusal:
+        print("Wake refused: " + refusal[1], file=stderr)
+        return 1
+    if root is None:
+        root = queries.inbox_root(config)
+    result = wake_lane(store, root, args.lane, args.ids or None, source="cli",
+                       undo_seconds=config.console.undo_seconds, now=now)
+    print(json.dumps(result, ensure_ascii=False) if args.json else wake_text(result), file=stdout)
+    return 3 if any(not row["ok"] for row in result["results"]) else 0
+
+
 def configured_session(config_path, lane):
     """Return the lane's configured session from an optional config file, else None."""
     if not config_path:
@@ -1382,7 +1584,7 @@ def main(argv=None, *, store=None, stdout=None, stderr=None, client=None):
             # P13: scope and sent read the optional config strictly (scope:auto, min_evidence);
             # assign and reroute only borrow min_evidence and never fail on the config.
             config = None
-            if args.command in ("scope", "sent", "owner", "registry", "directory"):
+            if args.command in ("scope", "sent", "owner", "registry", "directory", "wake"):
                 config = optional_config(args)
             elif args.command in ("assign", "reroute", "queue"):
                 config = optional_config(args, strict=False)
@@ -1471,6 +1673,13 @@ def main(argv=None, *, store=None, stdout=None, stderr=None, client=None):
                 return code
             elif args.command == "deliveries":
                 return deliveries(args, store, optional_config(args), stdout, stderr)
+            elif args.command == "wake":
+                # P21: without --inbox-root or SLACK_DISPATCH_INBOX the configured lane
+                # inbox directory (the console's choice) is used.
+                explicit = args.inbox_root or os.environ.get("SLACK_DISPATCH_INBOX")
+                code = wake_command(args, explicit, store, config, stdout, stderr, now=WAKE_CLOCK())
+                error_reported = code != 0
+                return code
             elif args.command == "undo":
                 code = actions.undo_command(store, last=args.last, action_id=args.action_id,
                                             as_json=args.json, stdout=stdout, stderr=stderr,

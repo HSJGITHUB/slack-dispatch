@@ -163,6 +163,10 @@ console:
   # P20: the Slack workspace subdomain (for example `example` for example.slack.com).
   # When set, console rows and `inbox --links` carry message permalinks; null hides them.
   workspace_domain: null
+  # P21: optional Markdown sessions table, read only. Rows look like
+  # `| <last used> | <state> | <title> | <size> | `claude --resume <uuid>` |`; the console
+  # then shows each lane session by its title. null (default) shows live names and ids.
+  sessions_table: null
   channels:
     C0000000001: dummy-support
     C0000000002: dummy-general

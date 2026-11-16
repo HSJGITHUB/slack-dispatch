@@ -56,6 +56,8 @@ store. This CLI consumes the shared LedgerStore API.
   undo"); exit 0 undone, 1 already undone or expired, 2 invalid input, 3 unknown or nothing
   to undo. Since P19 `inbox` also hides rows whose ledger lane is empty and whose state is
   `human_pending` or `excluded` (for example an assign the console undid).
+- `wake LANE [IDS...] [--json]`: re-deliver the lane's open items and queue wake requests
+  now, same rules as the console `Wake now` (P21, below).
 
 A session first claims its stable lane, then reads its inbox. An operator reads
 `queue` and explicitly uses `assign` to accept or override a suggestion. A suggestion
@@ -487,3 +489,48 @@ users keep at most 5,000 users each (oldest dropped). A user is not queued again
 fail-open rules. The
 heartbeat counter `directory_names` counts names stored this way. `false` restores the P16
 behaviour (lookups only for app posts).
+
+## P21 wake now and DM items
+
+### `wake LANE [IDS...] [--json]`
+
+For an operator session: wake a lane's session now for items already in its inbox, for
+example after a lane was paused or newly connected. `ack` only marks an item as read; it
+never wakes anything.
+
+```sh
+python -m slack_dispatch.inbox.cli --config dummy-config.yaml --ledger dummy/state/ledger.sqlite3 wake support
+python -m slack_dispatch.inbox.cli --config dummy-config.yaml --ledger dummy/state/ledger.sqlite3 wake support slack:C0000000002:1000.000100 --json
+```
+
+The same code as the console (`inbox.cli.wake_lane`, CONSOLE.md "P21 lane sessions and wake
+now"): without ids the newest 20 `assigned` and `acked` items of the lane (not deleted
+messages, context rows or owner posts), skipping items whose wake request is not consumed
+yet; each one gets one `wake_requests` row (source `cli`, kind `wake_now`, which the service
+also wakes while acked) and a `backfill` inbox record unless the file already has one for
+it; one journal row `lane_wake` (`by` = `cli`) that `undo` can take back within
+`console.undo_seconds` (unconsumed wake requests are removed).
+
+A config (`--config` or `SLACK_DISPATCH_CONFIG`) is required: the lane session, the pause
+flag, `sessions_dir`, `console.sessions_table` and the wake switch come from it. The inbox
+directory is `--inbox-root`, else `SLACK_DISPATCH_INBOX`, else the configured lane inbox
+directory (the first lane `file_inbox` adapter path, else `inbox.root`), as the console uses.
+
+Text output: `wake support queued=2 assigned=1 acked=1 already_queued=0`, a `capped:` line
+when more than 20 items were eligible (run `wake` again for the rest), one line per id that
+could not be woken (`<id> conflict (owned by lane owner)`), and `undo: action <id> until
+<time>`. `--json` prints the result object.
+
+Exit codes: 0 queued (also when the lane holds nothing to wake), 1 refused (`Wake refused:
+Lane is paused`, `Lane has no session`, `Lane session is not live`, an ambiguous id or wakes
+switched off), 2 invalid input or no config, 3 lane not configured or not in the ledger, or
+an id that could not be woken.
+
+### DM items
+
+A direct message that no rule places lands in the human queue with the resolver or
+classifier suggestion, like any other unrouted message; the console marks it with a `DM`
+badge. A lane that owns a person's DMs proposes the scope with
+`scope add <lane> --dm D...`; the operator confirms the proposal in the console Scope tab
+(listed under `DM scope proposals` with the partner's display name), which routes later
+DMs of that conversation to the lane. `dm` claims are never applied automatically.

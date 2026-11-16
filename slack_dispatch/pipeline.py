@@ -412,6 +412,9 @@ class Pipeline:
         self.last_event_at = None
         self._missing_human_logged = False
         self._retry = {}
+        # P21 fix1: ids a Wake now request offered while acked; the flush lets them through
+        # once (see _current_ids) and drops them after the wake was sent.
+        self.wake_now_ids = set()
         self._export_pending = False
         self.human = HumanQueueDelivery(config, store, self.notifiers, clock)
         # P17: optional owner resolver (owner_resolver.enabled).
@@ -867,19 +870,23 @@ class Pipeline:
                         self._record_delivery(lane, ids)
             if self._export_pending:
                 self._export_queue()
-            for lane, ids in self.wake_engine.flush(now):
-                ids = self._current_ids(lane, ids, "lane")
+            for lane, batch in self.wake_engine.flush(now):
+                ids = self._current_ids(lane, batch, "lane")
                 if ids:
                     self._send("lane", lane, ids, inbox=False)
+                self.wake_now_ids.difference_update(batch)
         # P20 fix1: directory name lookups run after the pipeline lock is released, so a slow
         # users.info call never holds up handle_event.
         self.resolve_names(now)
 
     def _current_ids(self, lane, ids, purpose):
+        """Ids still deliverable: human queue ids, and lane ids still assigned to the lane.
+        P21 fix1: an id in `wake_now_ids` (a pending Wake now) also passes while acked."""
         result = []
         for mid in sorted(ids):
             row = self.store.get_message(mid)
             if row and (purpose == "human_queue" or
-                        (row.get("lane") == lane and row["state"] == "assigned")):
+                        (row.get("lane") == lane and (row["state"] == "assigned" or (
+                            row["state"] == "acked" and mid in self.wake_now_ids)))):
                 result.append(mid)
         return result

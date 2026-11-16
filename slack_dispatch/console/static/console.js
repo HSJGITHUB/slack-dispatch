@@ -38,7 +38,7 @@ const UI_TEXT = Object.freeze({
     journalActions: {
       assign: "Assigned", direct: "Sent to the direct lane", exclude: "Excluded",
       exclude_channel: "Channel excluded", done: "Done", commit: "GO applied",
-      lane_ack: "Acked", lane_done: "Done", lane_reroute: "Rerouted",
+      lane_ack: "Acked", lane_done: "Done", lane_reroute: "Rerouted", lane_wake: "Wake requested",
     },
     didAction: (name, count, lane) => name + (lane ? " (" + lane + ")" : "") + ": " + count + " item(s)",
     undoButton: (seconds) => "Undo (" + seconds + "s)",
@@ -46,7 +46,29 @@ const UI_TEXT = Object.freeze({
     undoResult: (c) => ["Restored " + c.restored, c.conflict ? "conflict " + c.conflict : null,
       c.not_found ? "not found " + c.not_found : null,
       c.wake_sent ? "wake already sent " + c.wake_sent : null,
+      c.wake_removed ? "wake requests removed " + c.wake_removed : null,
       c.binding_conflict ? "thread binding changed meanwhile, kept " + c.binding_conflict : null].filter(Boolean).join(", "),
+    sessionIs: (text) => "Session: " + text,
+    badgeNoSession: "no session",
+    badgePaused: "paused",
+    badgeSessionOff: "session off",
+    laneButtonTitle: (text) => "Session: " + text,
+    wakeNow: "Wake now",
+    wakeNowTitle: (assigned, acked) => "Re-deliver this lane's open items (assigned " + assigned + ", acked " + acked + ") and wake its session",
+    wakeItem: "Wake this item",
+    wakeItemTitle: "Re-deliver this item and wake the lane session",
+    wakeRefused: {
+      unregistered: "Lane is not in the ledger", paused: "Lane is paused", no_session: "Lane has no session",
+      not_live: "Lane session is not live", ambiguous: "Lane session id matches several live sessions",
+      wake_off: "Wakes are switched off (wake.off or wake_policy.enabled false)",
+    },
+    wakeQueued: (count) => "Wake requests: " + count,
+    wakeCapped: (count, total) => "woke the newest " + count + " of " + total + "; press again for the rest",
+    wakeAlreadyQueued: (count) => count + " already waiting for a wake",
+    dmBadge: "DM",
+    dmBadgeTitle: "Direct message: you are deciding which lane handles this person's DMs",
+    dmProposalsTitle: "DM scope proposals",
+    dmClaimsTitle: "DM claims",
     undoFailed: (detail) => "Undo failed: " + detail,
     laneHandled: "Handled",
     recentActions: "Recent actions",
@@ -223,7 +245,7 @@ const UI_TEXT = Object.freeze({
       scopeKey: "Key", name: "Name", evidence: "Evidence", firstSeen: "First seen", lastSeen: "Last seen",
       status: "Status", lanes: "Lanes", current: "Current default", actions: "Actions", by: "By",
       inConfig: "In config", confidence: "Tier", session: "Session",
-      action: "Action", items: "Items", actor: "By", undo: "Undo",
+      action: "Action", items: "Items", actor: "By", undo: "Undo", partner: "Partner",
     },
     yes: "yes",
     no: "no",
@@ -263,7 +285,7 @@ const UI_TEXT = Object.freeze({
     journalActions: {
       assign: "배정함", direct: "내가 처리로 보냄", exclude: "제외함",
       exclude_channel: "채널 제외함", done: "끝 처리함", commit: "GO 적용",
-      lane_ack: "확인함", lane_done: "끝 처리함", lane_reroute: "재배정함",
+      lane_ack: "확인함", lane_done: "끝 처리함", lane_reroute: "재배정함", lane_wake: "깨우기 요청",
     },
     didAction: (name, count, lane) => name + (lane ? " (" + lane + ")" : "") + " " + count + "건",
     undoButton: (seconds) => "되돌리기 (" + seconds + "초)",
@@ -271,7 +293,29 @@ const UI_TEXT = Object.freeze({
     undoResult: (c) => ["복구 " + c.restored + "건", c.conflict ? "충돌 " + c.conflict + "건" : null,
       c.not_found ? "원장에 없음 " + c.not_found + "건" : null,
       c.wake_sent ? "깨우기는 이미 나감 " + c.wake_sent + "건" : null,
+      c.wake_removed ? "깨우기 요청 취소 " + c.wake_removed + "건" : null,
       c.binding_conflict ? "스레드 바인딩이 그사이 바뀌어 유지 " + c.binding_conflict + "건" : null].filter(Boolean).join(", "),
+    sessionIs: (text) => "세션: " + text,
+    badgeNoSession: "세션 없음",
+    badgePaused: "일시 정지",
+    badgeSessionOff: "세션 꺼짐",
+    laneButtonTitle: (text) => "세션: " + text,
+    wakeNow: "지금 깨우기",
+    wakeNowTitle: (assigned, acked) => "이 레인의 열린 항목(배정 " + assigned + "건, 확인 " + acked + "건)을 다시 전달하고 세션을 깨움",
+    wakeItem: "이 항목 깨우기",
+    wakeItemTitle: "이 항목을 다시 전달하고 레인 세션을 깨움",
+    wakeRefused: {
+      unregistered: "원장에 없는 레인", paused: "레인이 일시 정지 상태", no_session: "레인에 세션 없음",
+      not_live: "레인 세션이 꺼져 있음", ambiguous: "세션 id가 살아 있는 세션 여러 개와 일치",
+      wake_off: "깨우기 꺼짐 (wake.off 또는 wake_policy.enabled false)",
+    },
+    wakeQueued: (count) => "깨우기 요청 " + count + "건",
+    wakeCapped: (count, total) => total + "건 중 최신 " + count + "건만 깨움. 나머지는 다시 누르기",
+    wakeAlreadyQueued: (count) => "이미 깨우기 대기 중 " + count + "건",
+    dmBadge: "DM",
+    dmBadgeTitle: "개인 DM: 이 사람의 DM을 어느 레인이 맡을지 정하는 중",
+    dmProposalsTitle: "DM 범위 제안",
+    dmClaimsTitle: "DM 소관 확정",
     undoFailed: (detail) => "되돌리기 실패: " + detail,
     laneHandled: "처리됨",
     recentActions: "최근 작업",
@@ -448,7 +492,7 @@ const UI_TEXT = Object.freeze({
       scopeKey: "키", name: "이름", evidence: "근거", firstSeen: "처음 확인", lastSeen: "마지막 확인",
       status: "상태", lanes: "레인", current: "현재 기본값", actions: "작업", by: "확정자",
       inConfig: "설정에 있음", confidence: "단계", session: "세션",
-      action: "작업 종류", items: "항목 수", actor: "실행자", undo: "되돌리기",
+      action: "작업 종류", items: "항목 수", actor: "실행자", undo: "되돌리기", partner: "상대",
     },
     yes: "예",
     no: "아니오",
@@ -477,6 +521,9 @@ const state = {
   previousView: "queue",
   registryClosed: [],
   ownerCard: null,
+  // P21: lane -> session identity (queue lane button titles) and the open lane's wake state.
+  laneSessions: {},
+  laneWake: null,
 };
 // P19 undo: the bottom toast of the latest immediate action or GO commit, and lane rows
 // that show "Handled · Undo" inline until their window ends (node -> entry).
@@ -559,6 +606,43 @@ function linkIcon(url) {
   if (!url) return null;
   return el("a", { className: "permalink", href: url, target: "_blank", rel: "noopener noreferrer",
     title: UI.openInSlack, "aria-label": UI.openInSlack, text: LINK_ICON });
+}
+
+// P21: a lane session as `<title> (<live name>, <id8>)`; without a title the live name or the
+// configured value leads. Null without a session value.
+function identityText(identity) {
+  if (!identity || !identity.value) return null;
+  const name = identity.live ? identity.name : null;
+  const head = identity.title || name || identity.value;
+  const inner = [name, identity.id8].filter((part) => part && part !== head);
+  return head + (inner.length ? " (" + inner.join(", ") + ")" : "");
+}
+
+// The badge for a session that cannot be woken now: no session, paused or off. Null when live.
+function identityBadge(identity) {
+  const state = identity ? identity.state : "no_session";
+  if (state === "no_session") return el("span", { className: "badge bad", text: UI.badgeNoSession });
+  if (state === "paused") return el("span", { className: "badge warn", text: UI.badgePaused });
+  if (!identity.live) return el("span", { className: "badge bad", text: UI.badgeSessionOff });
+  return null;
+}
+
+function identityLine(identity) {
+  const text = identityText(identity);
+  return el("span", { className: "session-identity", title: identity && identity.id ? identity.id : null },
+    el("span", { className: "dot" + (identity && identity.live ? " live" : "") }),
+    text ? UI.sessionIs(text) : null, " ", identityBadge(identity));
+}
+
+// The Wake now button of a lane (card or inbox header), disabled with the reason as tooltip.
+function wakeButton(lane, wake, extraClass) {
+  const allowed = Boolean(wake && wake.allowed);
+  const reason = wake && wake.reason ? (UI.wakeRefused[wake.reason] || wake.detail || wake.reason) : null;
+  const button = el("button", { className: "wake-now" + (extraClass ? " " + extraClass : ""), text: UI.wakeNow,
+    disabled: !allowed, title: allowed ? UI.wakeNowTitle(wake.assigned, wake.acked) : reason,
+    onclick: () => wakeLane(lane, null) });
+  // Some browsers show no tooltip on a disabled button; the wrapper carries the reason too.
+  return el("span", { className: "wake-wrap", title: allowed ? null : reason }, button);
 }
 
 function bodyBlock(text, truncated) {
@@ -741,6 +825,7 @@ async function loadQueue() {
     return loadQueue();
   }
   pruneStaged(data.pending_ids);
+  state.laneSessions = data.lane_sessions && typeof data.lane_sessions === "object" ? data.lane_sessions : {};
   state.registryClosed = Array.isArray(data.registry_closed) ? data.registry_closed : [];
   const registryAll = section.querySelector(".registry-all");
   registryAll.hidden = !state.registryClosed.length;
@@ -791,8 +876,19 @@ function renderQueue(list, items) {
     }
     paintCard(card);
     paintRegistry(card, item);
+    paintLaneTitles(card);
     if (card.node === ref) ref = ref.nextSibling;
     else list.insertBefore(card.node, ref);
+  }
+}
+
+// P21: each lane button's tooltip names the lane session (title, live name, id8).
+function paintLaneTitles(card) {
+  for (const entry of card.buttons) {
+    if (entry.action !== "assign") continue;
+    const text = identityText(state.laneSessions[entry.lane]);
+    if (text) entry.node.title = UI.laneButtonTitle(text);
+    else entry.node.removeAttribute("title");
   }
 }
 
@@ -812,6 +908,7 @@ function queueCard(item) {
     el("strong", { title: c.when, text: item.when || item.ts }),
     linkIcon(item.permalink),
     el("span", { title: c.channel + ": " + item.channel.id, text: channelText(item.channel) }),
+    item.is_dm ? el("span", { className: "badge dm", title: UI.dmBadgeTitle, text: UI.dmBadge }) : null,
     item.not_member ? el("span", { className: "badge warn", title: UI.notMemberTitle, text: UI.notMember }) : null,
     el("span", { title: c.author + ": " + (item.author.id || ""), text: named(item.author) }),
     item.attention ? el("span", { className: "badge attention", title: c.attention, text: UI.attention(item.attention) }) : null,
@@ -1002,7 +1099,9 @@ function ownerPanel(data, onPick) {
     row.lane && onPick && state.config.lanes.includes(row.lane)
       ? el("button", { text: row.lane, title: UI.ownerPick(row.lane), onclick: () => onPick(row.lane) })
       : (row.lane || (row.session ? "session:" + row.session : UI.none)),
-    row.session, row.source, row.evidence])));
+    // P21: the sessions table title next to the session (only with console.sessions_table).
+    row.session && row.session_title ? row.session + " (" + row.session_title + ")" : row.session,
+    row.source, row.evidence])));
   return parts;
 }
 
@@ -1191,7 +1290,8 @@ async function loadLanes() {
 function laneCard(card) {
   const session = card.session;
   const rows = [
-    [UI.session, el("span", {},
+    // P21: the session by its title, live name and id8, or a no session / paused / off badge.
+    [UI.session, card.identity ? identityLine(card.identity) : el("span", {},
       el("span", { className: "dot" + (session.live ? " live" : "") }),
       session.value ? session.value + " " + UI.addressedBy(session.addressed_by) + " " + (session.live ? UI.live : UI.notLive) : UI.noSession)],
     [UI.today, UI.todayCounts(card.today)],
@@ -1207,7 +1307,8 @@ function laneCard(card) {
       card.paused ? el("span", { className: "badge warn", text: UI.paused }) : null,
       card.registered ? null : el("span", { className: "badge bad", text: UI.unregistered })),
     el("dl", { className: "kv small" }, rows.map(([key, value]) => [el("dt", { text: key }), el("dd", {}, value)])),
-    el("div", { className: "actions" }, el("button", { className: "primary", text: UI.openInbox, onclick: () => openLane(card.lane) })));
+    el("div", { className: "actions" }, el("button", { className: "primary", text: UI.openInbox, onclick: () => openLane(card.lane) }),
+      card.wake ? wakeButton(card.lane, card.wake) : null));
 }
 
 function openLane(lane) {
@@ -1233,12 +1334,16 @@ async function loadLaneInbox(force) {
     return;
   }
   if (state.lane !== lane) return;
+  state.laneWake = data.wake || null;
   const section = clear(laneSection());
   const full = el("input", { type: "checkbox", onchange: (event) => { state.laneFull = event.target.checked; loadLaneInbox(true); } });
   full.checked = state.laneFull;
   section.append(el("div", { className: "toolbar lane-inbox" },
     el("button", { text: UI.back, onclick: () => { state.lane = null; loadLanes(); } }),
     el("strong", { text: UI.laneInbox(lane) }),
+    // P21: the lane session identity and Wake now in the header.
+    data.identity ? identityLine(data.identity) : null,
+    data.wake ? wakeButton(lane, data.wake) : null,
     el("span", { className: "muted small", text: UI.refreshed(nowText()) }),
     el("span", { className: "spacer" }),
     el("label", { className: "small" }, full, " " + UI.fullRoots),
@@ -1309,8 +1414,40 @@ function laneActions(lane, id, channel, ts) {
     el("span", { className: "muted small", text: UI.rerouteTo }),
     target,
     el("button", { text: UI.reroute, onclick: () => laneAction(lane, "reroute", id, { lane: target.value }, row) }),
-    findOwner);
+    findOwner,
+    wakeItemButton(lane, id));
   return [row, ownerBox];
+}
+
+// P21: wake the lane session for this one item; disabled with the reason while refused.
+function wakeItemButton(lane, id) {
+  const wake = state.laneWake;
+  if (!wake) return null;
+  const reason = wake.reason ? (UI.wakeRefused[wake.reason] || wake.detail || wake.reason) : null;
+  return el("span", { className: "wake-wrap", title: wake.allowed ? null : reason },
+    el("button", { className: "link wake-item", text: UI.wakeItem, disabled: !wake.allowed,
+      title: wake.allowed ? UI.wakeItemTitle : reason, onclick: () => wakeLane(lane, [id]) }));
+}
+
+// P21: POST /api/lanes/{lane}/wake; the toast offers the P19 undo (removes unconsumed requests).
+async function wakeLane(lane, ids) {
+  let data;
+  try {
+    data = await api("/api/lanes/" + encodeURIComponent(lane) + "/wake", ids ? { ids } : {});
+  } catch (error) {
+    status(error.message, true);
+    return;
+  }
+  const failed = (data.results || []).filter((row) => !row.ok);
+  if (failed.length) {
+    status(UI.actionFailed(failed.length, failed.map((row) => row.id + " " + row.error + (row.detail ? " (" + row.detail + ")" : "")).join("; ")), true);
+  } else {
+    status([UI.wakeQueued(data.queued), data.capped ? UI.wakeCapped(data.queued, data.total) : null,
+      data.already_queued ? UI.wakeAlreadyQueued(data.already_queued) : null].filter(Boolean).join(" / "));
+  }
+  showUndoToast([data.undo]);
+  if (state.view === "lanes" && state.lane) loadLaneInbox(true);
+  else if (state.view === "lanes") loadLanes();
 }
 
 async function laneAction(lane, action, id, extra, row) {
@@ -1346,7 +1483,9 @@ function showUndoToast(infos) {
   const last = list[list.length - 1];
   const count = list.reduce((total, info) => total + (info.count || 0), 0);
   const name = UI.journalActions[last.action] || last.action;
-  undoState.toast = { ids: list.map((info) => info.action_id), text: UI.didAction(name, count, last.lane),
+  // P21: a lane wake reads "Wake requests: N" (`깨우기 요청 N건`).
+  const text = last.action === "lane_wake" ? UI.wakeQueued(count) : UI.didAction(name, count, last.lane);
+  undoState.toast = { ids: list.map((info) => info.action_id), text,
     deadline: Date.now() + (last.seconds_left || 0) * 1000, message: null, messageUntil: 0, button: null };
   renderToast();
   startUndoTicker();
@@ -1429,7 +1568,7 @@ async function undoActions(ids) {
   if (undoState.busy || !ids || !ids.length) return;
   undoState.busy = true;
   renderToast();
-  const totals = { restored: 0, conflict: 0, not_found: 0, wake_sent: 0, binding_conflict: 0 };
+  const totals = { restored: 0, conflict: 0, not_found: 0, wake_sent: 0, wake_removed: 0, binding_conflict: 0 };
   let failure = null;
   for (const id of ids.slice().reverse()) {
     try {
@@ -1579,31 +1718,44 @@ async function loadProposals() {
     if (!state.ownerCard) state.ownerCard = ownerLookupCard();
     section.append(state.ownerCard);
   }
+  // P21: DM proposals and DM claims are listed under their own headings with the partner name.
+  const isDm = (row) => row.kind === "dm";
+  const partnerName = (row) => row.partner && row.partner.id ? nameSpan(row.partner) : UI.none;
+  const proposalTable = (rows, dm) => table([c.kind, c.scopeKey, c.name].concat(dm ? [c.partner] : [],
+    [c.lane, c.evidence, c.status, c.lanes, c.current, c.firstSeen, c.lastSeen, c.actions]), rows.map((row) => [
+    row.kind, el("span", { className: "mono", text: row.key }), scopeName(row.name)].concat(dm ? [partnerName(row)] : [], [
+    row.lane, row.evidence_count,
+    el("span", {}, row.status,
+      row.conflict ? el("span", { className: "badge bad", text: UI.conflict }) : null,
+      row.effective ? el("span", { className: "badge ok", text: UI.effective }) : null,
+      row.imported ? el("span", { className: "badge", text: UI.imported }) : null),
+    row.lanes.map((item) => item.lane + " " + item.evidence_count).join(", "),
+    row.current ? UI.current(row.current.lane === null ? UI.none : row.current.lane, row.current.source) : UI.none,
+    row.first_seen, row.last_seen,
+    el("span", {}, ["confirm", "reject", "defer"].map((action) =>
+      el("button", { text: UI[action], onclick: () => proposalAction(action, row) })))])));
   const list = el("article", { className: "card" });
+  const others = data.proposals.filter((row) => !isDm(row));
+  const dmRows = data.proposals.filter(isDm);
   if (!data.proposals.length) {
     list.append(el("div", { className: "muted", text: UI.proposalsEmpty }));
   } else {
-    list.append(table([c.kind, c.scopeKey, c.name, c.lane, c.evidence, c.status, c.lanes, c.current,
-      c.firstSeen, c.lastSeen, c.actions], data.proposals.map((row) => [
-      row.kind, el("span", { className: "mono", text: row.key }), scopeName(row.name), row.lane, row.evidence_count,
-      el("span", {}, row.status,
-        row.conflict ? el("span", { className: "badge bad", text: UI.conflict }) : null,
-        row.effective ? el("span", { className: "badge ok", text: UI.effective }) : null,
-        row.imported ? el("span", { className: "badge", text: UI.imported }) : null),
-      row.lanes.map((item) => item.lane + " " + item.evidence_count).join(", "),
-      row.current ? UI.current(row.current.lane === null ? UI.none : row.current.lane, row.current.source) : UI.none,
-      row.first_seen, row.last_seen,
-      el("span", {}, ["confirm", "reject", "defer"].map((action) =>
-        el("button", { text: UI[action], onclick: () => proposalAction(action, row) })))])));
+    if (others.length) list.append(proposalTable(others, false));
+    if (dmRows.length) list.append(el("h2", { text: UI.dmProposalsTitle }), proposalTable(dmRows, true));
   }
   section.append(list);
   const learned = el("article", { className: "card" }, el("h2", { text: UI.learnedTitle }));
+  const learnedTable = (rows, dm) => table([c.kind, c.scopeKey, c.name].concat(dm ? [c.partner] : [],
+    [c.lane, c.by, c.at, c.inConfig]), rows.map((row) =>
+    [row.kind, el("span", { className: "mono", text: row.key }), scopeName(row.name)].concat(dm ? [partnerName(row)] : [],
+      [row.lane, row.confirmed_by, row.confirmed_at, yesNo(row.in_config)])));
   if (!data.learned.length) {
     learned.append(el("div", { className: "muted", text: UI.learnedEmpty }));
   } else {
-    learned.append(table([c.kind, c.scopeKey, c.name, c.lane, c.by, c.at, c.inConfig], data.learned.map((row) =>
-      [row.kind, el("span", { className: "mono", text: row.key }), scopeName(row.name), row.lane, row.confirmed_by,
-        row.confirmed_at, yesNo(row.in_config)])));
+    const plain = data.learned.filter((row) => !isDm(row));
+    const dmClaims = data.learned.filter(isDm);
+    if (plain.length) learned.append(learnedTable(plain, false));
+    if (dmClaims.length) learned.append(el("h2", { text: UI.dmClaimsTitle }), learnedTable(dmClaims, true));
   }
   const output = el("pre", { className: "mono", hidden: true });
   learned.append(el("div", { className: "toolbar" },
@@ -1763,7 +1915,10 @@ function deliveryFilters() {
 
 function deliveryTarget(row) {
   if (row.target) {
-    return el("span", {}, row.target.name || UI.none,
+    // P21: the sessions table title leads when known (only with console.sessions_table).
+    return el("span", { title: row.target.session_id || null },
+      row.target.title ? el("span", { className: "session-title", text: row.target.title + " " }) : null,
+      row.target.name || UI.none,
       row.target.short_id ? el("span", { className: "mono muted", text: " " + row.target.short_id }) : null);
   }
   if (row.adapter && row.adapter !== "session_message") return el("span", { className: "muted", text: row.adapter });

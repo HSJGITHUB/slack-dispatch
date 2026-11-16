@@ -149,6 +149,9 @@ class Console:
     # P20: Slack workspace subdomain for message permalinks
     # (`https://<workspace_domain>.slack.com/archives/...`); None hides the links.
     workspace_domain: str | None = None
+    # P21: optional Markdown sessions table (`| last used | state | title | size |
+    # `claude --resume <uuid>` |` rows) that names lane sessions by their title; None = off.
+    sessions_table: str | None = None
 
 
 @dataclass(frozen=True)

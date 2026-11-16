@@ -5,6 +5,28 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P21 lane sessions and wake now
+- Optional `console.sessions_table`: a Markdown table (`| last used | state | title | size |
+  `claude --resume <uuid>` |`) read only and cached by mtime. `SessionResolver.describe`
+  returns the session's title, live name, id8, liveness and state without logging.
+- Console Lanes cards and the lane inbox header show `Session: <title> (<live name>, <id8>)`
+  or a `no session`, `paused` or `session off` badge; queue lane buttons get the session in a
+  tooltip; Deliveries targets and owner candidates show the title (only with the table, so
+  payload shapes are unchanged without it).
+- Wake now: `POST /api/lanes/{lane}/wake` (`{ids?}`, default every assigned and acked item)
+  writes a `backfill` inbox record and a wake request per item, journaled as `lane_wake` so
+  P19 undo removes unconsumed requests; refused (409) while the lane is paused, has no live
+  session or wakes are off. Lane header `Wake now` and per-row `Wake this item` buttons;
+  inbox CLI `wake LANE [IDS...] [--json]` with the same rules.
+- fix1: `wake_requests.kind` (`assign` default, `wake_now`) lets the service wake acked items
+  for Wake now only (`Pipeline.wake_now_ids` carries debounced ones through the flush). The
+  default selection wakes the newest 20 items (`capped`, `total`), skips items with a pending
+  request (`already_queued`), writes a `backfill` record only once per item, and the undo
+  journal keeps the pre-wake snapshot.
+- DM items: queue rows of `im` conversations show a `DM` badge; the Scope tab lists DM
+  proposals and DM claims under their own headings with the partner's display name. Routing
+  is unchanged; docs describe the `scope add --dm` proposal and Scope tab confirmation.
+
 ### P20 display names and permalinks
 - One name resolver, `console.queries.DisplayNames`: users by config `people`, then the
   ledger `user_directory.name`, then the id; channels by `console.channels`, then the ledger

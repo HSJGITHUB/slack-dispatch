@@ -51,6 +51,7 @@ console:
   ui_language: en         # en (default) or ko: the language of the page
   undo_seconds: 30        # P19 undo window, at least 10
   workspace_domain: null  # P20 Slack subdomain for message permalinks
+  sessions_table: null    # P21 Markdown sessions table path (session titles), read only
   channels:               # channel id -> display name, console only
     C0000000001: dummy-support
 ```
@@ -581,3 +582,120 @@ the migration time. Readers take the earlier of that value and the first row.
 `legacy_deliveries` is counted only for an empty window, honours the lane filter, and is 0 for
 the human_queue purpose or lane and for status filters other than `sent` (the old record holds
 lane wakes that were sent, one row per thread and lane with its latest time).
+
+## P21 lane sessions and wake now
+
+### Session identity
+
+The operator knows a session by the title the IDE session list shows, not by its id. An
+optional Markdown table supplies that title:
+
+```yaml
+console:
+  sessions_table: dummy/state/SESSIONS.md   # null (default): no titles
+```
+
+The file is only read. Rows of the form
+
+```text
+| <last used> | <state> | <title> | <size> | `claude --resume <uuid>` |
+```
+
+are indexed by session id (lower case); a lookup takes the full id or a prefix that matches
+exactly one row. Header, separator and malformed rows (fewer than five cells, a last cell
+that is not a resume command with an id of at least 8 hex characters) are skipped; the
+first row of an id wins; `\|` inside a title is kept as `|`. The file is parsed again only
+when its modification time or size changes. A missing, unreadable or oversized (over 4 MiB)
+file reads as an empty table.
+
+`SessionResolver(sessions_dir, sessions_table=path)` (`notify.session_resolve`) adds
+`title(value)` and `describe(value, paused=False)`, which returns `{id8, id, value,
+addressed_by, name, live, title, state, table_state}` from the live session files and the
+table, without logging and without touching the per-lane state the service uses. `name` is
+the live session name (null when not live), `title` the table title (null without a row),
+`state` one of `no_session`, `paused`, `live`, `not_live` or `ambiguous` (an id prefix that
+matches several live sessions), `table_state` the table's state cell and `id8` the first 8
+characters of the session id when known (a name-addressed session gets its id from the one
+live session with that name).
+
+Payloads:
+
+- `GET /api/lanes`: each card adds `identity` (the `describe` result for the effective
+  session and pause) and `wake` (`{allowed, reason, detail, assigned, acked}`, below). The
+  P10 `session` object is unchanged.
+- `GET /api/lanes/{lane}/inbox`: adds `identity` and `wake` for the lane header.
+- `GET /api/queue`: adds `lane_sessions` (`{lane: identity}`) for the lane button tooltips.
+- With `sessions_table` set only: Deliveries targets add `title`, and `GET /api/owner`
+  candidates add `session_title`. Without it both payloads keep their P18 and P17 shapes.
+
+Page: the Lanes cards and the lane inbox header show `Session: <title> (<live name>, <id8>)`
+(`세션: ...` in `ko`; the title is replaced by the live name or the configured value when the
+table has no row) and a badge when the session cannot be woken: `no session` (`세션 없음`),
+`paused` (`일시 정지`) or `session off` (`세션 꺼짐`, not live or ambiguous). Queue lane
+buttons get a `title` tooltip with the same text. Deliveries rows show the title before the
+session name, and owner candidates show it after the session.
+
+### Wake now
+
+`POST /api/lanes/{lane}/wake` with `{}` or `{"ids": [...]}` (1 to 200 ids) re-delivers lane
+items and asks the service to wake the lane session for them now:
+
+- Without `ids`: the newest 20 items (by message ts) the lane owns in state `assigned` or
+  `acked`, except deleted messages, context rows and owner posts (fix1). `capped` is true
+  when more were eligible and `total` says how many; pressing again wakes the next ones,
+  since items whose wake request is not consumed yet are skipped and counted in
+  `already_queued`. With `ids`: each id must be such an item of this lane, else its result
+  is `not_found`, `conflict` (`owned by lane X`, `state is X`, `message deleted`) or
+  `not_inbox_item`; an id that still has an unconsumed wake request is reported `ok` with
+  detail `already_queued` and not queued again; the other ids still go through.
+- Each woken item gets one `wake_requests` row (source `console`, kind `wake_now`) and a
+  `backfill` record in the lane inbox, unless the inbox file already holds a `backfill`
+  record for it (`records_written`, `records_skipped`); message rows do not change. The
+  service turns the requests into wake offers within about five seconds (SERVICE.md).
+- Refused with 409 and a reason when the lane is paused (`Lane is paused`), has no session
+  value (`Lane has no session`), its session is not live (`Lane session is not live`) or an
+  id prefix matches several live sessions, or wakes are switched off (`wake.off` or
+  `wake_policy.enabled: false`), since the service would drop the request. An unknown lane
+  is 400, a lane missing from the ledger 404.
+- The response is `{lane, queued, assigned, acked, total, capped, already_queued,
+  records_written, records_skipped, results, wake_requests, undo, journal}`. One journal row
+  (P19) with action `lane_wake`, `by` = `console`, the woken ids, `before` snapshots taken
+  before the wake (fix1), `after` snapshots and `meta.wake_requests`. Undo within
+  `console.undo_seconds` removes the unconsumed wake requests (`wake_removed`) and reports
+  `wake_sent` for consumed ones; it writes back the pre-wake snapshot of each id whose state
+  and lane did not change and reports the others as `conflict`. The inbox records stay (the
+  item is still the lane's).
+
+Acked items (fix1): the ledger column `wake_requests.kind` (`assign` by default for every
+P12 request, `wake_now` for Wake now and the CLI `wake`) lets the service offer a `wake_now`
+request for an item in state `assigned` or `acked`; `assign` requests keep the P12
+assigned-only rule. A `wake_now` id that waits in the wake engine (debounce or storm batch)
+is kept in the pipeline's in-memory `wake_now_ids` set, so the flush still sends it while
+acked; it leaves the set once that wake was sent or dropped. Other acked deliveries (retries,
+earlier deferred wakes) are not revived.
+
+Page: the lane card and the lane inbox header have `Wake now` (`지금 깨우기`); when refused
+the button is disabled and its tooltip names the reason. Each lane row has `Wake this item`
+(`이 항목 깨우기`). The toast shows `Wake requests: N` (`깨우기 요청 N건`) with the P19 undo,
+and the status line adds the cap and the already waiting count when they apply;
+Recent actions list the row as `Wake requested` (`깨우기 요청`). The `Ack` button still only
+marks an item as read.
+
+The inbox CLI `wake LANE [IDS...] [--json]` applies the same rules (INBOX.md).
+
+### DM items in the queue
+
+Routing is unchanged. A direct message that no rule places (no thread binding, confirmed
+claim, tag, DM default or person rule; see ROUTING.md) reaches the human queue like any
+other unrouted message, with the owner resolver or classifier suggestion when one is
+enabled. Lanes propose DM scope with
+`scope add <lane> --dm D...`; the proposal appears in the Scope tab, and confirming it there
+writes the confirmed claim that routes later DMs of that conversation to the lane.
+
+- Queue items carry `is_dm` (channel type `im`) and the row shows a `DM` badge, so the
+  operator sees that the decision picks the lane for a person's direct messages.
+- `GET /api/proposals` adds `partner` (`{id, name}`, the `channel_membership` partner of the
+  DM, named through `people` and `user_directory`; null for channel and person keys) to
+  proposals and learned rows. The Scope tab lists DM proposals under `DM scope proposals`
+  (`DM 범위 제안`) and confirmed DM claims under `DM claims` (`DM 소관 확정`), each with a
+  Partner column.

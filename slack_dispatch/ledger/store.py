@@ -52,6 +52,8 @@ CONSOLE_ACTIONS_DDL = """CREATE TABLE IF NOT EXISTS console_actions (
 CONSOLE_ACTION_COLUMNS = {"at": "TEXT", "action": "TEXT", "ids": "TEXT", "before": "TEXT",
                           "after": "TEXT", "by": "TEXT", "undo_until": "TEXT",
                           "undone_at": "TEXT", "result": "TEXT", "meta": "TEXT"}
+# P21 fix1: wake_requests.kind values.
+WAKE_KIND_ASSIGN, WAKE_KIND_NOW = "assign", "wake_now"
 SNAPSHOT_FIELDS = ("state", "lane", "note", "done_at", "ack_at", "assigned_at", "route_reason")
 OPEN_STATES = ("new", "assigned", "acked", "human_pending")
 # P20: when the delivery log started, stored once at migration as a `cursors` row (the
@@ -153,6 +155,12 @@ class LedgerStore:
             db.execute("""CREATE TABLE IF NOT EXISTS wake_requests (
                 id INTEGER PRIMARY KEY, lane TEXT, message_id TEXT, requested_at TEXT,
                 source TEXT, consumed_at TEXT)""")
+            # P21 fix1: what queued the request, `assign` (P12 assign, reroute, card) or
+            # `wake_now` (console Wake now, CLI wake), which may also wake an acked item.
+            present = {r[1] for r in db.execute("PRAGMA table_info(wake_requests)")}
+            if "kind" not in present:
+                db.execute("ALTER TABLE wake_requests ADD COLUMN kind TEXT NOT NULL "
+                           f"DEFAULT '{WAKE_KIND_ASSIGN}'")
             # P15: membership cache and console channel exclusions (additive).
             db.execute("""CREATE TABLE IF NOT EXISTS channel_membership (
                 channel TEXT PRIMARY KEY, kind TEXT, name TEXT, partner_user TEXT,
@@ -469,11 +477,20 @@ class LedgerStore:
                           (source, channel, thread_ts, lane))
         return rows[0]["delivered_at"] if rows else None
 
-    def request_wake(self, lane, message_id, source):
-        """Queue one lane wake for a delivered message; the service consumes it."""
+    def request_wake(self, lane, message_id, source, kind=None):
+        """Queue one lane wake for a delivered message; the service consumes it.
+
+        P21 fix1: `kind` is `assign` (default) or `wake_now`."""
         with self._transaction() as db:
-            return db.execute("INSERT INTO wake_requests (lane, message_id, requested_at, source) "
-                              "VALUES (?, ?, ?, ?)", (lane, message_id, now(), source)).lastrowid
+            return db.execute("INSERT INTO wake_requests (lane, message_id, requested_at, source, kind) "
+                              "VALUES (?, ?, ?, ?, ?)",
+                              (lane, message_id, now(), source, kind or WAKE_KIND_ASSIGN)).lastrowid
+
+    def pending_wake_ids(self, lane):
+        """Message ids of the lane with an unconsumed wake request (P21 fix1)."""
+        return {row["message_id"] for row in self._rows(
+            "SELECT DISTINCT message_id FROM wake_requests WHERE lane=? AND consumed_at IS NULL",
+            (lane,))}
 
     def pending_wake_requests(self, limit=500):
         return self._rows("SELECT * FROM wake_requests WHERE consumed_at IS NULL "

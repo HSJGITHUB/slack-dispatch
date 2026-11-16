@@ -19,9 +19,9 @@ from slack_dispatch.ingest.normalize import TIMESTAMP, message_body, safe
 from slack_dispatch.ingest.slack_reconcile import SlackReconcileSource
 from slack_dispatch.ingest.slack_socket import SlackSocketSource
 from slack_dispatch.ingest.user_directory import UserDirectory
-from slack_dispatch.ledger.store import LedgerStore
+from slack_dispatch.ledger.store import WAKE_KIND_NOW, LedgerStore
 from slack_dispatch.notify import DEFAULT_STATE_DIR, build_notifiers, wake_dirs_differ, wake_switch_path
-from slack_dispatch.notify.wake import Deliver, WakePolicyEngine
+from slack_dispatch.notify.wake import Batch, Defer, Deliver, WakePolicyEngine
 from slack_dispatch.pipeline import Pipeline
 from slack_dispatch.router.classifier import AnthropicSuggester, NullSuggester
 from slack_dispatch.runtime import (
@@ -202,22 +202,39 @@ def consume_wake_requests(pipeline, store):
     decisions. Each distinct (lane, message id) gets one `wake_engine.offer`, so the
     socket debounce and storm rules apply; only messages still assigned to that lane are
     offered. Every request row read is marked consumed, duplicates included.
+
+    P21 fix1: a request of kind `wake_now` (console Wake now, CLI `wake`) also offers an
+    item in state `acked`. Such ids go into `pipeline.wake_now_ids` while their wake is
+    pending (debounce or storm batch), so the flush lets them through, and leave it once
+    the wake was sent or dropped. Requests of kind `assign` keep the assigned-only rule.
     """
     rows = store.pending_wake_requests()
-    groups = {}
+    groups, wake_now = {}, set()
     for row in rows:
-        groups.setdefault((row["lane"], row["message_id"]), []).append(row["id"])
+        key = (row["lane"], row["message_id"])
+        groups.setdefault(key, []).append(row["id"])
+        if row.get("kind") == WAKE_KIND_NOW:
+            wake_now.add(key)
+    marked = getattr(pipeline, "wake_now_ids", None)
     offered = 0
     with pipeline.lock:
         for (lane, message_id), ids in groups.items():
             message = store.get_message(message_id) if lane and message_id else None
-            if message and message.get("lane") == lane and message["state"] == "assigned":
+            states = ("assigned", "acked") if (lane, message_id) in wake_now else ("assigned",)
+            if message and message.get("lane") == lane and message["state"] in states:
+                now_wake = (lane, message_id) in wake_now and marked is not None
+                if now_wake:
+                    marked.add(message_id)
                 wake = pipeline.wake_engine.offer(lane, message, message.get("author"))
                 if isinstance(wake, Deliver):
                     pipeline._send("lane", lane, [message_id], inbox=False)
                 if getattr(wake, "notice", None) is not None:
                     pipeline._human_notice(message_id, kind="storm")
                     pipeline.wake_engine.notices.clear()
+                # Keep the mark only while the wake waits in the engine (debounce or batch).
+                if now_wake and not (isinstance(wake, (Defer, Batch))
+                                     and getattr(wake, "reason", "debounce") != "disabled"):
+                    marked.discard(message_id)
                 offered += 1
             store.consume_wake_requests(ids)
     return offered

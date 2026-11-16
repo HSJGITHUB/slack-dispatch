@@ -480,3 +480,50 @@ All additive; the schema version stays 2 and no table changes.
   reason`); spaces become `_` (fix1).
 - Config: optional `console.workspace_domain` (Slack subdomain, default null) and
   `user_directory.resolve_names` (bool, default true).
+
+## P21 lane sessions and wake now
+
+All additive; the schema version stays 2 and no table changes.
+
+- Config: optional `console.sessions_table` (non-empty string path, default null).
+- `slack_dispatch.notify.session_resolve`: `parse_sessions_table(text)` returns `{session id
+  (lower case): {id, title, state, last_used, size}}`; `SessionTable(path)` with `rows()`
+  (parsed again only when mtime or size changes; missing, unreadable or over
+  `TABLE_MAX_BYTES` reads empty), `lookup(value)` (full id or unique prefix) and `parses`;
+  `RESUME_CELL`, `NO_SESSION`, `PAUSED`. `SessionResolver(..., sessions_table=None)` (a
+  path or a `SessionTable`, kept as `table`) adds `title(value)` and `describe(value, *,
+  paused=False)` returning `{id8, id, value, addressed_by, name, live, title, state,
+  table_state}`; `describe` neither logs nor changes `lane_state`, `resolved` or the
+  skipped counter. The service and its adapters are unchanged (no table).
+- `slack_dispatch.console.queries`: `session_identity(resolver, session, paused=False)`,
+  `session_titles(resolver)` (None without a table), `wake_refusal(config, store, resolver,
+  lane)` returning `(code, reason)` or None with codes `unregistered`, `paused`,
+  `no_session`, `not_live`, `ambiguous`, `wake_off` (`WAKE_REFUSALS`),
+  `lane_wake_info(config, store, resolver, lane)`, `lane_identities(store, config,
+  resolver)`, `dm_partner(view, kind, key)`. `lane_card` adds `identity` and `wake`;
+  `queue_item` adds `is_dm`; proposals and learned rows add `partner`;
+  `owner_lookup(..., titles=None)` adds `session_title` per candidate and
+  `deliveries_page(..., titles=None)` / `delivery_row(..., titles=None)` add `target.title`,
+  both only when `titles` is given.
+- Console HTTP: `POST /api/lanes/{lane}/wake` (`{ids?}`, 1 to 200 ids; 400 unknown lane, 404
+  lane not in the ledger, 409 refused with the reason as `detail`); `GET /api/lanes/{lane}/inbox`
+  adds `identity` and `wake`; `GET /api/queue` adds `lane_sessions`.
+- `slack_dispatch.inbox.cli`: `wake_candidates(store, lane)`, `wake_check(store, lane, id)`,
+  `wake_lane(store, root, lane, ids=None, *, source, undo_seconds=30, now=None)` returning
+  `{lane, queued, assigned, acked, results, wake_requests, undo, journal}`,
+  `journal_wake(...)`, `wake_text(result)`, `wake_command(...)`; command `wake LANE [IDS...]
+  [--json]`; `WAKE_STATES`, `WAKE_ACTION = "lane_wake"`, `WAKE_CLOCK`, `DEFAULT_UNDO_SECONDS`.
+- Journal: action `lane_wake`, `by` `console` or `cli`, `before` equal to `after`, `meta`
+  `{lane, wake_requests, channel_exclusions: []}`; undone by the unchanged
+  `LedgerStore.undo_console_action`.
+- fix1: `wake_requests` gains `kind TEXT NOT NULL DEFAULT 'assign'` (added by `migrate()`;
+  `WAKE_KIND_ASSIGN`, `WAKE_KIND_NOW = "wake_now"`). `LedgerStore.request_wake(lane,
+  message_id, source, kind=None)` and `pending_wake_ids(lane)`. `service.consume_wake_requests`
+  offers a `wake_now` request for an `assigned` or `acked` item and keeps the id in
+  `Pipeline.wake_now_ids` (memory) while its wake is deferred or batched; `assign` requests
+  stay assigned-only. `Pipeline._current_ids` lets an acked lane id through only while it is
+  in `wake_now_ids`; `Pipeline.flush` drops each flushed batch from the set.
+- fix1: `wake_lane(..., limit=None)` (default `WAKE_LIMIT = 20`, newest first) adds `total`,
+  `capped`, `already_queued`, `records_written` and `records_skipped`; explicit ids with a
+  pending request are `ok` with detail `already_queued`. `backfilled_ids(root, lane, ids)`;
+  `journal_wake(..., before=None)` stores the pre-wake snapshots as `before`.

@@ -447,9 +447,14 @@ def console_section(value, lane_ids):
     if domain is not None and (not isinstance(domain, str)
                                or not re.fullmatch(WORKSPACE_DOMAIN, domain)):
         raise ConfigError("console.workspace_domain must be a Slack workspace subdomain")
+    # P21: optional path of the Markdown sessions table (session titles); null = off.
+    table = data.get("sessions_table")
+    if table is not None:
+        table = string(table, "console.sessions_table")
     return Console(host=host, port=port, base_url=base_url, page_size=page_size,
                    lane_hint_people=hint, direct_lane=direct, channels=channels,
-                   ui_language=language, undo_seconds=undo, workspace_domain=domain)
+                   ui_language=language, undo_seconds=undo, workspace_domain=domain,
+                   sessions_table=table)
 
 
 def timezone_name(value):
