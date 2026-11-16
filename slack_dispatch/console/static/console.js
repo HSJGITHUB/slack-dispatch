@@ -25,6 +25,16 @@ const UI_TEXT = Object.freeze({
     learnedEmpty: "No confirmed scope overrides in the ledger.",
     exportButton: "Export YAML",
     exportHint: "Merge into the instance config; the ledger override is already in effect.",
+    excludeChannel: "Exclude channel",
+    excludeChannelTitle: "Exclude every post from this channel: closes its open items and stops routing it (undo in the Scope tab)",
+    notMember: "not a member",
+    notMemberTitle: "The membership cache says you are not a member of this channel",
+    channelExcluded: (channel, count) => "Channel " + channel + " excluded; " + count + " open item(s) closed. Undo in the Scope tab",
+    exclusionsTitle: "Excluded channels (ledger)",
+    exclusionsEmpty: "No channel exclusions in the ledger.",
+    exportExclusions: "Export excluded_channels YAML",
+    undo: "Undo",
+    undoDone: (channel) => "Channel exclusion ended: " + channel,
     searchPlaceholder: "Search id, channel, author or text",
     searchButton: "Search",
     loading: "Loading...",
@@ -170,6 +180,16 @@ const UI_TEXT = Object.freeze({
     learnedEmpty: "원장에 확정된 범위 재정의가 없음.",
     exportButton: "YAML 내보내기",
     exportHint: "인스턴스 설정에 병합. 원장 재정의는 이미 적용 중.",
+    excludeChannel: "채널 제외",
+    excludeChannelTitle: "이 채널 글을 모두 제외: 열린 항목을 닫고 라우팅을 멈춤 (범위 탭에서 되돌리기)",
+    notMember: "미가입 채널",
+    notMemberTitle: "멤버십 캐시 기준 내가 가입하지 않은 채널",
+    channelExcluded: (channel, count) => "채널 " + channel + " 제외됨, 열린 항목 " + count + "건 닫음. 범위 탭에서 되돌리기",
+    exclusionsTitle: "제외된 채널(원장)",
+    exclusionsEmpty: "원장에 채널 제외 없음.",
+    exportExclusions: "excluded_channels YAML 내보내기",
+    undo: "되돌리기",
+    undoDone: (channel) => "채널 제외 해제: " + channel,
     searchPlaceholder: "id, 채널, 작성자, 본문 검색",
     searchButton: "검색",
     loading: "불러오는 중...",
@@ -300,7 +320,7 @@ const UI_TEXT = Object.freeze({
 let UI = UI_TEXT.en;
 
 const VIEWS = { "/": "queue", "/lanes": "lanes", "/service": "service", "/proposals": "proposals" };
-const QUEUE_ACTIONS = ["assign", "direct", "exclude", "done"];
+const QUEUE_ACTIONS = ["assign", "direct", "exclude", "exclude_channel", "done"];
 // Staged triage decisions survive polling and reloads (P14); per-viewer browser storage.
 const STAGE_KEY = "slack-dispatch.console.staged.v1";
 const MAX_COMMIT = 200;
@@ -475,6 +495,7 @@ function sameDecision(decision, action, lane) {
 
 function decisionLabel(decision) {
   if (decision.action === "assign") return UI.assign + " " + decision.lane;
+  if (decision.action === "exclude_channel") return UI.excludeChannel;
   return UI[decision.action];
 }
 
@@ -603,6 +624,7 @@ function queueCard(item) {
     chip,
     el("strong", { title: c.when, text: item.when || item.ts }),
     el("span", { title: c.channel + ": " + item.channel.id, text: "#" + named(item.channel) }),
+    item.not_member ? el("span", { className: "badge warn", title: UI.notMemberTitle, text: UI.notMember }) : null,
     el("span", { title: c.author + ": " + (item.author.id || ""), text: named(item.author) }),
     item.attention ? el("span", { className: "badge attention", title: c.attention, text: UI.attention(item.attention) }) : null,
     item.is_reply ? el("span", { className: "badge", text: UI.reply }) : null,
@@ -664,6 +686,7 @@ function queueCard(item) {
     laneButtons,
     state.config.direct_lane ? button("direct", null, { text: UI.direct, title: UI.directTitle(state.config.direct_lane) }) : null,
     button("exclude", null, { className: "danger", text: UI.exclude }),
+    button("exclude_channel", null, { className: "danger", text: UI.excludeChannel, title: UI.excludeChannelTitle }),
     note,
     button("done", null, { text: UI.done }),
     el("span", { className: "spacer" }),
@@ -782,7 +805,8 @@ async function applyNowRow(id) {
   }
   settle(data.results.map((row) => ({ id: row.id, action: request.action, status: row.ok ? "applied"
     : (row.error === "conflict" || row.error === "not_found" ? row.error : "error"),
-    detail: row.detail || (row.ok ? null : row.error), channel_hint: row.channel_hint, channel: row.channel })));
+    detail: row.detail || (row.ok ? null : row.error), channel_hint: row.channel_hint, channel: row.channel,
+    closed: row.closed })));
   loadQueue();
 }
 
@@ -815,6 +839,11 @@ function showCommitResults(results) {
   for (const row of results.filter((item) => item.status !== "applied")) {
     box.append(el("div", { className: "commit-line " + row.status },
       el("span", { className: "mono", text: row.id }), " ", UI.outcome(row.status, row.detail)));
+  }
+  for (const row of results.filter((item) => item.status === "applied" && item.action === "exclude_channel")) {
+    box.append(el("div", { className: "channel-hint" },
+      UI.channelExcluded("#" + named(row.channel), row.closed || 0) + " ",
+      el("a", { href: "/proposals", text: UI.openScope, onclick: (event) => { event.preventDefault(); showView("proposals", true); } })));
   }
   const hinted = results.filter((row) => row.status === "applied" && row.channel_hint);
   if (hinted.length) {
@@ -1126,6 +1155,48 @@ async function loadProposals() {
     el("button", { text: UI.exportButton, onclick: () => exportScope(output) }),
     el("span", { className: "muted small", text: UI.exportHint })), output);
   section.append(learned);
+  section.append(exclusionsCard(data.channel_exclusions || []));
+}
+
+// P15: ledger channel exclusions written by the triage `Exclude channel` action.
+function exclusionsCard(rows) {
+  const c = UI.columns;
+  const card = el("article", { className: "card" }, el("h2", { text: UI.exclusionsTitle }));
+  if (!rows.length) {
+    card.append(el("div", { className: "muted", text: UI.exclusionsEmpty }));
+  } else {
+    card.append(table([c.channel, c.name, c.by, c.at, c.inConfig, c.actions], rows.map((row) =>
+      [el("span", { className: "mono", text: row.channel }), row.name, row.by, row.excluded_at,
+        yesNo(row.in_config), el("button", { text: UI.undo, onclick: () => undoExclusion(row.channel) })])));
+  }
+  const output = el("pre", { className: "mono", hidden: true });
+  card.append(el("div", { className: "toolbar" },
+    el("button", { text: UI.exportExclusions, onclick: () => exportExclusions(output) }),
+    el("span", { className: "muted small", text: UI.exportHint })), output);
+  return card;
+}
+
+async function undoExclusion(channel) {
+  try {
+    await api("/api/channel-exclusions/undo", { channel });
+  } catch (error) {
+    status(error.message, true);
+    return;
+  }
+  status(UI.undoDone(channel));
+  loadProposals();
+}
+
+async function exportExclusions(output) {
+  let data;
+  try {
+    data = await api("/api/channel-exclusions/export");
+  } catch (error) {
+    status(error.message, true);
+    return;
+  }
+  output.textContent = data.yaml;
+  output.hidden = false;
 }
 
 async function proposalAction(action, row) {

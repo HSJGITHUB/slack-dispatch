@@ -28,7 +28,7 @@ PAGES = ("/", "/lanes", "/service", "/proposals")
 
 
 class QueueActionRequest(BaseModel):
-    action: Literal["assign", "direct", "exclude", "done"]
+    action: Literal["assign", "direct", "exclude", "exclude_channel", "done"]
     ids: list[str] = Field(min_length=1, max_length=actions.MAX_IDS)
     lane: str | None = Field(default=None, max_length=100)
     note: str | None = Field(default=None, max_length=2000)
@@ -37,7 +37,7 @@ class QueueActionRequest(BaseModel):
 class CommitDecision(BaseModel):
     """One staged triage decision (P14)."""
     id: str = Field(min_length=1, max_length=500)
-    action: Literal["assign", "direct", "exclude", "done"]
+    action: Literal["assign", "direct", "exclude", "exclude_channel", "done"]
     lane: str | None = Field(default=None, max_length=100)
     note: str | None = Field(default=None, max_length=2000)
 
@@ -53,6 +53,11 @@ class ProposalActionRequest(BaseModel):
     kind: Literal["channel", "dm", "person"]
     key: str = Field(min_length=1, max_length=100)
     lane: str = Field(min_length=1, max_length=100)
+
+
+class ChannelExclusionRequest(BaseModel):
+    """P15: undo the ledger exclusion of one channel."""
+    channel: str = Field(min_length=1, max_length=100, pattern=r"^[A-Z][A-Z0-9]{1,63}$")
 
 
 class LaneActionRequest(BaseModel):
@@ -195,7 +200,16 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
         if request.action == "exclude":
             for result in results:
                 add_channel_hint(result, result["ok"])
+        if request.action == "exclude_channel":
+            for result in results:
+                add_excluded_channel(result, result["ok"])
         return summary(results, lane)
+
+    def add_excluded_channel(row, applied):
+        """P15: name the channel an applied exclude_channel closed."""
+        message = store.get_message(row["id"]) if applied else None
+        if message:
+            row["channel"] = view.channel(message["channel"])
 
     def add_channel_hint(row, applied):
         """P14: flag an applied exclude whose channel has no lane default."""
@@ -250,6 +264,9 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
                        detail=result["detail"] or (result["error"] if status == "error" else None))
             if decision.action == "exclude":
                 add_channel_hint(row, row["status"] == "applied")
+            if decision.action == "exclude_channel":
+                row["closed"] = result.get("closed", 0)
+                add_excluded_channel(row, row["status"] == "applied")
         counts = {name: sum(row["status"] == name for row in results)
                   for name in actions.COMMIT_STATUSES}
         return {"results": results, "counts": counts}
@@ -308,6 +325,17 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None):
     @app.get("/api/proposals/export")
     def proposal_export():
         return {"yaml": queries.export_yaml(store, config, view)}
+
+    @app.post("/api/channel-exclusions/undo")
+    def channel_exclusion_undo(request: ChannelExclusionRequest):
+        """P15: end the ledger exclusion; items it closed stay excluded."""
+        if not store.remove_channel_exclusion(request.channel):
+            raise HTTPException(404, "No active channel exclusion")
+        return {"channel": request.channel, "removed": True}
+
+    @app.get("/api/channel-exclusions/export")
+    def channel_exclusion_export():
+        return {"yaml": queries.export_exclusions_yaml(store, config, view)}
 
     app.add_middleware(ConsoleMiddleware, hosts=allowed_hosts(config, host))
     return app

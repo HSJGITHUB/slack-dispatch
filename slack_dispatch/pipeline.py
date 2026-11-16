@@ -1,5 +1,5 @@
 """Service orchestration with transient routing text and metadata-only delivery."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from collections import Counter
 import logging
@@ -8,6 +8,7 @@ import threading
 import sys
 from urllib.parse import quote
 
+from slack_dispatch.ingest.membership import NOT_MEMBER
 from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
 from slack_dispatch.notify.dispatch_card import card_wanted
@@ -196,6 +197,16 @@ class HumanQueueDelivery:
         return sent
 
 
+def routing_config(config, store):
+    """`config` with the store's active channel exclusions added to `excluded_channels` (P15)."""
+    lookup = getattr(store, "channel_exclusion_ids", None)
+    extra = lookup() if callable(lookup) else ()
+    added = sorted(set(extra) - set(config.excluded_channels))
+    if not added:
+        return config
+    return replace(config, excluded_channels=tuple(config.excluded_channels) + tuple(added))
+
+
 @dataclass(frozen=True)
 class HandleResult:
     message_id: str | None
@@ -215,6 +226,9 @@ class Pipeline:
         self.counters = dict(events=0, routed=0, human_pending=0, delivered=0, failures=0,
                              duplicates=0, prehandled=0, hydrated=0)
         self.reconcile_source = None
+        # P15: optional MembershipCache; the service sets it when membership is enabled.
+        self.membership = None
+        self.excluded_not_member = 0
         self.last_event_at = None
         self._missing_human_logged = False
         self._retry = {}
@@ -243,6 +257,8 @@ class Pipeline:
                 # Session wakes skipped because the configured id was not live.
                 result["wake_skipped_no_session"] = sum(
                     resolver.skipped_no_session for resolver in resolvers)
+            if self.membership is not None:
+                result.update(self.membership.snapshot(), excluded_not_member=self.excluded_not_member)
             return result
 
     def _thread_key(self, message, lane):
@@ -339,6 +355,12 @@ class Pipeline:
         message = self.store.get_message(mid) if mid else None
         if message is None or event.get("subtype") == "message_deleted":
             return HandleResult(mid, recorded.kind)
+        if self.membership is not None and self.membership.excludes(
+                event.get("channel"), event.get("channel_type") or message.get("channel_type")):
+            # P15 member-only gate: recorded, never routed, queued or counted as human_pending.
+            self.store.set_state(mid, "excluded", note=NOT_MEMBER)
+            self.excluded_not_member += int(event.get("channel") not in self.config.excluded_channels)
+            return HandleResult(mid, recorded.kind, state="excluded")
         self._hydrate(event)
         owner = self.config.always_human.owner_user
         note = None
@@ -365,7 +387,7 @@ class Pipeline:
         if "text" in event:
             message["text"] = event["text"]
         message["is_bot"] = event["is_bot"]
-        decision = route(message, self.config, self.store.lookup_binding)
+        decision = route(message, self.routing_config(), self.store.lookup_binding)
         outcome = apply_decision(self.store, mid, decision, self.suggester)
         self.counters["routed"] += 1
         backfill = False
@@ -425,7 +447,7 @@ class Pipeline:
         thread = event.get("thread_ts")
         if source is None or not thread or thread == event.get("ts"):
             return
-        if event["channel"] in self.config.excluded_channels:
+        if event["channel"] in self.routing_config().excluded_channels:
             return
         if self.store.get_message(f"slack:{event['channel']}:{thread}"):
             return
@@ -437,6 +459,14 @@ class Pipeline:
                 self.record_context(root)
         except Exception:
             self.failure("hydrate_root")
+
+    def routing_config(self):
+        """Config for routing: config `excluded_channels` plus the ledger channel exclusions.
+
+        P15 console `Exclude channel` rows are read at runtime, so `route` treats them exactly
+        like `excluded_channels` without a YAML edit. Stores without the lookup add nothing.
+        """
+        return routing_config(self.config, self.store)
 
     def _human_notice(self, mid, kind="message", attention=None):
         row = self.store.get_message(mid)

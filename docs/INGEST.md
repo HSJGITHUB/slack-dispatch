@@ -175,3 +175,61 @@ the process lifetime with one INFO line naming the root id. Roots in
 Owner signals default to posts=record, reactions_done=[white_check_mark,
 heavy_check_mark], reactions_ack=[eyes], under `owner_signals`. See ROUTING.md.
 Service gap health uses `service.gap_alert_seconds: 300`; see SERVICE.md.
+
+## P15 member-only intake
+
+A user-scoped Socket Mode connection also delivers events from public channels the
+operator is not a member of (for example a workflow posting on a teammate's behalf).
+`slack_dispatch/ingest/membership.py` keeps the operator's member channels so those
+events never reach routing.
+
+`MembershipCache(client, store, refresh_seconds=3600)` calls `users.conversations` with
+types `public_channel,private_channel,mpim,im` (paginated, 200 per page, archived
+excluded) and stores the result in the ledger table `channel_membership(channel PK, kind,
+name, partner_user, is_member, seen_at)`. `kind` is `public_channel`, `private_channel`,
+`mpim` or `im`; `partner_user` is the other user of a DM. A channel no longer listed
+keeps its row with `is_member=0`. `client` is a Slack client or a callable returning
+one: the service passes the reconcile source's read-only client (`users.conversations`
+is on the reconcile allowlist), so no second token is loaded. Construction makes no
+request; a refresh without a client is skipped.
+
+Refresh runs at the start of the first reconcile pass after service start, then every
+`membership.refresh_seconds` (the reconcile pass and the service loop both ask; one
+refresh runs at a time). The previous run's table is loaded at once. A refresh failure
+keeps the previous table and in-memory set and logs one WARNING line with the
+exception class and Slack error code only. A successful response with no channels
+counts as a failure: the previous table and in-memory set stay, with one WARNING
+`membership refresh returned no channels; keeping previous table`. The cache becomes
+available when it first holds member channels (one INFO line); then the
+`channel_defaults` keys (excluded channels skipped) that are not member channels are
+reported once per process in one WARNING summary line
+`N configured channels are not member channels: id1, id2, ... (first 5)`. Such
+channels are treated per policy.
+
+```yaml
+membership:
+  enabled: true          # default true
+  refresh_seconds: 3600  # positive integer
+  policy: exclude        # exclude (default) or off
+```
+
+Policy `exclude`: an event from a channel that is not a member channel is recorded
+(event dedup and the message row as usual), then set to state `excluded` with note
+`excluded:not_member`. It is never routed, queued, delivered or counted as
+`human_pending`, and no thread root is fetched for it. DM and group DM channels in the
+cache are member channels; a DM or group DM not yet in the cache (channel type `im` or
+`mpim`, or a `D` id) is also treated as a member, because user-scoped events for direct
+conversations reach participants only. While the cache has never loaded (first start
+before the first refresh succeeds) every channel keeps today's behaviour. Policy `off`
+keeps today's routing; the cache still refreshes for the console badge and discovery.
+`enabled: false` builds no cache. Without a reconcile source there is no client, so the
+cache never loads and routing is unchanged.
+
+Reconcile reads member channels only: the scan set (ledger channels plus discovered
+channels, minus `excluded_channels` and the ledger channel exclusions) drops channels
+the policy excludes. With the cache enabled, `discover_channels` takes the member
+channels from the cache instead of calling `conversations.list`.
+
+Heartbeat counters gain `member_channels` (member channels in the cache) and
+`excluded_not_member` (events excluded by the gate since start, not counting channels
+already in the config `excluded_channels`, which stay blocked) when the cache exists.

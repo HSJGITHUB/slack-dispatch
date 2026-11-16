@@ -161,6 +161,15 @@ class ScopeLearning:
 
 
 @dataclass(frozen=True)
+class Membership:
+    """Member-only intake (P15): `policy` is `exclude` (events from channels the operator
+    is not a member of are excluded) or `off`."""
+    enabled: bool = True
+    refresh_seconds: int = 3600
+    policy: str = "exclude"
+
+
+@dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
     channel_defaults: dict[str, str | None]
@@ -193,3 +202,5 @@ class Config:
     decisions: Decisions = field(default_factory=Decisions)
     # Optional scope learning section (P13).
     scope_learning: ScopeLearning = field(default_factory=ScopeLearning)
+    # Optional membership section (P15).
+    membership: Membership = field(default_factory=Membership)

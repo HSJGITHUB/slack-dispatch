@@ -285,3 +285,31 @@ deploy\windows\install_console_task.ps1 -Python C:\demo\python\pythonw.exe -Work
 The task runs `pythonw.exe -X utf8 -B -m slack_dispatch.console --config <config>`.
 The default task name is `SlackDispatchConsole`. A second instance cannot bind the
 port and exits, so the minute trigger only restarts a stopped console.
+
+## P15 channel exclusion and membership badge
+
+Triage rows have an `Exclude channel` button (a Korean label in `ko`), staged like the other
+decisions (action `exclude_channel` in `POST /api/queue/commit` and `POST
+/api/queue/actions`, same `human_pending` guard). Applying it:
+
+- writes a ledger row `channel_exclusions(id, channel, excluded_at, by, removed_at)` with
+  `by` = `console` (one active row per channel), which the router honours at once like
+  `excluded_channels` (see ROUTING.md);
+- moves every open item of the channel (`new`, `assigned`, `acked`, `human_pending`; the
+  clicked one included) to `excluded` with note `human:console:channel`.
+
+The result carries `closed` (items moved) and `channel` (`{id, name}`); the page shows one
+line naming the channel with a link to the Scope tab. A second staged row of the same
+channel then reports `conflict` (its item was already closed).
+
+A row shows the `not a member` badge (Korean label in `ko`) when the ledger table
+`channel_membership` holds member channels and the item's channel is not one of them
+(DMs and group DMs never get it). With an empty table no badge is shown.
+
+The Scope tab adds an `Excluded channels (ledger)` card under Learned scope: channel,
+name, by, when, whether the config already excludes it, and an `Undo` button (`POST
+/api/channel-exclusions/undo` with `{"channel"}`; 404 without an active exclusion). Undo
+ends the override only: items it closed stay `excluded`. The export button (`GET
+/api/channel-exclusions/export`, `{"yaml"}`) returns an `excluded_channels` list: the
+config entries plus the ledger ones (marked `# ledger`), to replace the config key. The
+exclude follow-through hint is not shown for a channel the ledger already excludes.

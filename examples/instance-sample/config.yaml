@@ -174,3 +174,11 @@ decisions:
 # suggested after min_evidence consistent events. Nothing is promoted automatically.
 scope_learning:
   min_evidence: 2
+# Optional member-only intake (P15). The service reads users.conversations through the
+# reconcile client into the ledger table channel_membership at start and every
+# refresh_seconds. policy exclude records events from channels the operator is not a
+# member of as excluded (excluded:not_member), never routed or queued; off keeps them.
+membership:
+  enabled: true
+  refresh_seconds: 3600
+  policy: exclude

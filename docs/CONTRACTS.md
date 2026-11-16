@@ -273,3 +273,27 @@ ones to `decisions/rejected/`; rejection codes are `json`, `keys`, `schema`,
 `file_name`, `hmac`, `decided_by`, `already_decided`, `unknown_message`,
 `not_inbox_item`, `closed`, `direct_lane`, `lane` and `lane_not_found`.
 
+## P15 membership filter
+
+All additive; the schema version stays 2.
+
+- Ledger tables created by `migrate()`: `channel_membership(channel PK, kind, name,
+  partner_user, is_member, seen_at)` and `channel_exclusions(id, channel, excluded_at, by,
+  removed_at)`.
+- `LedgerStore` adds `replace_membership(rows, seen_at)`, `list_membership()`,
+  `add_channel_exclusion(channel, by)`, `remove_channel_exclusion(channel)`,
+  `list_channel_exclusions(*, include_removed=False)`, `channel_exclusion_ids()` and
+  `close_channel_items(channel, note, *, source="slack")`.
+- `slack_dispatch.ingest.membership`: `MembershipCache(client, store, refresh_seconds=3600,
+  *, policy, clock, configured_channels)` with `load`, `refresh`, `maybe_refresh`,
+  `is_member`, `excludes`, `member_channels`, `snapshot`; `member_status`, `NOT_MEMBER`
+  (`excluded:not_member`). `users.conversations` joins the reconcile read allowlist.
+- `SlackReconcileSource.membership` (optional cache) and `scan_channels(channels)`.
+  `Pipeline.membership` (optional cache), `Pipeline.routing_config()` and
+  `pipeline.routing_config(config, store)`; `service.build_membership(config, store,
+  sources, clock)`. `route()` itself is unchanged.
+- Heartbeat counters `member_channels` and `excluded_not_member` when the cache exists.
+- Config: optional `membership: {enabled: true, refresh_seconds: 3600, policy: exclude|off}`.
+- Console: queue action `exclude_channel` (result `closed`, `channel`), queue item
+  `not_member`, `GET /api/proposals` adds `channel_exclusions`,
+  `POST /api/channel-exclusions/undo`, `GET /api/channel-exclusions/export`.

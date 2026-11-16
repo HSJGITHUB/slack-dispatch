@@ -14,14 +14,19 @@ Since P13 `assign` and `reroute` also point the message's thread binding at the 
 so later replies follow it, and record scope learning evidence (a `scope_proposals` row):
 every reroute to another lane, and an assignment of an item that was `human_pending`.
 Card decisions use `assign` and share both behaviours.
+
+Since P15 `exclude_channel` (console only, no CLI command) writes a ledger channel
+exclusion that the router reads at runtime like `excluded_channels`, and moves every open
+item of the channel to `excluded` with note `human:console:channel`.
 """
 from slack_dispatch.inbox.files import append, record, validate_lane
 from slack_dispatch.router.apply import record_scope_proposal
 
 REASON = "human:console"
+CHANNEL_REASON = "human:console:channel"
 MAX_IDS = 200
 
-QUEUE_ACTIONS = ("assign", "direct", "exclude", "done")
+QUEUE_ACTIONS = ("assign", "direct", "exclude", "exclude_channel", "done")
 LANE_ACTIONS = ("ack", "done", "reroute")
 # P14 staged queue decisions: one commit status per decision.
 COMMIT_STATUSES = ("applied", "conflict", "not_found", "error")
@@ -143,6 +148,18 @@ def exclude(store, message_id, *, reason=REASON):
     return message
 
 
+def exclude_channel(store, message_id, *, by="console"):
+    """P15 `Exclude channel`: record the ledger channel exclusion of the message's channel
+    and move every open item of that channel (this one included) to `excluded` with note
+    `human:console:channel`. Returns the number of items closed."""
+    message = _message(store, message_id)
+    channel = message.get("channel")
+    if not channel:
+        raise ActionError("invalid", "message has no channel")
+    store.add_channel_exclusion(channel, by)
+    return store.close_channel_items(channel, CHANNEL_REASON, source=message.get("source") or "slack")
+
+
 def queue_guard(message):
     """Triage actions apply only to items still waiting in the human queue."""
     if message["state"] != "human_pending":
@@ -169,6 +186,7 @@ def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, m
     """
     results = []
     for message_id in dict.fromkeys(ids):
+        extra = {}
         try:
             message = store.get_message(message_id)
             if message is None:
@@ -181,6 +199,8 @@ def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, m
                 reroute(store, inbox_root, message_id, lane, min_evidence=min_evidence)
             elif action == "exclude":
                 exclude(store, message_id)
+            elif action == "exclude_channel":
+                extra["closed"] = exclude_channel(store, message_id)
             elif action == "done":
                 done(store, message_id, note=note or REASON)
             elif action == "ack":
@@ -197,7 +217,7 @@ def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, m
             # Mirror the CLI: report the id, keep going, never echo exception text.
             results.append(dict(id=message_id, ok=False, error="failed", detail=None))
             continue
-        results.append(dict(id=message_id, ok=True, error=None, detail=None))
+        results.append(dict(id=message_id, ok=True, error=None, detail=None, **extra))
     return results
 
 

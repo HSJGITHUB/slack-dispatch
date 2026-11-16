@@ -84,6 +84,13 @@ class LedgerStore:
             db.execute("""CREATE TABLE IF NOT EXISTS wake_requests (
                 id INTEGER PRIMARY KEY, lane TEXT, message_id TEXT, requested_at TEXT,
                 source TEXT, consumed_at TEXT)""")
+            # P15: membership cache and console channel exclusions (additive).
+            db.execute("""CREATE TABLE IF NOT EXISTS channel_membership (
+                channel TEXT PRIMARY KEY, kind TEXT, name TEXT, partner_user TEXT,
+                is_member INTEGER, seen_at TEXT)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS channel_exclusions (
+                id INTEGER PRIMARY KEY, channel TEXT NOT NULL, excluded_at TEXT, by TEXT,
+                removed_at TEXT)""")
             if not versions:
                 db.execute("INSERT INTO schema_version(version) VALUES (2)")
             elif versions == [1]:
@@ -580,6 +587,61 @@ class LedgerStore:
     def list_sends(self, lane=None):
         return self._rows("SELECT * FROM sends WHERE (? IS NULL OR lane=?) "
                           "ORDER BY recorded_at, channel, ts", (lane, lane))
+
+    # P15 membership cache and channel exclusions.
+
+    def replace_membership(self, rows, seen_at):
+        """Store one users.conversations result: listed rows become members (seen_at
+        updated); rows no longer listed keep their name with is_member=0."""
+        with self._transaction() as db:
+            db.execute("UPDATE channel_membership SET is_member=0")
+            for row in rows:
+                db.execute("""INSERT INTO channel_membership VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(channel) DO UPDATE SET kind=excluded.kind, name=excluded.name,
+                    partner_user=excluded.partner_user, is_member=excluded.is_member,
+                    seen_at=excluded.seen_at""",
+                           (row["channel"], row.get("kind"), row.get("name"), row.get("partner_user"),
+                            int(bool(row.get("is_member", 1))), seen_at))
+
+    def list_membership(self):
+        if not self.has_table("channel_membership"):
+            return []
+        return self._rows("SELECT * FROM channel_membership ORDER BY channel")
+
+    def add_channel_exclusion(self, channel, by):
+        """Record an active ledger exclusion for the channel. False when one is already active."""
+        with self._transaction() as db:
+            if db.execute("SELECT 1 FROM channel_exclusions WHERE channel=? AND removed_at IS NULL",
+                          (channel,)).fetchone():
+                return False
+            db.execute("INSERT INTO channel_exclusions (channel, excluded_at, by) VALUES (?, ?, ?)",
+                       (channel, now(), by))
+            return True
+
+    def remove_channel_exclusion(self, channel):
+        """Undo: mark the active exclusion removed (rows are never deleted). False when none."""
+        with self._transaction() as db:
+            return db.execute("UPDATE channel_exclusions SET removed_at=? WHERE channel=? "
+                              "AND removed_at IS NULL", (now(), channel)).rowcount > 0
+
+    def list_channel_exclusions(self, *, include_removed=False):
+        if not self.has_table("channel_exclusions"):
+            return []
+        query = "SELECT * FROM channel_exclusions"
+        if not include_removed:
+            query += " WHERE removed_at IS NULL"
+        return self._rows(query + " ORDER BY channel, id")
+
+    def channel_exclusion_ids(self):
+        """Channels with an active ledger exclusion: the router reads them like excluded_channels."""
+        return {row["channel"] for row in self.list_channel_exclusions()}
+
+    def close_channel_items(self, channel, note, *, source="slack"):
+        """Move every open item (new, assigned, acked, human_pending) of a channel to excluded."""
+        with self._transaction() as db:
+            return db.execute("UPDATE messages SET state='excluded', note=? WHERE source=? AND channel=? "
+                              "AND state IN ('new', 'assigned', 'acked', 'human_pending')",
+                              (note, source, channel)).rowcount
 
 
 def _numeric(ts):

@@ -202,3 +202,18 @@ ScopeClaim is inactive for them.
 `assign` and `reroute` (CLI, console and card decisions) point the message's thread
 binding (thread_ts, else ts) at the new lane, overriding an earlier binding, so later
 replies follow the item (first-day defect, 2026-11-13).
+
+## P15 membership gate and ledger channel exclusions
+
+Before routing, the pipeline applies the membership gate (see INGEST.md): under
+`membership.policy: exclude` with a loaded cache, a message from a channel that is not
+a member channel is set to `excluded` with note `excluded:not_member`; `route` is not
+called and nothing is queued or delivered.
+
+Ledger channel exclusions (`channel_exclusions`, written by the console `Exclude
+channel` action) are read at runtime: the pipeline passes `route` a config whose
+`excluded_channels` is the config list plus every active ledger exclusion
+(`pipeline.routing_config(config, store)`), so they behave exactly like
+`excluded_channels`: precedence 1, rule `excluded`, note `excluded`, no attention, no
+root hydration, and reconcile does not scan them. No YAML edit is needed and the
+override survives restarts; `undo` ends it. Stores without the lookup add nothing.

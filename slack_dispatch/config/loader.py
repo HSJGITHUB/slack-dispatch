@@ -6,7 +6,7 @@ import yaml
 
 from .schema import (
     AlwaysHuman, BotMessages, Classifier, Config, Console, Decisions, HumanQueue, Inbox, Lane,
-    LedgerConfig, NotifyAdapter, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
+    LedgerConfig, Membership, NotifyAdapter, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
     SourceConfig, Timers, WakePolicy,
 )
 
@@ -264,13 +264,31 @@ def parse_config(raw):
     console = console_section(data.get("console", {}), ids)
     decisions = decisions_section(data.get("decisions", {}))
     learning = scope_learning_section(data.get("scope_learning", {}))
+    membership = membership_section(data.get("membership", {}))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
                   explicit_tag_pattern=pattern, inbox=inbox, service=service,
                   human_queue=queue, bot_messages=bots, owner_signals=signals,
                   sessions_dir=sessions_dir, people=people, display_timezone=zone,
-                  console=console, decisions=decisions, scope_learning=learning)
+                  console=console, decisions=decisions, scope_learning=learning,
+                  membership=membership)
+
+
+MEMBERSHIP_POLICIES = ("exclude", "off")
+
+
+def membership_section(value):
+    """Optional `membership` map (P15): enabled (default true), refresh_seconds (positive,
+    default 3600) and policy (`exclude` default, or `off`)."""
+    data = mapping({} if value is None else value, "membership")
+    policy = data.get("policy", Membership.policy)
+    if policy not in MEMBERSHIP_POLICIES:
+        raise ConfigError("membership.policy must be one of: " + ", ".join(MEMBERSHIP_POLICIES))
+    return Membership(enabled=boolean(data.get("enabled", Membership.enabled), "membership.enabled"),
+                      refresh_seconds=positive(data.get("refresh_seconds", Membership.refresh_seconds),
+                                               "membership.refresh_seconds"),
+                      policy=policy)
 
 
 def scope_learning_section(value):

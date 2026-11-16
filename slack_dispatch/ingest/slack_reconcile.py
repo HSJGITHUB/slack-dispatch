@@ -18,7 +18,8 @@ PERMANENT_REPLY_ERRORS = frozenset({"thread_not_found", "channel_not_found", "no
                                     "message_not_found", "is_archived"})
 
 READ_METHODS = frozenset({"conversations.history", "conversations.replies",
-                          "conversations.info", "conversations.list", "auth.test"})
+                          "conversations.info", "conversations.list", "auth.test",
+                          "users.conversations"})
 
 
 class SlackReconcileSource:
@@ -53,6 +54,8 @@ class SlackReconcileSource:
         self.skipped_parents = {}
         self._permanent_warned = set()  # parents already reported once at WARNING
         self.summary = {}
+        # P15: optional MembershipCache; refreshed when due at the start of each pass.
+        self.membership = None
 
     def _call(self, method, **params):
         if method not in READ_METHODS:
@@ -85,7 +88,12 @@ class SlackReconcileSource:
                                 duplicates=0, prehandled=0, failures=0, thread_candidates=0,
                                 thread_skipped_age=0, backfill=0, permanent_skipped=0)
             self._pass_started = self.clock()
-            if self.config.discover_channels and (self._last_discovery is None
+            if self.membership is not None:
+                self.membership.maybe_refresh()
+            if self.config.discover_channels and self.membership is not None:
+                # P15: discovery reads the membership cache instead of conversations.list.
+                self._discovered.update(self.membership.member_channels() - self.excluded_channels)
+            elif self.config.discover_channels and (self._last_discovery is None
                     or self.clock() - self._last_discovery >= 6 * 3600):
                 try:
                     self._discover_channels()
@@ -102,8 +110,8 @@ class SlackReconcileSource:
                 except Exception as error:
                     self.failures += 1
                     LOG.info("Hydration failed class=%s", type(error).__name__)
-            channels = set(self.store.list_channels("slack")) | self._discovered
-            for channel in sorted(channels - self.excluded_channels):
+            channels = self.scan_channels(set(self.store.list_channels("slack")) | self._discovered)
+            for channel in sorted(channels):
                 if self._stop.is_set():
                     break
                 if safe(channel, IDENTIFIER) is None:
@@ -125,6 +133,16 @@ class SlackReconcileSource:
                      *(self.summary[key] for key in ("channels", "roots", "parents", "replies", "hydrated",
                                                      "duplicates", "prehandled", "failures", "thread_candidates",
                                                      "thread_skipped_age", "permanent_skipped", "backfill")))
+
+    def scan_channels(self, channels):
+        """The channels a pass reads: config and ledger exclusions removed and, under the
+        membership policy `exclude` with a loaded cache, member channels only (P15)."""
+        lookup = getattr(self.store, "channel_exclusion_ids", None)
+        excluded = self.excluded_channels | (lookup() if callable(lookup) else set())
+        channels = set(channels) - excluded
+        if self.membership is not None:
+            channels = {channel for channel in channels if not self.membership.excludes(channel)}
+        return channels
 
     @staticmethod
     def _log_failure(channel, error):

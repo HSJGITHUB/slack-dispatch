@@ -5,6 +5,21 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P15 membership filter
+- Member-only intake: `membership.py` caches `users.conversations` (paginated, through the
+  reconcile client) in the ledger table `channel_membership`, refreshed at start and every
+  `membership.refresh_seconds`. Under `membership.policy: exclude` (default) events from
+  channels the operator is not a member of are recorded as `excluded`
+  (`excluded:not_member`) and never routed or queued; `off` keeps today's routing. A
+  failed refresh keeps the previous table; an empty cache keeps today's behaviour.
+  Configured channels that are not member channels are reported once at startup.
+- Reconcile scans member channels only and `discover_channels` reads the cache instead of
+  `conversations.list`. Heartbeat counters `member_channels` and `excluded_not_member`.
+- Console: `Exclude channel` closes every open item of the channel and writes a
+  `channel_exclusions` ledger override that routing honours like `excluded_channels`;
+  the Scope tab lists them with undo and an `excluded_channels` YAML export. Queue rows
+  show a `not a member` badge (both with Korean labels in `ko`).
+
 ### P14 console staging
 - Triage decisions are staged, not applied: a click marks the row (chip, highlighted
   button; a second click unstages), and one sticky `GO (N)` applies every staged

@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from slack_dispatch.inbox.cli import display_zone, show_inbox
+from slack_dispatch.ingest.membership import member_status
 from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.notify import effective_lane, wake_switch_path
 from slack_dispatch.notify.session_resolve import is_session_id
@@ -176,12 +177,28 @@ def author_hints(store, config, row, cache):
     return [dict(hint) for hint in cache[key]]
 
 
-def queue_item(store, config, view, row, now, hints=None):
+def membership_view(store):
+    """(member channel ids, loaded) from the ledger table `channel_membership` (P15)."""
+    lookup = getattr(store, "list_membership", None)
+    rows = lookup() if callable(lookup) else []
+    members = {row["channel"] for row in rows if row["is_member"]}
+    return members, bool(members)
+
+
+def not_member(row, membership):
+    """True when the membership cache says the item's channel is not a member channel."""
+    members, loaded = membership
+    return member_status(row.get("channel"), members, loaded, row.get("channel_type")) is False
+
+
+def queue_item(store, config, view, row, now, hints=None, membership=None):
     """One triage item: metadata, full body, thread root and recent thread context.
 
     `hints` caches author lane hints per page (pending items own no lane, so the
-    author's lane history is the same for each of their items).
+    author's lane history is the same for each of their items). `membership` is
+    `membership_view(store)`, read once per page (P15 `not_member` badge).
     """
+    membership = membership_view(store) if membership is None else membership
     full = store.get_message(row["id"], include_body=True) or dict(row)
     root_ts = row.get("thread_ts") or row["ts"]
     is_reply = root_ts != row["ts"]
@@ -210,6 +227,7 @@ def queue_item(store, config, view, row, now, hints=None):
             "is_bot": bool(row.get("is_bot")), "has_files": bool(row.get("has_files")),
             "edited": bool(row.get("edited_at")), "followup": bool(row.get("followup")),
             "state": row["state"], "pending_reason": row.get("note"),
+            "not_member": not_member(row, membership),
             "suggestion": suggestion, "hints": author_hints(store, config, row, hints),
             "is_reply": is_reply, "body": full.get("body"), "root": root,
             "context": context, "thread_size": len(thread)}
@@ -222,10 +240,11 @@ def queue_page(store, config, view, now, *, offset=0, limit=None):
     rows.sort(key=lambda row: (ts_key(row["ts"]), row["id"]), reverse=True)
     page = rows[offset:offset + limit]
     hints = {}
+    membership = membership_view(store)
     # P14: every pending id (all pages), so the page can drop staged ids that left the queue.
     return {"total": len(rows), "offset": offset, "limit": limit,
             "pending_ids": [row["id"] for row in rows],
-            "items": [queue_item(store, config, view, row, now, hints) for row in page]}
+            "items": [queue_item(store, config, view, row, now, hints, membership) for row in page]}
 
 
 def channel_hint(store, config, message):
@@ -237,7 +256,7 @@ def channel_hint(store, config, message):
     channel = (message or {}).get("channel")
     if not channel or message.get("channel_type") in ("im", "mpim"):
         return False
-    if channel in config.excluded_channels:
+    if channel in config.excluded_channels or channel in ledger_exclusions(store):
         return False
     current = current_default(store, config, "channel", channel)
     return current is None or current["lane"] is None
@@ -443,7 +462,39 @@ def proposals(store, config, view):
     items.sort(key=lambda item: (PROPOSAL_ORDER[item["status"]], -item["evidence_count"],
                                  item["kind"], item["key"], item["lane"]))
     return {"min_evidence": config.scope_learning.min_evidence, "proposals": items,
-            "learned": learned_scope(store, config, view)}
+            "learned": learned_scope(store, config, view),
+            "channel_exclusions": channel_exclusions(store, config, view)}
+
+
+def ledger_exclusions(store):
+    """Channels with an active ledger exclusion (P15); empty for stores without the table."""
+    lookup = getattr(store, "channel_exclusion_ids", None)
+    return lookup() if callable(lookup) else set()
+
+
+def channel_exclusions(store, config, view):
+    """Active ledger channel exclusions (P15) for the Learned scope panel."""
+    lookup = getattr(store, "list_channel_exclusions", None)
+    rows = lookup() if callable(lookup) else []
+    return [{"channel": row["channel"], "name": view.channels.get(row["channel"]),
+             "excluded_at": row["excluded_at"], "by": row["by"],
+             "in_config": row["channel"] in config.excluded_channels} for row in rows]
+
+
+def export_exclusions_yaml(store, config, view):
+    """The config `excluded_channels` plus the ledger exclusions as one YAML fragment (P15)."""
+    ledger = [row["channel"] for row in channel_exclusions(store, config, view)]
+    lines = ["# slack-dispatch learned channel exclusions (ledger overrides, P15).",
+             "# Replace excluded_channels in the instance config with this list."]
+    channels = list(dict.fromkeys(list(config.excluded_channels) + ledger))
+    lines.append("excluded_channels:" + ("" if channels else " []"))
+    for channel in channels:
+        added = channel not in config.excluded_channels
+        notes = [note for note in (view.channels.get(channel), "ledger" if added else None) if note]
+        lines.append(f"  - {channel}" + (f"  # {', '.join(notes)}" if notes else ""))
+    if not ledger:
+        lines.append("# No ledger channel exclusions.")
+    return "\n".join(lines) + "\n"
 
 
 def learned_scope(store, config, view):

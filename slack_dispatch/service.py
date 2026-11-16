@@ -14,6 +14,7 @@ from slack_dispatch import __version__
 from slack_dispatch.config.loader import ConfigError, load_config
 from slack_dispatch.decisions import DecisionConsumer, card_dir
 from slack_dispatch.ingest import build_sources
+from slack_dispatch.ingest.membership import MembershipCache
 from slack_dispatch.ingest.normalize import TIMESTAMP, message_body, safe
 from slack_dispatch.ingest.slack_reconcile import SlackReconcileSource
 from slack_dispatch.ingest.slack_socket import SlackSocketSource
@@ -128,6 +129,28 @@ def build_service_sources(config, on_event, store, *, once=False):
     return result
 
 
+def build_membership(config, store, sources, clock):
+    """The P15 membership cache, shared by the pipeline gate and the reconcile sources.
+
+    None when `membership.enabled` is false or no reconcile source exists (its read-only
+    client is the one the cache uses). The previous run's table is loaded at once; the
+    first refresh runs at the start of the first reconcile pass.
+    """
+    entry = config.membership
+    reconcilers = [source for source in sources if isinstance(source, SlackReconcileSource)]
+    if not entry.enabled or not reconcilers:
+        return None
+    reconcile = reconcilers[0]
+    configured = [channel for channel in config.channel_defaults
+                  if channel not in config.excluded_channels]
+    cache = MembershipCache(lambda: reconcile.client, store, entry.refresh_seconds,
+                            policy=entry.policy, clock=clock, configured_channels=configured)
+    for source in reconcilers:
+        source.membership = cache
+    cache.load()
+    return cache
+
+
 class CoverageMonitor:
     """Process socket transitions on the service thread and wake reconcile workers."""
     def __init__(self, store, pipeline, sources, clock, threshold):
@@ -230,7 +253,7 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
         heartbeat = HeartbeatWriter(state / "heartbeat.json",
                                     config.service.heartbeat_seconds, clock)
         sources, started = [], []
-        pipeline = sweep = monitor = decisions = None
+        pipeline = sweep = monitor = decisions = membership = None
         shutdown_ok = True
         exit_code = 0
         start_failures = 0
@@ -285,6 +308,8 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
                 decisions = DecisionConsumer(config, store, directory)
             sources = build_service_sources(config, pipeline.handle_event, store, once=once)
             monitor = CoverageMonitor(store, pipeline, sources, clock, config.service.gap_alert_seconds)
+            membership = build_membership(config, store, sources, clock)
+            pipeline.membership = membership
             LOG.info("Service start version=%s config=%s pid=%d", __version__, Path(config_name).name, os.getpid())
             attempt("heartbeat", lambda: publish(force=True))
             for source in sources:
@@ -314,6 +339,9 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
                                     decisions.run_once()
                             attempt("card_decisions", decide)
                             last_decisions = now
+                        if membership is not None:
+                            # Every membership.refresh_seconds; skipped while a pass refreshes.
+                            attempt("membership", lambda: membership.maybe_refresh(blocking=False))
                         if last_wakes is None or now < last_wakes or now - last_wakes >= WAKE_REQUEST_SECONDS:
                             attempt("wake_requests", lambda: consume_wake_requests(pipeline, store))
                             last_wakes = now
