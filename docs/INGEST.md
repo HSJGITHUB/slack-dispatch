@@ -155,12 +155,20 @@ Replies are paginated and delivered in timestamp order. Origins are `socket`,
 `reconcile`, and `hydrate`. Initial inbox delivery from reconcile uses `backfill`;
 explicit reroute and followup kinds retain precedence.
 
-Backfill does not wake sessions. A routed message of origin `reconcile` is
+Older backfill does not wake sessions. A routed message of origin `reconcile` is
 written only to `file_inbox` adapters with purpose `lane`; the wake engine
 (`offer`) and its storm accounting are skipped, so session_message, file_drop
 and assistant_dm lane adapters are not called for it. Human-queue notices for
 attention flags are unchanged. The pass summary ends with
 `backfill delivered N (no wake)`. Hydrated context rows are never delivered.
+
+Catch-up wakes (P23): a reconcile message assigned to a lane whose Slack ts is within
+`wake_policy.catchup_minutes` (default 30, 0 disables) of now, typically a post made while
+the service restarted, is offered to the wake engine after its inbox record, like a socket
+message (debounce and storm rules apply; inbox kind stays `backfill`, the delivery log kind
+is `catchup`). It is not counted in `backfill delivered N`; the pass summary ends with
+`; catchup_wakes=N` (`HandleResult.catchup` results of that pass). The later socket event of the same message
+is a duplicate and wakes nothing. Prehandled items never wake. See SERVICE.md.
 
 With body storage enabled, supported rich-text blocks flatten into text, mentions,
 URLs, emoji and line breaks. Unknown elements are skipped; empty supported block

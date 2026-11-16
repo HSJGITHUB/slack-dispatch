@@ -5,6 +5,18 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P23 catch-up wakes
+- Backfill that a reconcile pass finds within `wake_policy.catchup_minutes` (new, default
+  30, 0 disables) of its Slack ts, such as a reply posted while the service restarted, is
+  offered to the wake engine after its inbox record like a live post. Debounce, storm and
+  wake switch rules apply; the inbox record keeps kind `backfill` and the delivery log row
+  has the new kind `catchup`. Older backfill still fills the inbox without a wake.
+- The socket event of the same message that follows stays a duplicate (no second wake);
+  human queue and attention notices are unchanged and prehandled items never wake.
+- `HandleResult.catchup`, heartbeat counters `catchup_woken` and `backfill_silent` (present
+  once either is nonzero) and `; catchup_wakes=N` at the end of the reconcile pass line;
+  `backfill delivered N (no wake)` counts only silent backfill.
+
 ### P22 followup wakes
 - Edits no longer wake a lane for every `message_changed` event. New `wake_policy.followup`:
   `changed_after_ack` (default) wakes only for a text change of an item the lane already

@@ -40,6 +40,9 @@ class WakePolicy:
     # P22: which message_changed edits wake a lane: `changed_after_ack` (a text change of
     # an acked or done item, once per followup window), `always` or `never`.
     followup: str = "changed_after_ack"
+    # P23: a reconcile (backfill) message whose Slack ts is within this many minutes of now
+    # is offered to the wake engine like a live message; 0 disables catch-up wakes.
+    catchup_minutes: int = 30
 
 
 @dataclass(frozen=True)

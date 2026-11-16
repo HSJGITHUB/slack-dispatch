@@ -90,6 +90,40 @@ unchanged. Each edit recorded without a wake logs one INFO line `Edit recorded w
 wake id=<message id>` (no text). Heartbeat counters `edits_ignored` (edits recorded
 without a wake) and `edits_woken` (edits that reached a lane wake offer) appear once
 either is nonzero.
+
+### Catch-up wakes (P23)
+
+A post made while the service restarts (or while Socket Mode is down) is found by the next
+reconcile pass and recorded as backfill (origin `reconcile`); the socket event of the same
+message that may follow is a duplicate and does nothing. Backfill normally fills the lane
+inbox without a wake, so such a reply waited for the next unrelated wake. Since P23 a
+backfill item counts as a live one for waking when its Slack ts is within
+`wake_policy.catchup_minutes` of the service clock:
+
+```yaml
+wake_policy:
+  catchup_minutes: 30   # default; 0 disables catch-up wakes
+```
+
+- A reconcile message assigned to a lane with a ts at most `catchup_minutes` away from now
+  (inclusive, absolute distance so a slightly early clock also counts) gets its inbox record
+  (kind stays `backfill`) and then a wake offer, exactly like a socket message: debounce,
+  `immediate_users`, owner mentions, the storm rule and the wake switch apply, and the offer
+  counts against the storm budget of the lane. The delivery log row of the wake has kind
+  `catchup` (`new` when the woken batch also holds live items).
+- Older backfill keeps the old behaviour: inbox record only, no wake offer, no storm
+  accounting.
+- Human queue items (`human_pending`) and attention notices of backfill items get their
+  human notice as before (this did not change). Owner-handled items (`prehandled:*`,
+  `owner_post`) are closed and never wake.
+- Heartbeat counters `catchup_woken` (reconcile items offered to the wake engine) and
+  `backfill_silent` (reconcile items assigned to a lane without a wake offer) appear once
+  either is nonzero. The reconcile pass summary line ends with `; catchup_wakes=N`
+  (offers made in that pass); `backfill delivered N (no wake)` now counts only the silent
+  ones.
+- The catch-up marks behind the `catchup` delivery log kind are process memory: a wake
+  still waiting in the debounce or storm batch when the service stops is not repeated.
+
 Storm transitions send their triggering message id to the human queue adapters.
 
 Human-pending messages overwrite state/human_queue.jsonl with ids and suggested
@@ -214,7 +248,9 @@ accepted by successful pipeline delivery groups (inbox and wake groups may both
 count the same id); failures includes pipeline, runtime, timer and source error
 observations. wake_skipped_no_session (present only with a session_message adapter)
 is described under lane sessions above. edits_ignored and edits_woken (P22, present
-once either is nonzero) are described under edit wakes above. One error can be observed at multiple boundaries. Timers have
+once either is nonzero) are described under edit wakes above. catchup_woken and
+backfill_silent (P23, present once either is nonzero) are described under catch-up wakes
+above. One error can be observed at multiple boundaries. Timers have
 separate durable receipts and do not increment the pipeline delivered counter.
 Heartbeat ok remains false after any observed failure in that process.
 
@@ -350,8 +386,9 @@ replies_overlap_seconds=120, bound_threads=true, bound_threads_max_age_days=14. 
 has posts=record (or route), reactions_done=[white_check_mark, heavy_check_mark]
 and reactions_ack=[eyes]. The owner is always_human.owner_user. Root hydration
 uses the first configured reconcile source and no source when none is configured.
-Backfill (origin reconcile) reaches file inboxes only and never wakes a session;
-see INGEST.md.
+Backfill (origin reconcile) reaches file inboxes only and does not wake a session,
+except recent backfill within `wake_policy.catchup_minutes` (P23, see catch-up wakes
+above); see INGEST.md.
 
 ## P12 cutover and cards
 
@@ -451,8 +488,9 @@ example the 30 second flush retrying a wake while the lane stays paused or not l
 no row: that row's `last_seen_at` moves to the new attempt and `repeat_count` grows (null
 means 1). Any other row in between starts a new row.
 
-- `kind`: `new`, `backfill` or `reroute` for lane wakes (from the route reason and the
-  origin of the woken items), `reminder` for timer reminders and timer notices, `digest`,
+- `kind`: `new`, `backfill`, `catchup` or `reroute` for lane wakes (from the route reason
+  and the origin of the woken items; `catchup` is recent backfill woken like a live item,
+  P23), `reminder` for timer reminders and timer notices, `digest`,
   `card` and `attention` (attention and storm notices) for the operator; an immediate
   ordinary human notice is `new`.
 - `status`: `sent`, `failed`, `timeout`, `dry_run` (adapter `dry_run: true` or the service

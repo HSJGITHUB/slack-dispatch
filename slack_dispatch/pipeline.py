@@ -101,6 +101,31 @@ FOLLOWUP_READ_STATES = ("acked", "done")
 EDIT_IGNORE, EDIT_FIRST, EDIT_WAKE = "ignore", "first", "wake"
 
 
+# P23: default wake_policy.catchup_minutes (0 disables catch-up wakes).
+CATCHUP_MINUTES_DEFAULT = 30
+
+
+def catchup_minutes(config):
+    """wake_policy.catchup_minutes (P23); configs without a valid value use 30."""
+    value = getattr(getattr(config, "wake_policy", None), "catchup_minutes", CATCHUP_MINUTES_DEFAULT)
+    return value if type(value) is int and value >= 0 else CATCHUP_MINUTES_DEFAULT
+
+
+def catchup_recent(config, ts, now):
+    """P23: whether a Slack ts lies within wake_policy.catchup_minutes of `now` (inclusive).
+
+    The distance is absolute, so a ts slightly ahead of the service clock (clock skew) also
+    counts. An unreadable ts or a window of 0 is never recent.
+    """
+    window = catchup_minutes(config) * 60
+    if not window:
+        return False
+    try:
+        return abs(Decimal(str(now)) - Decimal(str(ts))) <= window
+    except Exception:
+        return False
+
+
 def followup_policy(config):
     """wake_policy.followup (P22); configs without the key use `changed_after_ack`."""
     value = getattr(getattr(config, "wake_policy", None), "followup", None)
@@ -140,20 +165,27 @@ def skip_reason(config, store, spec, lane, notifier=None):
     return "skipped_no_session"
 
 
-def lane_kind(store, ids):
-    """Delivery log kind of a lane wake: `reroute`, `new` or `backfill` (P18)."""
+def lane_kind(store, ids, catchup=()):
+    """Delivery log kind of a lane wake: `reroute`, `new`, `backfill` or `catchup` (P18).
+
+    P23: a reconcile item whose id is in `catchup` (a recent backfill offered to the wake
+    engine) counts as `catchup`; a wake of reconcile items only is `catchup` when any of
+    them is one, else `backfill`.
+    """
     kinds = set()
     for mid in ids:
         row = store.get_message(mid) or {}
         if str(row.get("route_reason") or "").startswith("reroute:"):
             kinds.add("reroute")
         elif row.get("origin") == "reconcile":
-            kinds.add("backfill")
+            kinds.add("catchup" if mid in catchup else "backfill")
         else:
             kinds.add("new")
     if "reroute" in kinds:
         return "reroute"
-    return "backfill" if kinds == {"backfill"} else "new"
+    if kinds and kinds <= {"backfill", "catchup"}:
+        return "catchup" if "catchup" in kinds else "backfill"
+    return "new"
 
 
 def human_kind(spec, rows, digest):
@@ -407,6 +439,8 @@ class HandleResult:
     state: str | None = None
     lane: str | None = None
     backfill: bool = False
+    # P23: a recent reconcile message offered to the wake engine like a live one.
+    catchup: bool = False
 
 
 class Pipeline:
@@ -424,6 +458,14 @@ class Pipeline:
         # P22: message id -> clock time of the last followup wake offered for an edit
         # (memory only, oldest dropped past NAME_TRACK_LIMIT).
         self._edit_wakes = {}
+        # P23: recent reconcile items offered to the wake engine (`catchup_woken`) and
+        # reconcile items assigned to a lane without a wake offer (`backfill_silent`); both
+        # appear in the heartbeat once either is nonzero.
+        self.catchup_woken = 0
+        self.backfill_silent = 0
+        # P23: ids of catch-up offers whose lane wake was not attempted yet, so the delivery
+        # log row says `catchup` (memory only, oldest dropped past NAME_TRACK_LIMIT).
+        self.catchup_ids = {}
         self.reconcile_source = None
         # P15: optional MembershipCache; the service sets it when membership is enabled.
         self.membership = None
@@ -510,6 +552,8 @@ class Pipeline:
                 result["owner_reply_closed"] = self.owner_reply_closed
             if self.edits_ignored or self.edits_woken:
                 result.update(edits_ignored=self.edits_ignored, edits_woken=self.edits_woken)
+            if self.catchup_woken or self.backfill_silent:
+                result.update(catchup_woken=self.catchup_woken, backfill_silent=self.backfill_silent)
             return result
 
     def _thread_key(self, message, lane):
@@ -543,14 +587,14 @@ class Pipeline:
                 try:
                     recorder.record(lane, list(ids),
                                     skip_reason(self.config, self.store, spec, lane, notifier),
-                                    kind=lane_kind(self.store, ids))
+                                    kind=lane_kind(self.store, ids, self.catchup_ids))
                 except Exception as error:
                     LOG.error("Delivery log write failed class=%s", type(error).__name__)
             return False
         kind = None
         if recorder is not None:
             try:
-                kind = lane_kind(self.store, ids)
+                kind = lane_kind(self.store, ids, self.catchup_ids)
             except Exception as error:
                 LOG.error("Delivery log write failed class=%s", type(error).__name__)
                 kind = "new"
@@ -582,7 +626,19 @@ class Pipeline:
             self.counters["delivered"] += len(ids)
             if purpose == "lane":
                 self._record_delivery(lane, ids)
+        if purpose == "lane" and inbox is not True:
+            self._forget_catchup(ids)
         return sent
+
+    def _forget_catchup(self, ids):
+        """P23: drop catch-up marks once their lane wake was attempted, except ids still
+        waiting in a retry queue (their retry is logged as `catchup` too)."""
+        if not self.catchup_ids:
+            return
+        waiting = set().union(*self._retry.values()) if self._retry else set()
+        for mid in ids:
+            if mid not in waiting:
+                self.catchup_ids.pop(mid, None)
 
     def _export_queue(self):
         self._export_pending = True
@@ -774,7 +830,7 @@ class Pipeline:
             if found is not None:
                 self.store.set_suggestion(mid, found[0], found[1], OWNER_VERSION)
         self.counters["routed"] += 1
-        backfill = False
+        backfill = catchup = False
         if outcome.state == "assigned":
             lane = outcome.lane
             # The router binds replies only. Bind new roots for later inheritance.
@@ -788,10 +844,21 @@ class Pipeline:
                 message["followup"] = True
             # Durable inboxes must survive disabled, deferred and batched wakes.
             inboxed = self._send("lane", lane, [mid], inbox=True)
-            if event.get("origin") == "reconcile":
-                # Backfill fills durable inboxes only: no session wake, no storm accounting.
+            catchup = (event.get("origin") == "reconcile"
+                       and catchup_recent(self.config, event.get("ts"), self.clock()))
+            if event.get("origin") == "reconcile" and not catchup:
+                # Older backfill fills durable inboxes only: no session wake, no storm accounting.
                 backfill = inboxed
+                self.backfill_silent += 1
             else:
+                if catchup:
+                    # P23: a backfill item within wake_policy.catchup_minutes (a post made
+                    # during a short outage) is offered like a live one; debounce and storm
+                    # rules apply and the inbox record keeps kind `backfill`.
+                    self.catchup_woken += 1
+                    self.catchup_ids.pop(mid, None)
+                    self.catchup_ids[mid] = None
+                    _trim_oldest(self.catchup_ids, NAME_TRACK_LIMIT)
                 wake = self.wake_engine.offer(lane, message, message.get("author"))
                 if edit:
                     self.edits_woken += 1
@@ -814,7 +881,8 @@ class Pipeline:
             self._human_notice(mid, attention=decision.attention)
         if outcome.state == "assigned" and decision.attention:
             self._human_notice(mid, attention=decision.attention)
-        return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane, backfill=backfill)
+        return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane, backfill=backfill,
+                            catchup=catchup)
 
     def _edit_ignored(self, mid):
         self.edits_ignored += 1
@@ -956,6 +1024,8 @@ class Pipeline:
                     self.counters["delivered"] += len(ids)
                     if spec.purpose == "lane":
                         self._record_delivery(lane, ids)
+                if spec.purpose == "lane" and spec.kind != "file_inbox":
+                    self._forget_catchup(ids)
             if self._export_pending:
                 self._export_queue()
             for lane, batch in self.wake_engine.flush(now):

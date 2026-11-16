@@ -109,6 +109,8 @@ class CoveragePipelineTests(unittest.TestCase):
         self.assertNotIn(event()["text"], json.dumps(rows))
 
     def test_backfill_fills_inbox_without_wake(self):
+        # P23: backfill older than wake_policy.catchup_minutes (here over two hours) stays silent.
+        self.now = 9000
         self.store.set_cursor("slack", "C0000000002", "500")
         source = SlackReconcileSource(replace(load_config(SAMPLE).sources[-1], store_body=True, replies=False),
                                       self.pipeline.handle_event, "dummy.env", "DUMMY", self.store)

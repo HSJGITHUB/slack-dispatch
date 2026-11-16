@@ -86,7 +86,7 @@ class SlackReconcileSource:
             before = self.failures
             self.summary = dict(channels=0, roots=0, parents=0, replies=0, hydrated=0,
                                 duplicates=0, prehandled=0, failures=0, thread_candidates=0,
-                                thread_skipped_age=0, backfill=0, permanent_skipped=0)
+                                thread_skipped_age=0, backfill=0, permanent_skipped=0, catchup_wakes=0)
             self._pass_started = self.clock()
             if self.membership is not None:
                 self.membership.maybe_refresh()
@@ -129,10 +129,11 @@ class SlackReconcileSource:
                     self.on_catchup(self.last_catchup_at)
             LOG.info("Reconcile pass channels=%d roots=%d parents=%d replies=%d hydrated=%d duplicates=%d "
                      "prehandled=%d failures=%d thread_candidates=%d thread_skipped_age=%d "
-                     "permanent_skipped=%d; backfill delivered %d (no wake)",
+                     "permanent_skipped=%d; backfill delivered %d (no wake); catchup_wakes=%d",
                      *(self.summary[key] for key in ("channels", "roots", "parents", "replies", "hydrated",
                                                      "duplicates", "prehandled", "failures", "thread_candidates",
-                                                     "thread_skipped_age", "permanent_skipped", "backfill")))
+                                                     "thread_skipped_age", "permanent_skipped", "backfill",
+                                                     "catchup_wakes")))
 
     def scan_channels(self, channels):
         """The channels a pass reads: config and ledger exclusions removed and, under the
@@ -213,6 +214,9 @@ class SlackReconcileSource:
         result = self.on_event(event)
         if getattr(result, "backfill", False) is True:
             self.summary["backfill"] += 1
+        if getattr(result, "catchup", False) is True:
+            # P23: a recent backfill item the pipeline offered to the wake engine.
+            self.summary["catchup_wakes"] += 1
         if getattr(result, "duplicate", False) is True:
             self.summary["duplicates"] += 1
         elif isinstance(getattr(result, "message_id", None), str):

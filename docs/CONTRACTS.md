@@ -138,7 +138,7 @@ present; since P9 a followup marker alone keeps `backfill` or `new`.
 FileInboxNotifier retains the origin through its existing row lookup. The read
 signature and output keys are unchanged; consumers can treat kind as opaque.
 Pipeline HandleResult adds `backfill: bool = False`, true when a reconcile
-message reached a file inbox without a wake.
+message reached a file inbox without a wake (P23: false for a catch-up wake, see below).
 
 Owner posts under record policy have state=done, route_reason=owner_post and
 note=owner_post. Prehandled items have state=done, route_reason=prehandled and
@@ -551,3 +551,31 @@ All additive; the schema version stays 2 and no table changes.
   process memory (`Pipeline._edit_wakes`), so a restart forgets the window.
 - Inbox records, delivery log kinds, reply followups and the `message_deleted` path are
   unchanged.
+
+## P23 catch-up wakes
+
+- Config: `wake_policy.catchup_minutes` (non-negative integer, default 30, 0 disables;
+  `WakePolicy.catchup_minutes`). A negative value, a boolean or a non-integer is a
+  `ConfigError`. Configs without the key load unchanged with 30.
+- `slack_dispatch.pipeline`: `CATCHUP_MINUTES_DEFAULT = 30`, `catchup_minutes(config)` (the
+  default when the value is absent or invalid) and `catchup_recent(config, ts, now)`
+  (inclusive, absolute distance between the Slack ts and `now`; False for a window of 0 or
+  an unreadable ts).
+- `Pipeline._handle`: a non-duplicate message of origin `reconcile` that routes to a lane
+  and is `catchup_recent` gets its inbox record and then `wake_engine.offer` like a socket
+  message (Deliver, Defer and Batch, storm notices included). `HandleResult` adds
+  `catchup: bool = False` (true for such an offer); `backfill` stays true only for a
+  reconcile message that reached a file inbox without an offer.
+- `lane_kind(store, ids, catchup=())`: a reconcile id in `catchup` counts as `catchup`; a
+  wake of reconcile ids only is `catchup` when any is one, else `backfill`; `reroute` still
+  wins and any live id makes it `new`. `Pipeline.catchup_ids` (insertion-ordered dict, memory
+  only, capped at `NAME_TRACK_LIMIT`) holds the offered ids until their lane wake was
+  attempted (ids waiting in the retry queue keep the mark).
+- `Pipeline.catchup_woken` and `Pipeline.backfill_silent` (ints) appear in `snapshot()`
+  (heartbeat counters) once either is nonzero.
+- `SlackReconcileSource`: the pass summary dict gains `catchup_wakes` (callback results
+  with `catchup is True`) and the `Reconcile pass` line ends with `; catchup_wakes=N` after
+  `backfill delivered N (no wake)`; the console `reconcile_summary` parses it as
+  `counts["catchup_wakes"]`.
+- Inbox record kinds, the duplicate path, human notices and the prehandled and owner post
+  paths are unchanged.

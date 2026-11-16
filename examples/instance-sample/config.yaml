@@ -52,6 +52,10 @@ wake_policy:
   # service.followup_window_seconds; other edits update the ledger silently. always: every
   # edit wakes (the behaviour before P22). never: edits update the ledger only.
   followup: changed_after_ack
+  # Backfill found by a reconcile pass whose Slack ts is at most this many minutes old (a
+  # post made while the service restarted) wakes the lane like a live post (P23); older
+  # backfill fills the inbox without a wake. 0 disables catch-up wakes.
+  catchup_minutes: 30
 inbox:
   root: inbox
 notify_adapters:
