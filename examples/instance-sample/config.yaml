@@ -158,6 +158,8 @@ console:
   lane_hint_people: true
   direct_lane: owner
   ui_language: en
+  # P19: seconds an immediate action or GO commit can be undone (default 30, minimum 10).
+  undo_seconds: 30
   channels:
     C0000000001: dummy-support
     C0000000002: dummy-general

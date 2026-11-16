@@ -246,3 +246,22 @@ h2:first-child { margin-top: 0; }
 .delivery-items { margin: 4px 0 0; padding-left: 18px; }
 .delivery-items li { margin: 2px 0; }
 .delivery-items .badge { margin-left: 4px; }
+
+/* P19: undo toast and the inline "Handled · Undo" lane row. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  z-index: 3;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 32px);
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: var(--text);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+}
+
+.toast button.link { color: #fff; font-weight: 600; text-decoration: underline; }
+.toast button.link:disabled { text-decoration: none; }
+.actions.handled { color: var(--muted); }

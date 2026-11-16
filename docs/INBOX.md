@@ -51,6 +51,11 @@ store. This CLI consumes the shared LedgerStore API.
   manual sweeps to the dispatcher (P12, below).
 - `scope add|list|remove|import` and `sent`: lane scope registration and recorded sends
   (P13, below).
+- `undo [--last | ACTION_ID] [--json]`: undo a recent console action within
+  `console.undo_seconds`, same rules as the console (P19, see CONSOLE.md "P19 console
+  undo"); exit 0 undone, 1 already undone or expired, 2 invalid input, 3 unknown or nothing
+  to undo. Since P19 `inbox` also hides rows whose ledger lane is empty and whose state is
+  `human_pending` or `excluded` (for example an assign the console undid).
 
 A session first claims its stable lane, then reads its inbox. An operator reads
 `queue` and explicitly uses `assign` to accept or override a suggestion. A suggestion

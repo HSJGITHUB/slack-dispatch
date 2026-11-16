@@ -35,6 +35,24 @@ const UI_TEXT = Object.freeze({
     exportExclusions: "Export excluded_channels YAML",
     undo: "Undo",
     undoDone: (channel) => "Channel exclusion ended: " + channel,
+    journalActions: {
+      assign: "Assigned", direct: "Sent to the direct lane", exclude: "Excluded",
+      exclude_channel: "Channel excluded", done: "Done", commit: "GO applied",
+      lane_ack: "Acked", lane_done: "Done", lane_reroute: "Rerouted",
+    },
+    didAction: (name, count, lane) => name + (lane ? " (" + lane + ")" : "") + ": " + count + " item(s)",
+    undoButton: (seconds) => "Undo (" + seconds + "s)",
+    undoing: "Undoing...",
+    undoResult: (c) => ["Restored " + c.restored, c.conflict ? "conflict " + c.conflict : null,
+      c.not_found ? "not found " + c.not_found : null,
+      c.wake_sent ? "wake already sent " + c.wake_sent : null,
+      c.binding_conflict ? "thread binding changed meanwhile, kept " + c.binding_conflict : null].filter(Boolean).join(", "),
+    undoFailed: (detail) => "Undo failed: " + detail,
+    laneHandled: "Handled",
+    recentActions: "Recent actions",
+    recentEmpty: "No console actions recorded yet.",
+    undoExpired: "expired",
+    undoUndone: "undone",
     tabDeliveries: "Deliveries",
     deliveriesTitle: (total) => total + " delivery attempt(s)",
     deliveriesEmpty: "No delivery attempts in this window.",
@@ -113,7 +131,7 @@ const UI_TEXT = Object.freeze({
     ownerChannelPlaceholder: "Channel id",
     ownerTsPlaceholder: "ts (optional)",
     ownerLookupButton: "Find owner",
-    keysHelp: "Keys: g = focus GO; Enter on a focused row = stage the suggested lane; Esc = unstage the focused row",
+    keysHelp: "Keys: g = focus GO; Enter on a focused row = stage the suggested lane; Esc = unstage the focused row; z = undo the last action while its notice shows",
     queueColumns: {
       when: "When",
       channel: "Channel",
@@ -201,6 +219,7 @@ const UI_TEXT = Object.freeze({
       scopeKey: "Key", name: "Name", evidence: "Evidence", firstSeen: "First seen", lastSeen: "Last seen",
       status: "Status", lanes: "Lanes", current: "Current default", actions: "Actions", by: "By",
       inConfig: "In config", confidence: "Tier", session: "Session",
+      action: "Action", items: "Items", actor: "By", undo: "Undo",
     },
     yes: "yes",
     no: "no",
@@ -237,6 +256,24 @@ const UI_TEXT = Object.freeze({
     exportExclusions: "excluded_channels YAML 내보내기",
     undo: "되돌리기",
     undoDone: (channel) => "채널 제외 해제: " + channel,
+    journalActions: {
+      assign: "배정함", direct: "내가 처리로 보냄", exclude: "제외함",
+      exclude_channel: "채널 제외함", done: "끝 처리함", commit: "GO 적용",
+      lane_ack: "확인함", lane_done: "끝 처리함", lane_reroute: "재배정함",
+    },
+    didAction: (name, count, lane) => name + (lane ? " (" + lane + ")" : "") + " " + count + "건",
+    undoButton: (seconds) => "되돌리기 (" + seconds + "초)",
+    undoing: "되돌리는 중...",
+    undoResult: (c) => ["복구 " + c.restored + "건", c.conflict ? "충돌 " + c.conflict + "건" : null,
+      c.not_found ? "원장에 없음 " + c.not_found + "건" : null,
+      c.wake_sent ? "깨우기는 이미 나감 " + c.wake_sent + "건" : null,
+      c.binding_conflict ? "스레드 바인딩이 그사이 바뀌어 유지 " + c.binding_conflict + "건" : null].filter(Boolean).join(", "),
+    undoFailed: (detail) => "되돌리기 실패: " + detail,
+    laneHandled: "처리됨",
+    recentActions: "최근 작업",
+    recentEmpty: "기록된 콘솔 작업 없음.",
+    undoExpired: "만료",
+    undoUndone: "되돌림",
     tabDeliveries: "전달",
     deliveriesTitle: (total) => "전달 시도 " + total + "건",
     deliveriesEmpty: "이 기간에 전달 시도 없음.",
@@ -315,7 +352,7 @@ const UI_TEXT = Object.freeze({
     ownerChannelPlaceholder: "채널 id",
     ownerTsPlaceholder: "ts (선택)",
     ownerLookupButton: "소관 찾기",
-    keysHelp: "단축키: g = GO로 이동 · 행에서 Enter = 제안 레인 배정 예정 · Esc = 행의 예정 취소",
+    keysHelp: "단축키: g = GO로 이동 · 행에서 Enter = 제안 레인 배정 예정 · Esc = 행의 예정 취소 · z = 알림이 떠 있는 동안 마지막 작업 되돌리기",
     queueColumns: {
       when: "시각",
       channel: "채널",
@@ -403,6 +440,7 @@ const UI_TEXT = Object.freeze({
       scopeKey: "키", name: "이름", evidence: "근거", firstSeen: "처음 확인", lastSeen: "마지막 확인",
       status: "상태", lanes: "레인", current: "현재 기본값", actions: "작업", by: "확정자",
       inConfig: "설정에 있음", confidence: "단계", session: "세션",
+      action: "작업 종류", items: "항목 수", actor: "실행자", undo: "되돌리기",
     },
     yes: "예",
     no: "아니오",
@@ -432,6 +470,9 @@ const state = {
   registryClosed: [],
   ownerCard: null,
 };
+// P19 undo: the bottom toast of the latest immediate action or GO commit, and lane rows
+// that show "Handled · Undo" inline until their window ends (node -> entry).
+const undoState = { toast: null, inline: new Map(), ticker: null, busy: false };
 
 // ---------- helpers ----------
 
@@ -960,10 +1001,12 @@ async function commitStaged() {
   updateGoBar();
   for (const card of state.queueCards.values()) paintCard(card);
   const results = [];
+  const undos = [];
   try {
     for (let start = 0; start < decisions.length; start += MAX_COMMIT) {
       const data = await api("/api/queue/commit", { decisions: decisions.slice(start, start + MAX_COMMIT) });
       results.push(...data.results);
+      if (data.undo) undos.push(data.undo);
     }
   } catch (error) {
     status(error.message, true);
@@ -971,6 +1014,7 @@ async function commitStaged() {
     state.committing = false;
   }
   settle(results);
+  showUndoToast(undos);
   loadQueue();
 }
 
@@ -989,6 +1033,7 @@ async function applyNowRow(id) {
     : (row.error === "conflict" || row.error === "not_found" ? row.error : "error"),
     detail: row.detail || (row.ok ? null : row.error), channel_hint: row.channel_hint, channel: row.channel,
     closed: row.closed })));
+  showUndoToast([data.undo]);
   loadQueue();
 }
 
@@ -1133,7 +1178,8 @@ function laneInputsBusy() {
 
 async function loadLaneInbox(force) {
   const lane = state.lane;
-  if (!force && laneSection().querySelector(".lane-inbox") && laneInputsBusy()) return;
+  if (!force && laneSection().querySelector(".lane-inbox") && (laneInputsBusy() || laneUndoActive())) return;
+  undoState.inline.clear();
   let data;
   try {
     data = await api("/api/lanes/" + encodeURIComponent(lane) + "/inbox?full=" + (state.laneFull ? "true" : "false"));
@@ -1208,17 +1254,19 @@ function laneActions(lane, id, channel, ts) {
   const findOwner = state.config.owner_resolver && channel
     ? el("button", { className: "link", text: UI.findOwner, title: UI.findOwnerTitle,
       onclick: () => toggleOwner(ownerBox, channel, ts, pick) }) : null;
-  return [el("div", { className: "actions" },
+  // P19: done and reroute leave the row in place with "Handled · Undo" for the undo window.
+  const row = el("div", { className: "actions" },
     el("button", { text: UI.ack, onclick: () => laneAction(lane, "ack", id) }),
     note,
-    el("button", { text: UI.done, onclick: () => laneAction(lane, "done", id, { note: note.value }) }),
+    el("button", { text: UI.done, onclick: () => laneAction(lane, "done", id, { note: note.value }, row) }),
     el("span", { className: "muted small", text: UI.rerouteTo }),
     target,
-    el("button", { text: UI.reroute, onclick: () => laneAction(lane, "reroute", id, { lane: target.value }) }),
-    findOwner), ownerBox];
+    el("button", { text: UI.reroute, onclick: () => laneAction(lane, "reroute", id, { lane: target.value }, row) }),
+    findOwner);
+  return [row, ownerBox];
 }
 
-async function laneAction(lane, action, id, extra) {
+async function laneAction(lane, action, id, extra, row) {
   const body = Object.assign({ action, ids: [id], lane: null, note: null }, extra || {});
   if (body.note === "") body.note = null;
   let data;
@@ -1229,7 +1277,161 @@ async function laneAction(lane, action, id, extra) {
     return;
   }
   reportResults(data);
+  showUndoToast([data.undo]);
+  if (data.undo && row && action !== "ack") {
+    markLaneRow(row, data.undo);
+    return;
+  }
   loadLaneInbox(true);
+}
+
+// ---------- undo (P19) ----------
+
+function secondsUntil(deadline) {
+  return Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+}
+
+// Show the bottom toast for the latest write. `infos` are the `undo` objects of the
+// responses (null when nothing changed); a GO of more than 200 decisions has several.
+function showUndoToast(infos) {
+  const list = (infos || []).filter(Boolean);
+  if (!list.length) return;
+  const last = list[list.length - 1];
+  const count = list.reduce((total, info) => total + (info.count || 0), 0);
+  const name = UI.journalActions[last.action] || last.action;
+  undoState.toast = { ids: list.map((info) => info.action_id), text: UI.didAction(name, count, last.lane),
+    deadline: Date.now() + (last.seconds_left || 0) * 1000, message: null, messageUntil: 0, button: null };
+  renderToast();
+  startUndoTicker();
+}
+
+function renderToast() {
+  const node = document.getElementById("toast");
+  if (!node) return;
+  const toast = undoState.toast;
+  clear(node);
+  if (!toast) {
+    node.hidden = true;
+    return;
+  }
+  if (toast.message) {
+    node.append(el("span", { text: toast.message }));
+  } else {
+    toast.button = el("button", { className: "link toast-undo", disabled: undoState.busy,
+      text: undoState.busy ? UI.undoing : UI.undoButton(secondsUntil(toast.deadline)),
+      onclick: () => undoActions(toast.ids) });
+    node.append(el("span", { text: toast.text }), " · ", toast.button);
+  }
+  node.hidden = false;
+}
+
+function laneUndoActive() {
+  for (const node of Array.from(undoState.inline.keys())) {
+    if (!node.isConnected) undoState.inline.delete(node);
+  }
+  return undoState.inline.size > 0;
+}
+
+// A lane row that was done or rerouted keeps its place with "Handled · Undo (Ns)" while
+// the window is open; the lane inbox is reloaded when it ends.
+function markLaneRow(row, info) {
+  const deadline = Date.now() + (info.seconds_left || 0) * 1000;
+  const button = el("button", { className: "link", text: UI.undoButton(secondsUntil(deadline)),
+    onclick: () => undoActions([info.action_id]) });
+  clear(row).append(el("span", { className: "badge ok", text: UI.laneHandled }), " · ", button);
+  row.classList.add("handled");
+  undoState.inline.set(row, { id: info.action_id, deadline, button });
+  startUndoTicker();
+}
+
+function startUndoTicker() {
+  if (undoState.ticker) return;
+  undoState.ticker = setInterval(undoTick, 500);
+}
+
+function undoTick() {
+  const toast = undoState.toast;
+  if (toast) {
+    if (toast.message ? Date.now() > toast.messageUntil : secondsUntil(toast.deadline) <= 0) {
+      undoState.toast = null;
+      renderToast();
+    } else if (!toast.message && toast.button && !undoState.busy) {
+      toast.button.textContent = UI.undoButton(secondsUntil(toast.deadline));
+    }
+  }
+  let expired = false;
+  for (const [node, entry] of Array.from(undoState.inline)) {
+    if (!node.isConnected) {
+      undoState.inline.delete(node);
+    } else if (secondsUntil(entry.deadline) <= 0) {
+      undoState.inline.delete(node);
+      expired = true;
+    } else {
+      entry.button.textContent = UI.undoButton(secondsUntil(entry.deadline));
+    }
+  }
+  if (expired && state.view === "lanes" && state.lane && !laneUndoActive()) loadLaneInbox(true);
+  if (!undoState.toast && !undoState.inline.size) {
+    clearInterval(undoState.ticker);
+    undoState.ticker = null;
+  }
+}
+
+// Undo journal rows newest first and show the summed per-id result in the toast.
+async function undoActions(ids) {
+  if (undoState.busy || !ids || !ids.length) return;
+  undoState.busy = true;
+  renderToast();
+  const totals = { restored: 0, conflict: 0, not_found: 0, wake_sent: 0, binding_conflict: 0 };
+  let failure = null;
+  for (const id of ids.slice().reverse()) {
+    try {
+      const data = await api("/api/undo/" + encodeURIComponent(id), {});
+      for (const key of Object.keys(totals)) totals[key] += (data.counts && data.counts[key]) || 0;
+    } catch (error) {
+      failure = error.message;
+    }
+  }
+  undoState.busy = false;
+  const done = new Set(ids);
+  for (const [node, entry] of Array.from(undoState.inline)) {
+    if (done.has(entry.id)) undoState.inline.delete(node);
+  }
+  const text = UI.undoResult(totals) + (failure ? " / " + UI.undoFailed(failure) : "");
+  undoState.toast = { ids: [], text, deadline: 0, message: text, messageUntil: Date.now() + 8000, button: null };
+  renderToast();
+  startUndoTicker();
+  if (state.view === "lanes" && state.lane) loadLaneInbox(true);
+  else refresh();
+}
+
+function onUndoKey(event) {
+  if (event.key !== "z" || event.ctrlKey || event.metaKey || event.altKey) return;
+  const target = event.target;
+  const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" || target.isContentEditable);
+  const toast = undoState.toast;
+  if (typing || !toast || toast.message || undoState.busy || secondsUntil(toast.deadline) <= 0) return;
+  event.preventDefault();
+  undoActions(toast.ids);
+}
+
+function recentActionsCard(data) {
+  const c = UI.columns;
+  const card = el("article", { className: "card" }, el("h2", { text: UI.recentActions }));
+  const rows = (data && data.actions) || [];
+  if (!rows.length) {
+    card.append(el("div", { className: "muted", text: UI.recentEmpty }));
+    return card;
+  }
+  card.append(table([c.at, c.action, c.items, c.actor, c.undo], rows.map((row) => [
+    el("span", { title: row.when || null, text: row.time || UI.none }),
+    (UI.journalActions[row.action] || row.action) + (row.lane ? " (" + row.lane + ")" : ""),
+    row.count, row.by,
+    row.undone_at ? el("span", { className: "badge", text: UI.undoUndone })
+      : row.undoable ? el("button", { text: UI.undoButton(row.seconds_left), onclick: () => undoActions([row.id]) })
+        : el("span", { className: "muted", text: UI.undoExpired })])));
+  return card;
 }
 
 // ---------- service ----------
@@ -1246,9 +1448,9 @@ function yesNo(value) {
 }
 
 async function loadService() {
-  let data;
+  let data, recent;
   try {
-    data = await api("/api/service");
+    [data, recent] = await Promise.all([api("/api/service"), api("/api/actions?limit=20")]);
   } catch (error) {
     status(error.message, true);
     return;
@@ -1260,6 +1462,7 @@ async function loadService() {
     el("span", { className: "muted small", text: UI.refreshed(nowText()) }),
     el("span", { className: "spacer" }),
     el("button", { text: UI.refresh, onclick: () => loadService() })));
+  section.append(recentActionsCard(recent));
   const hb = data.heartbeat;
   const heartbeat = el("article", { className: "card" }, el("h2", { text: UI.heartbeat }));
   if (!hb) {
@@ -1643,6 +1846,7 @@ async function start() {
     runSearch(document.getElementById("search-input").value);
   });
   document.addEventListener("keydown", onQueueKey);
+  document.addEventListener("keydown", onUndoKey);
   window.addEventListener("popstate", () => showView(VIEWS[location.pathname] || "queue", false));
   window.addEventListener("hashchange", () => {
     readHash();

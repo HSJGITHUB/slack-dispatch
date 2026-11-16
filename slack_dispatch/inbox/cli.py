@@ -38,6 +38,8 @@ REPAIR_SINCE_DAYS = 30
 # P18 `deliveries`: default window in hours (0 = every row) and the clock (tests patch it).
 DELIVERY_HOURS = 48
 DELIVERY_CLOCK = time.time
+# P19 `undo`: the clock of the undo window (tests patch it).
+UNDO_CLOCK = time.time
 BOT_NOTE = "excluded:bot"
 
 
@@ -165,6 +167,13 @@ def build_parser():
     sub.add_argument("--hours", type=int, default=DELIVERY_HOURS)
     sub.add_argument("--status")
     sub.add_argument("--json", action="store_true")
+    # P19: undo a recent console action (same rules as the console).
+    sub = commands.add_parser("undo")
+    options(sub)
+    target = sub.add_mutually_exclusive_group(required=True)
+    target.add_argument("--last", action="store_true")
+    target.add_argument("action_id", nargs="?", type=int)
+    sub.add_argument("--json", action="store_true")
     return parser
 
 
@@ -253,6 +262,11 @@ def inbox_rows(root, lane, store, include_done=False):
     for mid, row in grouped.items():
         message = store.get_message(mid) or {}
         if message.get("lane") not in (None, lane):
+            continue
+        # P19 fix1: a row without a lane that waits in the human queue or was excluded is
+        # nobody's lane item (for example an assign that the console undid).
+        if message and message.get("lane") is None and message.get("state") in ("human_pending",
+                                                                                "excluded"):
             continue
         # Context rows and owner posts are never inbox items (only roots or owner markers).
         if message and inbox_refusal(dict(message, id=mid)):
@@ -1302,6 +1316,12 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 return code
             elif args.command == "deliveries":
                 return deliveries(args, store, optional_config(args), stdout, stderr)
+            elif args.command == "undo":
+                code = actions.undo_command(store, last=args.last, action_id=args.action_id,
+                                            as_json=args.json, stdout=stdout, stderr=stderr,
+                                            now=UNDO_CLOCK())
+                error_reported = code != 0
+                return code
             elif args.command == "queue":
                 for row in store.list_messages(state="human_pending"):
                     message_id = row.get("id", row.get("message_id"))

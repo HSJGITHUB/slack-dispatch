@@ -144,6 +144,8 @@ class Console:
     channels: dict[str, str] = field(default_factory=dict)
     # Console page language (P14): `en` or `ko`.
     ui_language: str = "en"
+    # P19: seconds an immediate console action or GO commit stays undoable (at least 10).
+    undo_seconds: int = 30
 
 
 @dataclass(frozen=True)

@@ -401,6 +401,8 @@ def decisions_section(value):
 
 
 UI_LANGUAGES = ("en", "ko")
+# P19: the shortest console undo window.
+UNDO_MIN_SECONDS = 10
 
 
 def console_section(value, lane_ids):
@@ -431,9 +433,12 @@ def console_section(value, lane_ids):
     language = string(data.get("ui_language", Console.ui_language), "console.ui_language")
     if language not in UI_LANGUAGES:
         raise ConfigError("console.ui_language must be one of: " + ", ".join(UI_LANGUAGES))
+    undo = data.get("undo_seconds", Console.undo_seconds)
+    if type(undo) is not int or undo < UNDO_MIN_SECONDS:
+        raise ConfigError(f"console.undo_seconds must be an integer of at least {UNDO_MIN_SECONDS}")
     return Console(host=host, port=port, base_url=base_url, page_size=page_size,
                    lane_hint_people=hint, direct_lane=direct, channels=channels,
-                   ui_language=language)
+                   ui_language=language, undo_seconds=undo)
 
 
 def timezone_name(value):

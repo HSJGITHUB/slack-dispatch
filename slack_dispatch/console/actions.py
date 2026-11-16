@@ -18,10 +18,26 @@ Card decisions use `assign` and share both behaviours.
 Since P15 `exclude_channel` (console only, no CLI command) writes a ledger channel
 exclusion that the router reads at runtime like `excluded_channels`, and moves every open
 item of the channel to `excluded` with note `human:console:channel`.
+
+Since P19 every console write that changes message rows is journaled in the ledger table
+`console_actions` (see `Journal`) and can be undone for `console.undo_seconds` with `undo`
+or `undo_last`, from the console or with
+`python -m slack_dispatch.console.actions undo [--last | ACTION_ID] [--json]`.
 """
+import argparse
+from datetime import datetime
+import json
+import logging
+import math
+import os
+import sys
+import time
+
 from slack_dispatch.inbox.files import append, record, validate_lane
+from slack_dispatch.ledger.store import SNAPSHOT_FIELDS, UndoStateError
 from slack_dispatch.router.apply import record_scope_proposal
 
+LOG = logging.getLogger(__name__)
 REASON = "human:console"
 CHANNEL_REASON = "human:console:channel"
 MAX_IDS = 200
@@ -176,23 +192,30 @@ def lane_guard(lane):
     return check
 
 
-def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, min_evidence=None):
+def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, min_evidence=None,
+          journal=None):
     """Apply one action to each unique id in order; return one result per id.
 
     `lane` is the destination for assign, direct and reroute. `note` is recorded by
     assign (when set) and done; done without a note records `human:console`. A guard
     may refuse an id with ActionError("conflict"). Failures never stop the batch.
     `min_evidence` is `scope_learning.min_evidence` for the learning events (P13).
+    `journal` (P19) snapshots each id, and every open item of the channel for
+    exclude_channel, before it changes; the caller records it with `Journal.finish`.
     """
     results = []
     for message_id in dict.fromkeys(ids):
         extra = {}
         try:
+            if journal is not None:
+                journal.watch([message_id])
             message = store.get_message(message_id)
             if message is None:
                 raise ActionError("not_found")
             if guard is not None:
                 guard(message)
+            if journal is not None and action == "exclude_channel" and message.get("channel"):
+                journal.watch(journal.channel_items(message))
             if action in ("assign", "direct"):
                 assign(store, inbox_root, message_id, lane, note=note, min_evidence=min_evidence)
             elif action == "reroute":
@@ -228,3 +251,277 @@ def commit_status(result):
     if result["error"] in ("conflict", "not_found"):
         return result["error"]
     return "error"
+
+
+# P19 console undo: action journal, undo and the operator CLI.
+
+JOURNAL_BY = "console"
+UNDO_COUNTS = ("restored", "conflict", "not_found", "wake_sent", "wake_removed",
+               "channel_exclusions_ended", "binding_restored", "binding_conflict")
+
+
+def stamp_at(epoch):
+    """Local ISO time with offset for a journal stamp (epoch seconds)."""
+    return datetime.fromtimestamp(float(epoch)).astimezone().isoformat()
+
+
+def seconds_left(row, now):
+    """Whole seconds left in a journal row's undo window (0 when expired or undone)."""
+    if row.get("undone_at"):
+        return 0
+    try:
+        until = datetime.fromisoformat(row.get("undo_until") or "")
+    except (TypeError, ValueError):
+        return 0
+    if until.tzinfo is None:
+        until = until.astimezone()
+    return max(0, math.ceil(until.timestamp() - float(now)))
+
+
+def undoable(row, now):
+    """True while a journal row is not undone and `now` is at or before `undo_until`."""
+    if row.get("undone_at"):
+        return False
+    try:
+        until = datetime.fromisoformat(row.get("undo_until") or "")
+    except (TypeError, ValueError):
+        return False
+    if until.tzinfo is None:
+        until = until.astimezone()
+    return float(now) <= until.timestamp()
+
+
+class Journal:
+    """Collect one console write for the `console_actions` journal (P19).
+
+    `watch(ids)` snapshots ids (state, lane, note, done_at, ack_at, assigned_at,
+    route_reason, and the thread binding of the message) the first time they are seen,
+    before anything changes them. `finish` snapshots them again and records one journal row
+    with the ids that changed, the wake_requests rows (source `console`) and
+    channel_exclusions rows (by `console`) the write added. An entry carries `binding`
+    (`{source, channel, thread_ts, lane}`, lane null for no binding) when the write changed
+    the binding of its thread (assign, direct, reroute). Stores without the journal methods
+    (test fakes) record nothing.
+
+    fix1: journaling never changes the write itself. Any journal error (in the constructor,
+    `watch` or `finish`) turns journaling off for this write, logs one WARNING with the
+    exception class only, and sets `failed`; `finish` then returns None.
+    """
+
+    def __init__(self, store, action, *, lane=None, by=JOURNAL_BY):
+        self.store, self.action, self.lane, self.by = store, action, lane, by
+        self.enabled = callable(getattr(store, "add_console_action", None))
+        self.failed = False
+        self.before = {}
+        self.bindings = {}
+        self.missing = set()
+        if self.enabled:
+            try:
+                self.wake_mark = store.wake_request_mark()
+                self.exclusion_mark = store.channel_exclusion_mark()
+            except Exception as error:
+                self._fail(error)
+
+    def _fail(self, error):
+        LOG.warning("Console journal failed action=%s class=%s", self.action, type(error).__name__)
+        self.enabled = False
+        self.failed = True
+
+    @property
+    def status(self):
+        """`failed` when journaling broke for this write, else `ok` (response field)."""
+        return "failed" if self.failed else "ok"
+
+    def watch(self, ids):
+        if not self.enabled:
+            return
+        try:
+            fresh = [mid for mid in ids if mid not in self.before and mid not in self.missing]
+            if not fresh:
+                return
+            found = self.store.message_snapshots(fresh)
+            bindings = self.store.binding_snapshots(fresh)
+            for mid in fresh:
+                if mid in found:
+                    self.before[mid] = found[mid]
+                    self.bindings[mid] = bindings.get(mid)
+                else:
+                    self.missing.add(mid)
+        except Exception as error:
+            self._fail(error)
+
+    def channel_items(self, message):
+        """Open item ids of the message's channel (empty when journaling is off or fails)."""
+        if not self.enabled:
+            return []
+        try:
+            return self.store.open_channel_ids(message["channel"],
+                                               source=message.get("source") or "slack")
+        except Exception as error:
+            self._fail(error)
+            return []
+
+    def finish(self, undo_seconds, now):
+        """Record the journal row when a watched row changed; return the undo info or None."""
+        if not self.enabled or not self.before:
+            return None
+        try:
+            return self._record(undo_seconds, now)
+        except Exception as error:
+            self._fail(error)
+            return None
+
+    def _record(self, undo_seconds, now):
+        after = self.store.message_snapshots(list(self.before))
+        after_bindings = self.store.binding_snapshots(list(self.before))
+        ids = [mid for mid in self.before
+               if mid in after and _snapshot(after[mid]) != _snapshot(self.before[mid])]
+        if not ids:
+            return None
+        before_rows, after_rows = [], []
+        for mid in ids:
+            old, new = dict(_snapshot(self.before[mid]), id=mid), dict(_snapshot(after[mid]), id=mid)
+            old_binding, new_binding = self.bindings.get(mid), after_bindings.get(mid)
+            if old_binding and new_binding and old_binding != new_binding:
+                old["binding"], new["binding"] = old_binding, new_binding
+            before_rows.append(old)
+            after_rows.append(new)
+        wakes = [row["id"] for row in self.store.wake_requests_after(self.wake_mark, ids, self.by)]
+        exclusions = [row["id"] for row in
+                      self.store.channel_exclusions_after(self.exclusion_mark, self.by)]
+        at = stamp_at(now)
+        until = stamp_at(float(now) + undo_seconds)
+        action_id = self.store.add_console_action(
+            at=at, action=self.action, ids=ids, before=before_rows, after=after_rows,
+            by=self.by, undo_until=until,
+            meta={"lane": self.lane, "wake_requests": wakes, "channel_exclusions": exclusions})
+        return {"action_id": action_id, "action": self.action, "lane": self.lane,
+                "count": len(ids), "at": at, "undo_until": until, "seconds_left": int(undo_seconds)}
+
+
+def _snapshot(row):
+    return {name: row.get(name) for name in SNAPSHOT_FIELDS}
+
+
+def undo(store, action_id, *, now, by=JOURNAL_BY):
+    """Undo one journal row (see `LedgerStore.undo_console_action`). Raises KeyError for an
+    unknown id and UndoStateError (`undone`, `expired`) when it is no longer undoable."""
+    return store.undo_console_action(action_id, at=stamp_at(now), now_epoch=now, by=by)
+
+
+def last_undoable(store, now):
+    """The most recent journal row not undone yet and still inside its window, or None."""
+    for row in store.list_console_actions(50, pending_only=True):
+        if undoable(row, now):
+            return row
+    return None
+
+
+def undo_last(store, *, now, by=JOURNAL_BY):
+    """Undo the most recent undoable action; KeyError when there is none."""
+    row = last_undoable(store, now)
+    if row is None:
+        raise KeyError("last")
+    return undo(store, row["id"], now=now, by=by)
+
+
+def undo_text(result):
+    """One summary line plus one line per id that was not restored (CLI output)."""
+    counts = result["counts"]
+    lines = ["undone action " + str(result["action_id"]) + " (" + str(result["action"]) + "): "
+             + ", ".join(name + " " + str(counts.get(name, 0)) for name in UNDO_COUNTS)]
+    if result.get("nothing_restored"):
+        lines.append("  nothing_restored: channel exclusions and bindings left unchanged")
+    for row in result["results"]:
+        if row["status"] != "restored" or row["wake_sent"] or row.get("binding") == "binding_conflict":
+            lines.append("  " + row["id"] + " " + row["status"]
+                         + (" (" + row["detail"] + ")" if row["detail"] else "")
+                         + (" wake_sent" if row["wake_sent"] else "")
+                         + (" binding_conflict" if row.get("binding") == "binding_conflict" else ""))
+    return "\n".join(lines)
+
+
+def build_undo_parser():
+    parser = argparse.ArgumentParser(prog="python -m slack_dispatch.console.actions",
+                                     description="Undo a recent console action (P19)")
+    parser.add_argument("--ledger", default=None, help="ledger path (else SLACK_DISPATCH_LEDGER "
+                        "or ledger.path of --config / SLACK_DISPATCH_CONFIG)")
+    parser.add_argument("--config", default=None)
+    commands = parser.add_subparsers(dest="command", required=True)
+    sub = commands.add_parser("undo")
+    target = sub.add_mutually_exclusive_group(required=True)
+    target.add_argument("--last", action="store_true")
+    target.add_argument("action_id", nargs="?", type=int)
+    sub.add_argument("--json", action="store_true")
+    # --ledger and --config are accepted before and after the subcommand.
+    sub.add_argument("--ledger", default=argparse.SUPPRESS)
+    sub.add_argument("--config", default=argparse.SUPPRESS)
+    return parser
+
+
+def _ledger_path(args):
+    path = args.ledger or os.environ.get("SLACK_DISPATCH_LEDGER")
+    if path:
+        return path
+    config_path = args.config or os.environ.get("SLACK_DISPATCH_CONFIG")
+    if not config_path:
+        return None
+    from slack_dispatch.config.loader import load_config
+    return load_config(config_path).ledger.path
+
+
+def undo_main(argv=None, *, store=None, stdout=None, stderr=None, clock=time.time):
+    """`undo [--last | ACTION_ID] [--json]` for an operator session.
+
+    Exit codes: 0 undone (the output lists conflicts), 1 not undoable any more (already
+    undone or the window expired), 2 invalid arguments, configuration or ledger, 3 no such
+    action or nothing to undo.
+    """
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    try:
+        args = build_undo_parser().parse_args(argv)
+    except SystemExit as error:
+        return 2 if error.code else 0
+    owned = False
+    if store is None:
+        try:
+            path = _ledger_path(args)
+        except ValueError:
+            print("Invalid configuration", file=stderr)
+            return 2
+        if not path or not os.path.exists(path):
+            print("Ledger not found", file=stderr)
+            return 2
+        from slack_dispatch.ledger.store import LedgerStore
+        store = LedgerStore(path)
+        store.open()
+        owned = True
+    try:
+        store.migrate()
+        return undo_command(store, last=args.last, action_id=args.action_id, as_json=args.json,
+                            stdout=stdout, stderr=stderr, now=clock())
+    finally:
+        if owned:
+            store.close()
+
+
+def undo_command(store, *, last, action_id, as_json, stdout, stderr, now, by="cli"):
+    """The shared body of `undo` (this module and the inbox CLI): undo, print, exit code."""
+    try:
+        if last:
+            result = undo_last(store, now=now, by=by)
+        else:
+            result = undo(store, action_id, now=now, by=by)
+    except KeyError:
+        print("Nothing to undo" if last else "Action not found", file=stderr)
+        return 3
+    except UndoStateError as error:
+        print("Already undone" if error.code == "undone" else "Undo window expired", file=stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False) if as_json else undo_text(result), file=stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(undo_main())

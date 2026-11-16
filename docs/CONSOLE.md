@@ -49,6 +49,7 @@ console:
   lane_hint_people: true
   direct_lane: owner      # default owner-direct; when set it must be a configured lane
   ui_language: en         # en (default) or ko: the language of the page
+  undo_seconds: 30        # P19 undo window, at least 10
   channels:               # channel id -> display name, console only
     C0000000001: dummy-support
 ```
@@ -397,3 +398,115 @@ defaults to 48 (0 = all), `--status` takes the console filter values, `--json` p
 console row objects. With `--config` (or `SLACK_DISPATCH_CONFIG`) channel names, people and
 `display_timezone` are used; without it ids and UTC. An invalid status or a negative
 window exits with 2.
+
+## P19 console undo
+
+Immediate writes can be taken back for a short while. `console.undo_seconds` (default 30,
+minimum 10; a smaller value or a non-integer fails to load) is the window. `GET /api/config`
+returns `undo_seconds`.
+
+### Action journal
+
+Every console write that changes message rows records one row in the ledger table
+`console_actions(id, at, action, ids, before, after, by, undo_until, undone_at, result,
+meta)`:
+
+| Console write | `action` | Rows journaled |
+| --- | --- | --- |
+| Triage `Apply now` (`POST /api/queue/actions`) | `assign`, `direct`, `exclude`, `exclude_channel` or `done` | the ids that changed |
+| GO (`POST /api/queue/commit`) | `commit` | one row for the whole request, every id that changed (registry Done decisions included) |
+| Lane row (`POST /api/lanes/{lane}/actions`) | `lane_ack`, `lane_done` or `lane_reroute` | the ids that changed |
+| `exclude_channel` (either path) | as above | every open item of the channel it closed, plus the clicked one |
+
+`before` and `after` are JSON lists with one object per message id: `id`, `state`, `lane`,
+`note`, `done_at`, `ack_at`, `assigned_at` and `route_reason`. `ids` is a JSON list. `by`
+is `console`. `at` and `undo_until` (`at` plus `undo_seconds`) are local ISO times. `meta`
+is a JSON object with the target `lane` and the ids of the `wake_requests` rows (source
+`console`) and `channel_exclusions` rows (by `console`) that the write added. When the write
+changed the thread binding of a message (assign, direct, reroute), its `before` and `after`
+entries also carry `binding`: `{source, channel, thread_ts, lane}` (lane null when the
+thread had no binding). A write that
+changed nothing (every id a conflict or not found) records no row. Scope proposal
+decisions, claims and the Scope tab's channel exclusion `Undo` are not journaled; they
+have their own controls. A GO of more than 200 decisions is sent in chunks, one journal
+row per chunk.
+
+The write responses carry `undo`: `{action_id, action, lane, count, at, undo_until,
+seconds_left}`, or null when nothing was journaled, and `journal`: `ok` or `failed`.
+Journaling never changes the write itself (fix1): when the journal cannot be read or
+written, the action is still applied and answered as usual, `undo` is null, `journal` is
+`failed`, and one WARNING `Console journal failed action=<action> class=<exception class>`
+is logged.
+
+### Undo
+
+`POST /api/undo/{action_id}` with the body `{}` undoes one row while the console clock is
+at or before `undo_until` and the row is not undone yet (404 unknown id, 409 `Already
+undone` or `Undo window expired`). In one ledger transaction, for each id:
+
+- `restored`: the row's `state` and `lane` still equal the `after` snapshot, so the seven
+  `before` fields are written back exactly. The action's unconsumed `wake_requests` rows
+  for the id are removed; when one was already consumed the id gets `wake_sent: true` (the
+  lane saw a wake; it finds no pending item, nothing else to do).
+- `conflict`: the state or lane changed meanwhile (`detail` names the current state and
+  lane); the row and its wake requests are left unchanged.
+- `not_found`: the message row is gone.
+
+Thread bindings (fix1): a binding the action changed goes back to its earlier lane, or is
+removed when the thread had none, when at least one restored message carries it and the
+binding still has the action's lane. When it changed meanwhile it is left alone and those
+ids get `binding: binding_conflict`. Restored ids otherwise get `binding: restored`, or
+null when the action did not change a binding.
+
+The `channel_exclusions` rows the action wrote are ended (`removed_at`) when still active;
+an exclusion that existed before the action is never touched. When no message was restored
+(every id a conflict or not found), `nothing_restored` is true and the exclusions are kept.
+The response (also stored in `result`, with `undone_at`) is `{action_id, action, undone_at,
+by, nothing_restored, results: [{id, status, detail, wake_sent, wake_removed, binding}],
+counts: {restored, conflict, not_found, wake_sent, wake_removed, channel_exclusions_ended,
+binding_restored, binding_conflict}}`.
+
+Limits: undo does not remove the scope learning evidence (`scope_proposals`) that an assign
+or reroute recorded, so an undone mistake still counts toward a scope suggestion; reject or
+defer that proposal in the Scope tab if needed. The lane inbox record of an assign or
+reroute stays in the file but is hidden: after a reroute is undone the ledger lane is the
+old lane, and after an assign of a triage item is undone the row has no lane and is
+`human_pending`, which the inbox CLI no longer lists (fix1).
+
+`POST /api/undo/last` (body `{}`) undoes the most recent row that is not undone and still
+inside its window (404 `Nothing to undo`). `GET /api/actions?limit=20` (1 to 200) returns
+`{undo_seconds, actions}`, newest first, each with `id`, `at`, `when`, `time`, `action`,
+`lane`, `count`, `ids`, `by`, `undo_until`, `undone_at`, `undoable`, `seconds_left` and the
+stored `result`.
+
+### Page
+
+- After `Apply now`, a GO commit or a lane action, a bottom toast shows `<what happened> ·
+  Undo (Ns)` (`되돌리기 (N초)` in `ko`) with a live countdown. Clicking it, or the `z` key
+  while the toast shows, undoes that action and the toast shows the result (`Restored N`,
+  plus `conflict N`, `not found N`, `wake already sent N` and kept thread bindings when
+  not zero; `복구 N건`, `충돌 N건`, `깨우기는 이미 나감 N건` in `ko`). A write whose
+  journal failed shows no toast. The toast disappears when the window ends.
+- A lane row that was done or rerouted stays in place with `Handled · Undo (Ns)` (`처리됨`)
+  for the window; polling skips the lane inbox meanwhile and reloads it when the window
+  ends or after an undo. `Done` asks nothing extra.
+- The Service tab starts with `Recent actions` (`최근 작업`): the last 20 journal rows with
+  time, action, item count, by and an undo button while undoable, `expired` (`만료`)
+  afterwards or `undone` (`되돌림`).
+
+### CLI
+
+The inbox CLI has `undo [--last | ACTION_ID] [--json]` (fix1), which calls the same code:
+
+```sh
+python -m slack_dispatch.inbox.cli --ledger dummy/state/ledger.sqlite3 undo --last [--json]
+python -m slack_dispatch.console.actions --ledger dummy/state/ledger.sqlite3 undo --last [--json]
+python -m slack_dispatch.console.actions --config dummy-config.yaml undo 12 [--json]
+```
+
+The ledger comes from `--ledger`, `SLACK_DISPATCH_LEDGER`, or `ledger.path` of `--config`
+(or `SLACK_DISPATCH_CONFIG`); both options are also accepted after `undo`. Same rules as
+the console; the result's `by` is `cli`. Text output is one summary line plus one line per
+id that was not restored or whose wake was already sent; `--json` prints the result. Exit
+codes: 0 undone (conflicts are listed), 1 already undone or the window expired, 2 invalid
+arguments, configuration or missing ledger, 3 unknown action or nothing to undo.

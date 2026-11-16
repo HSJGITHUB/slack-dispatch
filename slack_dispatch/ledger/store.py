@@ -43,6 +43,25 @@ DETAIL_CHARS = 500
 RECEIPT_IGNORED_NOTES = ("cutover:", "owner_reaction:", "owner_post", "prehandled", "context",
                          "message_deleted", "human:")
 CARD_DECISION_REASON = "human:card"
+# P19 console undo journal: one row per console write that changed message rows. `before`
+# and `after` are JSON lists of SNAPSHOT_FIELDS per message id; `meta` (additive) holds the
+# wake_requests and channel_exclusions row ids the action wrote and the target lane.
+CONSOLE_ACTIONS_DDL = """CREATE TABLE IF NOT EXISTS console_actions (
+    id INTEGER PRIMARY KEY, at TEXT, action TEXT, ids TEXT, before TEXT, after TEXT, by TEXT,
+    undo_until TEXT, undone_at TEXT, result TEXT, meta TEXT)"""
+CONSOLE_ACTION_COLUMNS = {"at": "TEXT", "action": "TEXT", "ids": "TEXT", "before": "TEXT",
+                          "after": "TEXT", "by": "TEXT", "undo_until": "TEXT",
+                          "undone_at": "TEXT", "result": "TEXT", "meta": "TEXT"}
+SNAPSHOT_FIELDS = ("state", "lane", "note", "done_at", "ack_at", "assigned_at", "route_reason")
+OPEN_STATES = ("new", "assigned", "acked", "human_pending")
+
+
+class UndoStateError(Exception):
+    """A console action can no longer be undone: `undone` or `expired` (P19)."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
 
 
 def utc_stamp(epoch):
@@ -148,6 +167,12 @@ class LedgerStore:
                 if name not in present:
                     db.execute(f"ALTER TABLE delivery_log ADD COLUMN {name} {declaration}")
             db.execute("CREATE INDEX IF NOT EXISTS delivery_log_created ON delivery_log (created_at)")
+            # P19: console action journal for undo (additive).
+            db.execute(CONSOLE_ACTIONS_DDL)
+            present = {r[1] for r in db.execute("PRAGMA table_info(console_actions)")}
+            for name, declaration in CONSOLE_ACTION_COLUMNS.items():
+                if name not in present:
+                    db.execute(f"ALTER TABLE console_actions ADD COLUMN {name} {declaration}")
             if not versions:
                 db.execute("INSERT INTO schema_version(version) VALUES (2)")
             elif versions == [1]:
@@ -898,6 +923,201 @@ class LedgerStore:
                 receipt["decision_at"] = best[1] if best else None
             result.append(dict(row, **receipt))
         return result
+
+    # P19 console action journal and undo.
+
+    def message_snapshots(self, ids):
+        """{id: {id, SNAPSHOT_FIELDS...}} for the ids present in the ledger (no bodies)."""
+        ids = list(dict.fromkeys(ids))
+        result = {}
+        columns = ", ".join(("id",) + SNAPSHOT_FIELDS)
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for row in self._rows(f"SELECT {columns} FROM messages WHERE id IN ({marks})", chunk):
+                result[row["id"]] = row
+        return result
+
+    def binding_snapshots(self, ids):
+        """{id: {source, channel, thread_ts, lane}}: the thread binding each message's thread
+        (thread_ts, else ts) has now, lane None without a binding (fix1, for undo)."""
+        ids = list(dict.fromkeys(ids))
+        result = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for row in self._rows(
+                    "SELECT m.id, COALESCE(m.source, 'slack') AS source, m.channel, "
+                    "COALESCE(m.thread_ts, m.ts) AS root, b.lane FROM messages m "
+                    "LEFT JOIN bindings b ON b.source=COALESCE(m.source, 'slack') "
+                    "AND b.channel=m.channel AND b.thread_ts=COALESCE(m.thread_ts, m.ts) "
+                    f"WHERE m.id IN ({marks})", chunk):
+                if row["channel"] and row["root"]:
+                    result[row["id"]] = {"source": row["source"], "channel": row["channel"],
+                                         "thread_ts": row["root"], "lane": row["lane"]}
+        return result
+
+    def open_channel_ids(self, channel, *, source="slack"):
+        """Ids of the channel's open items (the rows `close_channel_items` would close)."""
+        marks = ", ".join("?" for _ in OPEN_STATES)
+        return [row["id"] for row in self._rows(
+            f"SELECT id FROM messages WHERE source=? AND channel=? AND state IN ({marks}) ORDER BY id",
+            (source, channel, *OPEN_STATES))]
+
+    def wake_request_mark(self):
+        """The highest wake_requests id (0 when empty): rows above it are newer."""
+        return self._rows("SELECT COALESCE(MAX(id), 0) AS n FROM wake_requests")[0]["n"]
+
+    def channel_exclusion_mark(self):
+        """The highest channel_exclusions id (0 when empty)."""
+        return self._rows("SELECT COALESCE(MAX(id), 0) AS n FROM channel_exclusions")[0]["n"]
+
+    def wake_requests_after(self, mark, ids, source):
+        """wake_requests rows above `mark` for the message ids and source, oldest first."""
+        wanted = set(ids)
+        return [row for row in self._rows("SELECT * FROM wake_requests WHERE id>? AND source=? "
+                                          "ORDER BY id", (mark, source))
+                if row["message_id"] in wanted]
+
+    def channel_exclusions_after(self, mark, by):
+        """channel_exclusions rows above `mark` written by `by`, oldest first."""
+        return self._rows("SELECT * FROM channel_exclusions WHERE id>? AND by=? ORDER BY id",
+                          (mark, by))
+
+    def add_console_action(self, *, at, action, ids, before, after, by, undo_until, meta=None):
+        """Insert one journal row (lists and dicts are stored as JSON) and return its id."""
+        with self._transaction() as db:
+            return db.execute(
+                "INSERT INTO console_actions (at, action, ids, before, after, by, undo_until, meta) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (at, action, json.dumps(list(ids)), json.dumps(before), json.dumps(after), by,
+                 undo_until, json.dumps(meta or {}))).lastrowid
+
+    def get_console_action(self, action_id):
+        rows = self._rows("SELECT * FROM console_actions WHERE id=?", (action_id,))
+        return rows[0] if rows else None
+
+    def list_console_actions(self, limit=20, *, pending_only=False):
+        """Journal rows newest first; `pending_only` keeps rows not undone yet."""
+        if not self.has_table("console_actions"):
+            return []
+        where = " WHERE undone_at IS NULL" if pending_only else ""
+        return self._rows(f"SELECT * FROM console_actions{where} ORDER BY id DESC LIMIT ?", (limit,))
+
+    def undo_console_action(self, action_id, *, at, now_epoch, by="console"):
+        """Restore the `before` fields of one journal row in one transaction.
+
+        Allowed while `now_epoch` is at or before `undo_until` and the row is not undone
+        (else UndoStateError `expired` or `undone`; KeyError for an unknown id). A message is
+        restored only when its state and lane still equal the `after` snapshot, else it is
+        reported as `conflict` and left unchanged. For a restored message the action's
+        unconsumed wake_requests rows are removed; a consumed one sets `wake_sent`.
+
+        fix1: a thread binding the action changed (entry key `binding`) goes back to its
+        earlier lane (or is removed when there was none) when at least one restored message
+        carries it and the binding still has the action's lane; otherwise those entries get
+        `binding: binding_conflict` and the binding is left alone. When no message was
+        restored (`nothing_restored`), the channel exclusions are kept; otherwise the
+        exclusions the action wrote are ended (removed_at) when still active.
+        Returns the result, which is also stored on the row with `undone_at`.
+        """
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM console_actions WHERE id=?", (action_id,)).fetchone()
+            if row is None:
+                raise KeyError(action_id)
+            if row["undone_at"]:
+                raise UndoStateError("undone")
+            until = _moment(row["undo_until"])
+            if until is None or float(now_epoch) > until.timestamp():
+                raise UndoStateError("expired")
+            before = {entry["id"]: entry for entry in _json_list(row["before"])}
+            after = {entry["id"]: entry for entry in _json_list(row["after"])}
+            meta = _json_dict(row["meta"])
+            wakes = {}
+            for wake_id in meta.get("wake_requests") or []:
+                wake = db.execute("SELECT * FROM wake_requests WHERE id=?", (wake_id,)).fetchone()
+                if wake is not None:
+                    wakes.setdefault(wake["message_id"], []).append(dict(wake))
+            assignments = ", ".join(f"{name}=?" for name in SNAPSHOT_FIELDS)
+            results = []
+            threads = {}  # binding key -> (earlier binding, binding after, restored entries)
+            for mid in _json_list(row["ids"]):
+                entry = {"id": mid, "status": "restored", "detail": None, "wake_sent": False,
+                         "wake_removed": 0, "binding": None}
+                results.append(entry)
+                current = db.execute("SELECT state, lane FROM messages WHERE id=?", (mid,)).fetchone()
+                old, new = before.get(mid), after.get(mid)
+                if current is None or old is None or new is None:
+                    entry["status"] = "not_found"
+                    continue
+                if (current["state"], current["lane"]) != (new.get("state"), new.get("lane")):
+                    entry.update(status="conflict", detail="now " + str(current["state"]) + " in "
+                                 + str(current["lane"] or "no lane"))
+                    continue
+                db.execute(f"UPDATE messages SET {assignments} WHERE id=?",
+                           (*(old.get(name) for name in SNAPSHOT_FIELDS), mid))
+                if isinstance(old.get("binding"), dict) and isinstance(new.get("binding"), dict):
+                    key = tuple(old["binding"].get(name) for name in ("source", "channel", "thread_ts"))
+                    first = threads.setdefault(key, (old["binding"], new["binding"], []))
+                    first[2].append(entry)
+                for wake in wakes.get(mid, []):
+                    if wake["consumed_at"]:
+                        entry["wake_sent"] = True
+                    else:
+                        db.execute("DELETE FROM wake_requests WHERE id=? AND consumed_at IS NULL",
+                                   (wake["id"],))
+                        entry["wake_removed"] += 1
+            for (source, channel, thread_ts), (earlier, later, entries) in threads.items():
+                current = db.execute("SELECT lane FROM bindings WHERE source=? AND channel=? "
+                                     "AND thread_ts=?", (source, channel, thread_ts)).fetchone()
+                if (current["lane"] if current else None) != later.get("lane"):
+                    status = "binding_conflict"
+                elif earlier.get("lane") is None:
+                    db.execute("DELETE FROM bindings WHERE source=? AND channel=? AND thread_ts=?",
+                               (source, channel, thread_ts))
+                    status = "restored"
+                else:
+                    db.execute("""INSERT INTO bindings VALUES (?, ?, ?, ?)
+                        ON CONFLICT(source, channel, thread_ts) DO UPDATE SET lane=excluded.lane""",
+                               (source, channel, thread_ts, earlier["lane"]))
+                    status = "restored"
+                for entry in entries:
+                    entry["binding"] = status
+            nothing_restored = not any(entry["status"] == "restored" for entry in results)
+            ended = 0
+            if not nothing_restored:
+                for exclusion_id in meta.get("channel_exclusions") or []:
+                    ended += db.execute("UPDATE channel_exclusions SET removed_at=? WHERE id=? "
+                                        "AND removed_at IS NULL", (at, exclusion_id)).rowcount
+            counts = {name: sum(entry["status"] == name for entry in results)
+                      for name in ("restored", "conflict", "not_found")}
+            counts["wake_sent"] = sum(entry["wake_sent"] for entry in results)
+            counts["wake_removed"] = sum(entry["wake_removed"] for entry in results)
+            counts["channel_exclusions_ended"] = ended
+            counts["binding_restored"] = sum(entry["binding"] == "restored" for entry in results)
+            counts["binding_conflict"] = sum(entry["binding"] == "binding_conflict"
+                                             for entry in results)
+            result = {"action_id": row["id"], "action": row["action"], "undone_at": at, "by": by,
+                      "nothing_restored": nothing_restored, "results": results, "counts": counts}
+            db.execute("UPDATE console_actions SET undone_at=?, result=? WHERE id=?",
+                       (at, json.dumps(result), row["id"]))
+            return result
+
+
+def _json_list(value):
+    try:
+        data = json.loads(value) if isinstance(value, str) else value
+    except ValueError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _json_dict(value):
+    try:
+        data = json.loads(value) if isinstance(value, str) else value
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def event_is_bot(event):

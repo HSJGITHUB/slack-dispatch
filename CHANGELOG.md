@@ -5,6 +5,28 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P19 console undo
+- Every console write that changes message rows (triage `Apply now`, a GO commit as one
+  row, lane `ack`, `done` and `reroute`, a channel exclusion with every item it closed) is
+  journaled in the new ledger table `console_actions` with per-id before and after
+  snapshots (state, lane, note, done_at, ack_at, assigned_at, route_reason).
+- `POST /api/undo/{id}` and `POST /api/undo/last` restore the before fields within
+  `console.undo_seconds` (default 30, minimum 10). An id whose state or lane changed
+  meanwhile is reported as `conflict` and left alone. Undoing an assign or reroute removes
+  its unconsumed wake requests and reports `wake_sent` when the wake already went out;
+  undoing a channel exclusion also ends the exclusion row it wrote.
+- Console: a bottom toast with a live countdown after each immediate action or GO (`z`
+  undoes while it shows), `Handled · Undo` inline on lane rows that were done or rerouted,
+  and a `Recent actions` card in the Service tab (`GET /api/actions`).
+- CLI: `undo [--last | ACTION_ID] [--json]` in the inbox CLI and as
+  `python -m slack_dispatch.console.actions undo`.
+- Undo also returns a thread binding the action changed to its earlier lane (or reports
+  `binding_conflict` when it changed meanwhile). When no item is restored the channel
+  exclusion stays (`nothing_restored`). A journal failure never changes the action or its
+  response (`journal: failed`, one WARNING).
+- Inbox `inbox` no longer lists rows without a lane in state `human_pending` or `excluded`
+  (an assign undone from the console no longer shows in the lane inbox).
+
 ### P18 delivery log
 - New ledger table `delivery_log`: one row per attempt to wake a lane session or to reach
   the operator (digest, card, attention, reminder), including the skipped cases

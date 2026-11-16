@@ -13,6 +13,7 @@ import logging
 import re
 from pathlib import Path
 
+from slack_dispatch.console.actions import seconds_left, undoable
 from slack_dispatch.inbox.cli import display_zone, show_inbox
 from slack_dispatch.ingest.membership import member_status
 from slack_dispatch.ledger.store import LedgerStore
@@ -715,3 +716,34 @@ def deliveries_summary(store, now, *, hours=DELIVERY_DEFAULT_HOURS):
                                  for row in rows),
             "unconfirmed": sum(row.get("purpose") == "lane" and row.get("status") == "sent"
                                and row.get("received_at") is None for row in rows)}
+
+
+# P19 console undo: recent journal rows for the Service tab.
+
+def recent_actions(store, view, now, *, limit=20):
+    """The newest `console_actions` rows with `undoable` and `seconds_left` at `now`.
+
+    Each row: id, at, when (display time zone), action, lane, count, ids, by, undo_until,
+    undone_at, undoable, seconds_left and the stored undo `result` (null until undone)."""
+    rows = []
+    for row in store.list_console_actions(limit):
+        ids = _json_value(row.get("ids"), [])
+        meta = _json_value(row.get("meta"), {})
+        rows.append({"id": row["id"], "at": row.get("at"), "when": _full_time(view, row.get("at")),
+                     "time": _clock_time(view, row.get("at")), "action": row.get("action"),
+                     "lane": meta.get("lane") if isinstance(meta, dict) else None,
+                     "count": len(ids) if isinstance(ids, list) else 0,
+                     "ids": ids if isinstance(ids, list) else [], "by": row.get("by"),
+                     "undo_until": row.get("undo_until"), "undone_at": row.get("undone_at"),
+                     "undoable": undoable(row, now), "seconds_left": seconds_left(row, now),
+                     "result": _json_value(row.get("result"), None)})
+    return rows
+
+
+def _json_value(value, default):
+    if value is None:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return default

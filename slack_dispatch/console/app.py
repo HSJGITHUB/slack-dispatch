@@ -3,6 +3,8 @@
 Local operator tool: no authentication, 127.0.0.1 by default, `Cache-Control: no-store`
 on every response, Host and Origin checks against DNS rebinding and cross-site posts.
 Writes go through `slack_dispatch.console.actions`, which mirrors the inbox CLI.
+Since P19 every write that changes message rows is journaled and can be undone for
+`console.undo_seconds` (`POST /api/undo/{id}`, `POST /api/undo/last`, `GET /api/actions`).
 Nothing here logs request lines, queries or message bodies.
 """
 import logging
@@ -17,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from slack_dispatch import __version__
 from slack_dispatch.console import actions, queries
-from slack_dispatch.ledger.store import ProposalStateError
+from slack_dispatch.ledger.store import ProposalStateError, UndoStateError
 from slack_dispatch.notify.session_resolve import SessionResolver
 from slack_dispatch.resolver.owner import OwnerResolver
 
@@ -66,6 +68,10 @@ class LaneActionRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=actions.MAX_IDS)
     lane: str | None = Field(default=None, max_length=100)
     note: str | None = Field(default=None, max_length=2000)
+
+
+class UndoRequest(BaseModel):
+    """P19 undo: the body is an empty JSON object, so a cross-site form cannot post it."""
 
 
 def allowed_hosts(config, host=None):
@@ -150,6 +156,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
     resolver = resolver or SessionResolver(config.sessions_dir)
     lanes = queries.lane_ids(config)
     threshold = config.scope_learning.min_evidence
+    undo_seconds = config.console.undo_seconds
     if owner is None and config.owner_resolver.enabled:
         owner = OwnerResolver(config)
     app.state.config, app.state.store, app.state.view = config, store, view
@@ -184,7 +191,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                 "timezone_warning": view.zone_warning, "store_body": config.ledger.store_body,
                 "lane_hint_people": config.console.lane_hint_people,
                 "ui_language": config.console.ui_language,
-                "owner_resolver": owner is not None}
+                "owner_resolver": owner is not None, "undo_seconds": undo_seconds}
 
     @app.get("/api/queue")
     def queue(offset: int = Query(0, ge=0), limit: int | None = Query(None, ge=1, le=500)):
@@ -204,15 +211,17 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                 raise HTTPException(400, "Direct lane is not configured")
             checked_lane(lane)
         note = (request.note or "").strip() or None
+        journal = actions.Journal(store, request.action, lane=lane)
         results = actions.apply(store, root, request.action, request.ids, lane=lane, note=note,
-                                guard=actions.queue_guard, min_evidence=threshold)
+                                guard=actions.queue_guard, min_evidence=threshold, journal=journal)
+        undo = journal.finish(undo_seconds, clock())
         if request.action == "exclude":
             for result in results:
                 add_channel_hint(result, result["ok"])
         if request.action == "exclude_channel":
             for result in results:
                 add_excluded_channel(result, result["ok"])
-        return summary(results, lane)
+        return dict(summary(results, lane), undo=undo, journal=journal.status)
 
     def add_excluded_channel(row, applied):
         """P15: name the channel an applied exclude_channel closed."""
@@ -252,6 +261,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
         not_found or error. A failure never stops the rest; ids not sent are untouched.
         """
         results, seen = [], set()
+        journal = actions.Journal(store, "commit")
         for decision in request.decisions:
             row = {"id": decision.id, "action": decision.action, "lane": None,
                    "status": "error", "detail": None}
@@ -267,7 +277,7 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
             note = (decision.note or "").strip() or None
             result = actions.apply(store, root, decision.action, [decision.id], lane=lane,
                                    note=note, guard=actions.queue_guard,
-                                   min_evidence=threshold)[0]
+                                   min_evidence=threshold, journal=journal)[0]
             status = actions.commit_status(result)
             row.update(lane=lane, status=status,
                        detail=result["detail"] or (result["error"] if status == "error" else None))
@@ -278,7 +288,10 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                 add_excluded_channel(row, row["status"] == "applied")
         counts = {name: sum(row["status"] == name for row in results)
                   for name in actions.COMMIT_STATUSES}
-        return {"results": results, "counts": counts}
+        # P19: one journal row for the whole commit (null when nothing changed). A journal
+        # failure never changes the commit; `journal` says `failed` then (fix1).
+        undo = journal.finish(undo_seconds, clock())
+        return {"results": results, "counts": counts, "undo": undo, "journal": journal.status}
 
     @app.get("/api/lanes")
     def lane_list():
@@ -299,9 +312,39 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
                 raise HTTPException(400, "Lane is required")
             target = checked_lane(request.lane)
         note = (request.note or "").strip() or None
+        journal = actions.Journal(store, "lane_" + request.action, lane=target or lane)
         results = actions.apply(store, root, request.action, request.ids, lane=target, note=note,
-                                guard=actions.lane_guard(lane), min_evidence=threshold)
-        return summary(results, target)
+                                guard=actions.lane_guard(lane), min_evidence=threshold,
+                                journal=journal)
+        undo = journal.finish(undo_seconds, clock())
+        return dict(summary(results, target), undo=undo, journal=journal.status)
+
+    # P19 undo: recent journal rows for the Service tab, undo one row or the last one.
+
+    @app.get("/api/actions")
+    def recent_actions(limit: int = Query(20, ge=1, le=200)):
+        return {"undo_seconds": undo_seconds,
+                "actions": queries.recent_actions(store, view, clock(), limit=limit)}
+
+    def undo_response(run):
+        try:
+            return run()
+        except KeyError:
+            raise HTTPException(404, "Action not found") from None
+        except UndoStateError as error:
+            detail = "Already undone" if error.code == "undone" else "Undo window expired"
+            raise HTTPException(409, detail) from None
+
+    @app.post("/api/undo/last")
+    def undo_last(request: UndoRequest):
+        row = actions.last_undoable(store, clock())
+        if row is None:
+            raise HTTPException(404, "Nothing to undo")
+        return undo_response(lambda: actions.undo(store, row["id"], now=clock()))
+
+    @app.post("/api/undo/{action_id}")
+    def undo_action(action_id: int, request: UndoRequest):
+        return undo_response(lambda: actions.undo(store, action_id, now=clock()))
 
     @app.get("/api/service")
     def service():

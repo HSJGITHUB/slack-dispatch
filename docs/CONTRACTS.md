@@ -401,3 +401,43 @@ All additive; the schema version stays 2.
   `not_delivered_patterns`).
 - Console: page `/deliveries`, `GET /api/deliveries`, `GET /api/deliveries/summary`.
 - Inbox CLI: `deliveries [--lane L] [--hours N] [--status S] [--json]`.
+
+## P19 console undo
+
+All additive; the schema version stays 2.
+
+- Ledger table created by `migrate()`: `console_actions(id INTEGER PRIMARY KEY, at TEXT,
+  action TEXT, ids TEXT, before TEXT, after TEXT, by TEXT, undo_until TEXT, undone_at TEXT,
+  result TEXT, meta TEXT)`; `migrate()` adds missing columns to an earlier table. `before`
+  and `after` are JSON lists of `{id, state, lane, note, done_at, ack_at, assigned_at,
+  route_reason}` (`SNAPSHOT_FIELDS`); `meta` is `{lane, wake_requests: [ids],
+  channel_exclusions: [ids]}`.
+- `LedgerStore` adds `message_snapshots(ids)`, `open_channel_ids(channel, *, source)`,
+  `wake_request_mark()`, `channel_exclusion_mark()`, `wake_requests_after(mark, ids,
+  source)`, `channel_exclusions_after(mark, by)`, `add_console_action(*, at, action, ids,
+  before, after, by, undo_until, meta=None)`, `get_console_action(id)`,
+  `list_console_actions(limit=20, *, pending_only=False)` and `undo_console_action(id, *,
+  at, now_epoch, by="console")` (raises KeyError or `UndoStateError` with `code` `undone`
+  or `expired`). `undo_console_action` deletes the action's unconsumed `wake_requests`
+  rows of restored ids and sets `removed_at` on its still active `channel_exclusions` rows.
+- `console.actions`: `Journal(store, action, *, lane=None, by="console")` with `watch(ids)`,
+  `channel_items(message)` and `finish(undo_seconds, now)`; `apply(..., journal=None)`;
+  `undo(store, action_id, *, now, by)`, `undo_last`, `last_undoable(store, now)`,
+  `undoable(row, now)`, `seconds_left(row, now)`, `stamp_at(epoch)`, `undo_text(result)`,
+  `undo_main(argv=None, *, store=None, stdout=None, stderr=None, clock=time.time)` and the
+  module entry point `python -m slack_dispatch.console.actions undo [--last | ACTION_ID]
+  [--json]`.
+- `console.queries.recent_actions(store, view, now, *, limit=20)`.
+- Console: `POST /api/queue/actions`, `POST /api/queue/commit` and `POST
+  /api/lanes/{lane}/actions` responses add `undo`; `GET /api/config` adds `undo_seconds`;
+  new `GET /api/actions`, `POST /api/undo/last` and `POST /api/undo/{action_id}` (JSON body
+  `{}`).
+- Config: optional `console.undo_seconds` (integer, default 30, minimum 10).
+- fix1: `Journal` never raises (`failed`, `status`); write responses add `journal` (`ok` or
+  `failed`). `LedgerStore.binding_snapshots(ids)`; journal entries may carry `binding`
+  (`{source, channel, thread_ts, lane}`), restored on undo or reported `binding_conflict`;
+  undo results add `nothing_restored` (exclusions kept when true), per-id `binding` and
+  counts `binding_restored`, `binding_conflict`. `actions.undo_command(store, *, last,
+  action_id, as_json, stdout, stderr, now, by="cli")`. Inbox CLI: `undo [--last |
+  ACTION_ID] [--json]` (`UNDO_CLOCK`), and `inbox_rows` skips rows whose ledger lane is null
+  and state is `human_pending` or `excluded`.
