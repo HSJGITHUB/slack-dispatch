@@ -134,9 +134,11 @@ class BindingRestoreTests(UndoCase):
         info = self.post("/api/queue/commit", {"decisions": [
             {"id": root, "action": "assign", "lane": "support"},
             {"id": reply, "action": "assign", "lane": "content"}]})["undo"]
-        self.assertEqual(self.binding(root), "content")
+        # P24: assigning the reply keeps the binding the root assignment made.
+        self.assertEqual(self.binding(root), "support")
         result = self.undo(info["action_id"])
-        self.assertEqual([row["binding"] for row in result["results"]], ["restored", "restored"])
+        # P24: only the root assignment changed the binding, so only it carries one.
+        self.assertEqual([row["binding"] for row in result["results"]], ["restored", None])
         self.assertIsNone(self.binding(root))
 
     def test_actions_without_binding_change_carry_none(self):

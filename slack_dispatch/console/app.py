@@ -76,6 +76,8 @@ class LaneActionRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=actions.MAX_IDS)
     lane: str | None = Field(default=None, max_length=100)
     note: str | None = Field(default=None, max_length=2000)
+    # P24: reroute only; also move the thread's open items in the old lane and the binding.
+    thread: bool = False
 
 
 class UndoRequest(BaseModel):
@@ -353,7 +355,8 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
         journal = actions.Journal(store, "lane_" + request.action, lane=target or lane)
         results = actions.apply(store, root, request.action, request.ids, lane=target, note=note,
                                 guard=actions.lane_guard(lane), min_evidence=threshold,
-                                journal=journal)
+                                journal=journal,
+                                thread=request.thread and request.action == "reroute")
         undo = journal.finish(undo_seconds, clock())
         return dict(summary(results, target), undo=undo, journal=journal.status)
 

@@ -579,3 +579,43 @@ All additive; the schema version stays 2 and no table changes.
   `counts["catchup_wakes"]`.
 - Inbox record kinds, the duplicate path, human notices and the prehandled and owner post
   paths are unchanged.
+
+## P24 edit and reroute guards
+
+- `LedgerStore.record_event` returns `RecordResult.previous_state` and
+  `RecordResult.previous_lane` (additive, default None): for a `message_changed` event of
+  an existing row, the row's state and lane before the update; None for every other event,
+  for unknown rows and for duplicates. An edit still updates only `edited_at`, `followup`,
+  `has_files`, `is_bot` and the body; state, lane and route_reason are never touched.
+- `slack_dispatch.ingest.normalize.comparable_text(value)`: one comparison form for a
+  stored body and an edit text (`<url|label>` -> `url`, `<@U|name>` -> `<@U>`,
+  `<#C|name>` -> `<#C>`, `<!...>` dropped, `&lt;`, `&gt;`, `&amp;` decoded, word-boundary
+  spans `*x*`, `_x_`, `~x~`, inline code and code fences unwrapped, line-leading bullets and
+  `>` dropped, whitespace collapsed; fix1: markers inside a word such as `5*3` or
+  `snake_case` stay); None for a
+  non-string. Nothing is stored in this form.
+- `slack_dispatch.pipeline`: `edit_text_changed` compares `comparable_text` of both sides
+  (a missing value still counts as changed). `LANE_HELD_STATES = ("assigned", "acked",
+  "done")`, `edit_state(message, recorded)` (previous_state, else the row state) and
+  `edit_holds_lane(message, recorded)`. `_edit_verdict` reads `edit_state`. In `_handle` a
+  `message_changed` event of an item that held a lane never reaches `route` or
+  `apply_decision`: `EDIT_FIRST` becomes `EDIT_IGNORE`, and `EDIT_WAKE` runs
+  `Pipeline._redeliver_edit` (state `assigned` in the current lane, lane and route_reason
+  kept, followup inbox record, wake offer, edit counters and window, attention flag and
+  notice from the edited text; returns `HandleResult(state="assigned", lane=<current>)`).
+  `human_pending` and `new` items, and rows without a lane, keep the P22 paths. fix1:
+  `edit_redeliverable(message)` is False for owner posts, prehandled items and context
+  rows (route_reason or note), whose `EDIT_WAKE` also becomes `EDIT_IGNORE`;
+  `_redeliver_edit` calls `_hydrate(event)` and adds 1 to `counters["routed"]`.
+- `slack_dispatch.console.actions`: `thread_key(message)`, `is_thread_root(message)`,
+  `thread_items(store, message, lane)` (open item ids of the thread in `lane`, context rows
+  and owner posts left out), `bind_message_thread(..., only_unbound=False)` (returns True
+  when it bound). `reroute(..., thread=False)`: the binding moves only for a thread root or
+  with `thread`; with `thread` the other open items of the thread in the old lane are
+  rerouted too (reason `reroute:<their lane>`, `reroute` record, one wake request each).
+  `assign` of a reply binds only an unbound thread. `apply(..., thread=False)` passes
+  `thread` to `reroute` and lets the journal watch the extra items.
+- Inbox CLI: `reroute ID --to LANE [--thread]`.
+- Console (fix1): `LaneActionRequest.thread: bool = False`; `POST /api/lanes/{lane}/actions`
+  passes `thread=request.thread and request.action == "reroute"` to `actions.apply`. The
+  console page does not send it yet.

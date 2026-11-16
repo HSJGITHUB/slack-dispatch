@@ -27,8 +27,12 @@ store. This CLI consumes the shared LedgerStore API.
   page such as cp949; streams injected by a caller are left unchanged.
 - `ack slack:CDUMMY:1`: mark the message acknowledged.
 - `done slack:CDUMMY:1 --note complete`: complete the message with an optional note.
-- `reroute slack:CDUMMY:1 --to content`: route with reason `reroute:<old lane>`,
+- `reroute slack:CDUMMY:1 --to content [--thread]`: route with reason `reroute:<old lane>`,
   append a `reroute` record to the destination inbox and queue a wake request (P12).
+  Since P24 a reply rerouted alone moves that reply only and leaves the thread binding;
+  rerouting a thread root moves the binding. `--thread` also moves every open item of the
+  thread that sits in the old lane (root included) and points the binding at the new lane
+  (see "Reroute and the thread binding (P24)").
 - `claim support --session dummy-session [--config PATH]`: replace the lane's ledger
   session pointer. Without `--session`, use `SLACK_DISPATCH_SESSION`, then
   `CLAUDE_SESSION_ID`. The value is stored verbatim and may be any form described in
@@ -328,11 +332,35 @@ within about five seconds (see SERVICE.md).
 ## P13 scope registration and recorded sends
 
 `assign` and `reroute` also set the thread binding of the message (thread_ts, else ts)
-to the new lane, so later replies follow it. They record scope learning evidence: every
+to the new lane, so later replies follow it (since P24 only under the rule below). They
+record scope learning evidence: every
 `reroute` to another lane, and an `assign` of an item that was `human_pending`, adds one
 event for (`channel` or `dm`, conversation id, lane) in `scope_proposals`. With a config
 the threshold is `scope_learning.min_evidence`; an unreadable config is ignored here.
 Learning is advisory and never fails the command.
+
+### Reroute and the thread binding (P24)
+
+A reroute of one reply must not move a thread that belongs to another lane (live case
+2026-11-16: rerouting one reply of a design thread rebound the whole thread, so the
+thread's next replies went to the wrong lane until the operator rebound it by hand).
+Since P24:
+
+- `reroute ID --to LANE` of a reply moves that reply only. The thread binding stays.
+- `reroute ID --to LANE` of a thread root (no thread_ts, or thread_ts equal to its ts)
+  moves the root and points the binding at LANE. Other items of the thread stay where
+  they are.
+- `reroute ID --to LANE --thread` (root or reply) moves every open item (`new`,
+  `assigned`, `acked`, `human_pending`) of the thread that sits in the old lane of ID,
+  root included, each with reason `reroute:<old lane>`, a `reroute` inbox record and a
+  wake request, and points the binding at LANE. Done items, items in other lanes,
+  context rows and owner posts are left alone. Scope learning counts one event.
+- `assign ID LANE` of a root binds the thread as before. `assign` of a reply binds only
+  a thread that has no binding yet.
+
+The console lane action `reroute` uses the same rule (`"thread": true` in the
+`POST /api/lanes/{lane}/actions` body is the `--thread` form). Lane cheat sheet line: `reroute <id> --to <lane>` moves one
+item (a root also moves the thread binding); add `--thread` to move the whole thread.
 
 ### `scope add LANE [--channel C...] [--thread C...:TS] [--dm D...] [--person U...] [--note TEXT]`
 

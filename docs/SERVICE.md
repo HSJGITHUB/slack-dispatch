@@ -55,7 +55,8 @@ Slack sends `message_changed` for real text edits and also when link previews at
 (the text unchanged), often several times within seconds. Every edit of an existing row
 is recorded in the ledger first (body when store_body is on, `edited_at`, `followup=1`).
 The pipeline then compares the normalized new text with the stored body before the
-update (both whitespace-trimmed; a missing stored body or new text counts as changed)
+update (both in the P24 comparison form, see below; a missing stored body or new text
+counts as changed)
 and applies `wake_policy.followup`:
 
 ```yaml
@@ -67,8 +68,8 @@ wake_policy:
   a wake offer only when the text changed, the item was `acked` or `done` before the
   event (the lane had already read or closed it) and no edit wake was offered for the same
   message id within `service.followup_window_seconds` (inclusive, process memory). Such an
-  edit re-routes the item as before P22, so an acked or done item becomes `assigned`
-  again. A text edit of a `human_pending` item is routed again (fix1): when it now
+  edit makes an acked or done item `assigned` again; since P24 it stays in its current
+  lane instead of being routed again (see below). A text edit of a `human_pending` item is routed again (fix1): when it now
   routes to a lane it is a first assignment (inbox record, wake and attention notice as
   usual, outside the edit counters and window); when it stays `human_pending` only the
   ledger and the queue export change, with no second queue notice. Every other edit (an
@@ -90,6 +91,36 @@ unchanged. Each edit recorded without a wake logs one INFO line `Edit recorded w
 wake id=<message id>` (no text). Heartbeat counters `edits_ignored` (edits recorded
 without a wake) and `edits_woken` (edits that reached a lane wake offer) appear once
 either is nonzero.
+
+### Edits never re-route an item with a lane (P24)
+
+Since P24 an edit of an item that had a lane before the event (state `assigned`, `acked`
+or `done` with a lane set, items rerouted or assigned by hand included) is never routed
+again: lane, route_reason and the thread binding stay as they are, under every policy.
+The gate reads the state and lane as `record_event` found them before it applied the
+edit (`RecordResult.previous_state`, `previous_lane`). The only edit that does something
+for such an item is the P22 wake case (`changed_after_ack`: text changed, state `acked`
+or `done`, outside the window; `always`: every edit): the item becomes `assigned` again
+in its current lane and gets a followup inbox record and a wake offer there, without
+routing (the attention flag and notice still follow the edited text). Every other edit of
+such an item, an `EDIT_FIRST` verdict included, is recorded only. Items the service
+closed itself (route_reason or note `owner_post`, `prehandled`, `context`) are never
+re-delivered by an edit (fix1). The re-delivery hydrates a missing thread root and counts
+in the `routed` counter like other routing. `human_pending` items keep the P22 fix1 rule
+and `new` items route normally.
+
+The text comparison compares like with like: the stored body (rendered from rich text
+blocks when the message had them) and the new text (the edit's blocks when present,
+else its raw mrkdwn `text`) are both reduced to one comparison form first: link and
+mention tokens keep their target (`<url|label>` becomes `url`, `<@U...|name>` becomes
+`<@U...>`), broadcasts drop, HTML entities decode, formatting markers at word boundaries
+(`*bold*`, `_italic_`, `~strike~`, inline code and code fences, line-leading bullets and
+quote prefixes) drop and whitespace collapses. Markers inside a word stay, so `5*3` and
+`53` or `snake_case` and `snakecase` are different texts (fix1). A link preview edit
+that arrives without blocks is therefore no text change. Live case 2026-11-16: a reply
+rerouted from lane A to lane B was routed again by a later link preview edit and
+landed in lane A as kind `new`: the edit passed the gate and the EDIT_WAKE path
+recomputed the lane (thread inherit) instead of keeping the current one.
 
 ### Catch-up wakes (P23)
 

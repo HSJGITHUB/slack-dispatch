@@ -15,6 +15,13 @@ so later replies follow it, and record scope learning evidence (a `scope_proposa
 every reroute to another lane, and an assignment of an item that was `human_pending`.
 Card decisions use `assign` and share both behaviours.
 
+Since P24 the binding rule depends on the message (`is_thread_root`): `reroute` of a reply
+moves that reply only and leaves the binding; `reroute` of a thread root moves the binding.
+`reroute(..., thread=True)` (CLI `--thread`, `apply(..., thread=True)` for the console)
+also moves every open item of the thread that is in the old lane and points the binding at
+the new lane. `assign` of a root binds as before; `assign` of a reply binds only a thread
+without a binding.
+
 Since P15 `exclude_channel` (console only, no CLI command) writes a ledger channel
 exclusion that the router reads at runtime like `excluded_channels`, and moves every open
 item of the channel to `excluded` with note `human:console:channel`.
@@ -34,7 +41,7 @@ import sys
 import time
 
 from slack_dispatch.inbox.files import append, record, validate_lane
-from slack_dispatch.ledger.store import SNAPSHOT_FIELDS, UndoStateError
+from slack_dispatch.ledger.store import OPEN_STATES, SNAPSHOT_FIELDS, UndoStateError
 from slack_dispatch.router.apply import record_scope_proposal
 
 LOG = logging.getLogger(__name__)
@@ -98,17 +105,50 @@ def _lane(store, lane):
         raise ActionError("lane_not_found")
 
 
-def bind_message_thread(store, message, lane):
-    """Point the message's thread (its thread_ts, else its own ts) at the lane (P13)."""
+def thread_key(message):
+    """(source, channel, thread root ts) of the message's thread, or None (P24)."""
     root = message.get("thread_ts") or message.get("ts")
     if message.get("channel") and root:
-        store.bind_thread(message.get("source") or "slack", message["channel"], root, lane)
+        return (message.get("source") or "slack", message["channel"], root)
+    return None
+
+
+def is_thread_root(message):
+    """P24: a message that is not a reply (no thread_ts, or thread_ts equal to its ts)."""
+    return not message.get("thread_ts") or message.get("thread_ts") == message.get("ts")
+
+
+def bind_message_thread(store, message, lane, *, only_unbound=False):
+    """Point the message's thread (its thread_ts, else its own ts) at the lane (P13).
+
+    P24: with `only_unbound` an existing binding is kept. Returns True when it bound."""
+    key = thread_key(message)
+    if key is None:
+        return False
+    if only_unbound and store.lookup_binding(*key) is not None:
+        return False
+    store.bind_thread(*key, lane)
+    return True
+
+
+def thread_items(store, message, lane):
+    """P24: ids of the open items (OPEN_STATES) of the message's thread that sit in `lane`,
+    thread root included, oldest first. Context rows and owner posts are left out. Stores
+    without `thread_messages` (test fakes) return none."""
+    key = thread_key(message)
+    lookup = getattr(store, "thread_messages", None)
+    if key is None or not lane or not callable(lookup):
+        return []
+    return [row["id"] for row in lookup(*key)
+            if row.get("lane") == lane and row.get("state") in OPEN_STATES
+            and not inbox_refusal(row)]
 
 
 def assign(store, inbox_root, message_id, lane, *, note=None, reason=REASON, min_evidence=None):
     """CLI `assign ID LANE [--note]`: route, optional note, bind the thread to the lane,
     append a `new` inbox record, queue a lane wake (source = the reason without `human:`).
-    Assigning a `human_pending` item records scope learning evidence (P13)."""
+    Assigning a `human_pending` item records scope learning evidence (P13).
+    P24: a root binds its thread as before; a reply binds only a thread without a binding."""
     message = _message(store, message_id)
     _lane(store, lane)
     refusal = inbox_refusal(dict(message, id=message_id))
@@ -117,7 +157,7 @@ def assign(store, inbox_root, message_id, lane, *, note=None, reason=REASON, min
     store.set_route(message_id, lane, reason)
     if note:
         store.set_state(message_id, "assigned", note=note)
-    bind_message_thread(store, message, lane)
+    bind_message_thread(store, message, lane, only_unbound=not is_thread_root(message))
     append(inbox_root, lane, [record(dict(message, id=message_id), "new")])
     request_wake(store, lane, message_id, _source(reason))
     if message.get("state") == "human_pending":
@@ -125,20 +165,33 @@ def assign(store, inbox_root, message_id, lane, *, note=None, reason=REASON, min
     return message
 
 
-def reroute(store, inbox_root, message_id, lane, *, source="console", min_evidence=None):
-    """CLI `reroute ID --to LANE`: reason `reroute:<old lane>`, bind the thread to the new
-    lane, append a `reroute` record, queue a lane wake. A reroute to another lane records
-    scope learning evidence (P13)."""
+def reroute(store, inbox_root, message_id, lane, *, source="console", min_evidence=None,
+            thread=False):
+    """CLI `reroute ID --to LANE [--thread]`: reason `reroute:<old lane>`, append a `reroute`
+    record, queue a lane wake. A reroute to another lane records scope learning evidence
+    (P13).
+
+    P24: the thread binding moves to the new lane only for a thread root or with `thread`;
+    a reply rerouted alone leaves it. With `thread` every other open item of the thread in
+    the old lane (root included) is rerouted the same way (reason, record, wake request);
+    the learning evidence stays one event per call."""
     message = _message(store, message_id)
     _lane(store, lane)
     refusal = inbox_refusal(dict(message, id=message_id))
     if refusal:
         raise ActionError("not_inbox_item", refusal)
-    store.set_route(message_id, lane, "reroute:" + str(message.get("lane") or "none"))
-    bind_message_thread(store, message, lane)
-    append(inbox_root, lane, [record(dict(message, id=message_id), "reroute")])
-    request_wake(store, lane, message_id, source)
-    if message.get("lane") != lane:
+    old = message.get("lane")
+    others = ([mid for mid in thread_items(store, message, old) if mid != message_id]
+              if thread and old and old != lane else [])
+    for mid, row in [(message_id, message)] + [(mid, store.get_message(mid)) for mid in others]:
+        if row is None:
+            continue
+        store.set_route(mid, lane, "reroute:" + str(row.get("lane") or "none"))
+        append(inbox_root, lane, [record(dict(row, id=mid), "reroute")])
+        request_wake(store, lane, mid, source)
+    if thread or is_thread_root(message):
+        bind_message_thread(store, message, lane)
+    if old != lane:
         record_scope_proposal(store, message, lane, "reroute", min_evidence=min_evidence)
     return message
 
@@ -193,8 +246,11 @@ def lane_guard(lane):
 
 
 def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, min_evidence=None,
-          journal=None):
+          journal=None, thread=False):
     """Apply one action to each unique id in order; return one result per id.
+
+    P24: `thread` (reroute only) also moves the open items of each id's thread that are in
+    its old lane and the thread binding (see `reroute`); the journal watches them too.
 
     `lane` is the destination for assign, direct and reroute. `note` is recorded by
     assign (when set) and done; done without a note records `human:console`. A guard
@@ -216,10 +272,13 @@ def apply(store, inbox_root, action, ids, *, lane=None, note=None, guard=None, m
                 guard(message)
             if journal is not None and action == "exclude_channel" and message.get("channel"):
                 journal.watch(journal.channel_items(message))
+            if journal is not None and action == "reroute" and thread:
+                journal.watch(thread_items(store, message, message.get("lane")))
             if action in ("assign", "direct"):
                 assign(store, inbox_root, message_id, lane, note=note, min_evidence=min_evidence)
             elif action == "reroute":
-                reroute(store, inbox_root, message_id, lane, min_evidence=min_evidence)
+                reroute(store, inbox_root, message_id, lane, min_evidence=min_evidence,
+                        thread=thread)
             elif action == "exclude":
                 exclude(store, message_id)
             elif action == "exclude_channel":

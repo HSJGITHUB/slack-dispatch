@@ -53,6 +53,52 @@ def message_body(message):
     return "\n".join(files) if files else message.get("text")
 
 
+# P24: raw mrkdwn tokens that message_body renders differently from rich text blocks.
+_ANGLE_TOKEN = re.compile(r"<([^<>]*)>")
+# fix1: only formatting markers at word boundaries drop (`*bold*`, `_italic_`, `~strike~`,
+# `` `code` ``, code fences, a line-leading bullet); `5*3` and `snake_case` keep theirs.
+_FENCE = re.compile(r"```")
+_SPAN = re.compile(r"(?<![\w*_~`])([*_~`])(?=\S)(.+?)(?<=\S)\1(?![\w*_~`])", re.S)
+_BULLET = re.compile(r"(?m)^\s*•\s*")
+_QUOTE = re.compile(r"(?m)^\s*>\s?")
+_ENTITIES = (("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&"))
+
+
+def _angle(match):
+    inner = match.group(1)
+    target = inner.split("|", 1)[0]
+    if target.startswith(("@", "#")):
+        return "<" + target + ">"
+    if target.startswith("!"):
+        return ""  # broadcasts and user groups: message_body renders no text for them
+    return target
+
+
+def comparable_text(value):
+    """P24: a stored body or an edit text reduced to one comparison form, so a body rendered
+    from rich text blocks (message_body) and the raw mrkdwn `text` of the same message
+    compare equal. Links and labelled mentions keep their target only (`<url|label>` ->
+    `url`, `<@U1|name>` -> `<@U1>`), broadcasts drop, HTML entities decode, formatting
+    markers at word boundaries (`*bold*`, `_italic_`, `~strike~`, `` `code` ``, code
+    fences, line-leading bullets and quote prefixes) drop and whitespace runs collapse to
+    one space. Markers inside a word (`5*3`, `snake_case`) stay. Used for edit comparison
+    only; nothing is stored in this form. None stays None."""
+    if not isinstance(value, str):
+        return None
+    text = _ANGLE_TOKEN.sub(_angle, value)
+    for entity, char in _ENTITIES:
+        text = text.replace(entity, char)
+    text = _QUOTE.sub("", text)
+    text = _BULLET.sub("", text)
+    text = _FENCE.sub("", text)
+    for _ in range(3):  # nested spans such as *_bold italic_*
+        stripped = _SPAN.sub(r"\2", text)
+        if stripped == text:
+            break
+        text = stripped
+    return " ".join(text.split())
+
+
 def normalize_slack_event(envelope_payload: dict, received_at: str, *, store_body=False) -> Event | None:
     payload = mapping(envelope_payload)
     event = mapping(payload.get("event"))

@@ -162,7 +162,9 @@ owner (`always_human.owner_user`) for the owner-replied marker. The console adds
 date (`when_full`). `full=true` lifts the 400 character root truncation.
 
 `POST /api/lanes/{lane}/actions` takes `{"action": "ack" | "done" | "reroute",
-"ids": [...], "lane": ..., "note": ...}`. Lane actions apply only to messages the
+"ids": [...], "lane": ..., "note": ..., "thread": false}`. `thread` (P24, default
+false, reroute only) also moves every open item of each id's thread in the old lane and
+the thread binding, like the CLI `reroute --thread`; the console page does not send it yet. Lane actions apply only to messages the
 lane still owns (or that have no lane) and that are not done or excluded.
 
 ### Service (`/service`)
@@ -226,13 +228,17 @@ same LedgerStore calls and inbox appends as the inbox CLI:
 | done [note] | `set_state(id, "done", note)`; without a note the note is `human:console` | none |
 | ack | `set_state(id, "acked")` | none |
 | reroute LANE | `set_route(id, LANE, "reroute:<old lane>")` | `reroute` in LANE |
-| assign, direct, reroute (P13) | also `bind_thread(thread of id, LANE)` and one `scope_proposals` event (a reroute to another lane, or an assign of a `human_pending` item) | as above |
+| assign, direct, reroute (P13, P24) | also `bind_thread(thread of id, LANE)` under the P24 rule (reroute: a thread root, or `thread: true`; assign and direct: a root, or a reply whose thread has no binding) and one `scope_proposals` event (a reroute to another lane, or an assign of a `human_pending` item) | as above |
 
 The CLI records `human:cli` where the console records `human:console`; `done`
 without a note is the one place the console writes a note where the CLI does not.
 Since P13 `assign`, `direct` and `reroute` (console, CLI and card decisions alike) set the
 thread binding of the message to the new lane and record scope learning evidence (see
-the Scope view).
+the Scope view). Since P24 a reroute of a reply moves that reply only and leaves the
+binding; a reroute of a thread root, or any reroute with `thread: true`, moves the
+binding (with `thread: true` also the thread's open items in the old lane). `assign` and
+`direct` of a reply bind only a thread without a binding (see INBOX.md, "Reroute and the
+thread binding (P24)").
 
 `assign`, `direct` and `reroute` also insert one row into the ledger table
 `wake_requests` (P12; source `console`, `cli` for the CLI). No Slack call or session

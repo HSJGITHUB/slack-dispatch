@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 from slack_dispatch.config.schema import FOLLOWUP_POLICIES
 from slack_dispatch.ingest.membership import NOT_MEMBER
+from slack_dispatch.ingest.normalize import comparable_text
 from slack_dispatch.ingest.user_directory import carries_app_evidence, is_bot_message
 from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
@@ -99,6 +100,8 @@ NAME_TRACK_LIMIT = 5000
 FOLLOWUP_READ_STATES = ("acked", "done")
 # P22: Pipeline._edit_verdict outcomes.
 EDIT_IGNORE, EDIT_FIRST, EDIT_WAKE = "ignore", "first", "wake"
+# P24: states in which an item has a lane; an edit of such an item never re-routes it.
+LANE_HELD_STATES = ("assigned", "acked", "done")
 
 
 # P23: default wake_policy.catchup_minutes (0 disables catch-up wakes).
@@ -134,11 +137,43 @@ def followup_policy(config):
 
 def edit_text_changed(previous_body, text):
     """P22: whether an edit changed the text: the normalized new text against the stored body
-    before the update, both whitespace-trimmed. A missing stored body (or a missing new text)
-    counts as changed, since equality cannot be shown."""
+    before the update. A missing stored body (or a missing new text) counts as changed, since
+    equality cannot be shown.
+
+    P24: both sides are reduced to one comparison form first (ingest.normalize
+    comparable_text), so a body rendered from rich text blocks and the raw mrkdwn `text` of
+    an edit that arrived without blocks (a link preview attaching) compare equal. The form
+    trims and collapses whitespace."""
     if not isinstance(previous_body, str) or not isinstance(text, str):
         return True
-    return text.strip() != previous_body.strip()
+    return comparable_text(text) != comparable_text(previous_body)
+
+
+def edit_state(message, recorded):
+    """P24: the item state before the edit event: RecordResult.previous_state when the ledger
+    reported it, else the row as read after record_event (which leaves the state alone)."""
+    state = getattr(recorded, "previous_state", None)
+    return state if state is not None else message.get("state")
+
+
+def edit_holds_lane(message, recorded):
+    """P24: whether an edited item already had a lane before the edit: state assigned, acked
+    or done with a lane set (route_reason `reroute:*` and `human:*` included)."""
+    lane = getattr(recorded, "previous_lane", None)
+    if lane is None and getattr(recorded, "previous_state", None) is None:
+        lane = message.get("lane")
+    return bool(lane) and edit_state(message, recorded) in LANE_HELD_STATES
+
+
+def edit_redeliverable(message):
+    """P24 fix1: whether an edit wake may re-deliver an item that holds a lane. Owner posts,
+    prehandled items and context rows (route_reason or note) are closed by the service, not
+    inbox work, so their edits are recorded only."""
+    reason = str(message.get("route_reason") or "")
+    note = str(message.get("note") or "")
+    return not (reason in ("owner_post", "prehandled") or note == "owner_post"
+                or reason.startswith("context:") or note == "context"
+                or note.startswith("prehandled:"))
 
 
 def _trim_oldest(entries, limit):
@@ -776,8 +811,16 @@ class Pipeline:
             self.store.set_state(mid, "excluded", note=NOT_MEMBER)
             self.excluded_not_member += int(event.get("channel") not in self.config.excluded_channels)
             return HandleResult(mid, recorded.kind, state="excluded")
-        verdict = (self._edit_verdict(mid, message, recorded, event)
-                   if event.get("subtype") == "message_changed" else None)
+        changed = event.get("subtype") == "message_changed"
+        verdict = self._edit_verdict(mid, message, recorded, event) if changed else None
+        if changed and edit_holds_lane(message, recorded) and verdict != EDIT_IGNORE:
+            # P24: an item that already has a lane (assigned, acked or done; rerouted or
+            # assigned by hand included) is never routed again by an edit. Only EDIT_WAKE
+            # re-delivers it, to its current lane, as a followup.
+            if verdict != EDIT_WAKE or not edit_redeliverable(message):
+                verdict = EDIT_IGNORE
+            else:
+                return self._redeliver_edit(mid, message, recorded, event)
         if verdict == EDIT_IGNORE:
             # P22: the ledger already holds the edit (body, edited_at); no routing, inbox
             # record, wake offer or human notice, and the item keeps its state and lane.
@@ -788,7 +831,7 @@ class Pipeline:
         # routed as a first assignment (EDIT_FIRST) does not.
         edit = verdict == EDIT_WAKE
         # P22 fix1: a human_pending item re-routed by a text edit.
-        requeued = verdict == EDIT_FIRST and message.get("state") == "human_pending"
+        requeued = verdict == EDIT_FIRST and edit_state(message, recorded) == "human_pending"
         self._hydrate(event)
         owner = self.config.always_human.owner_user
         note = None
@@ -861,10 +904,7 @@ class Pipeline:
                     _trim_oldest(self.catchup_ids, NAME_TRACK_LIMIT)
                 wake = self.wake_engine.offer(lane, message, message.get("author"))
                 if edit:
-                    self.edits_woken += 1
-                    self._edit_wakes.pop(mid, None)
-                    self._edit_wakes[mid] = self.clock()
-                    _trim_oldest(self._edit_wakes, NAME_TRACK_LIMIT)
+                    self._note_edit_wake(mid)
                 if isinstance(wake, Deliver):
                     self._send("lane", lane, [mid], inbox=False)
                 if getattr(wake, "notice", None) is not None:
@@ -888,6 +928,42 @@ class Pipeline:
         self.edits_ignored += 1
         LOG.info("Edit recorded without wake id=%s", mid)
 
+    def _note_edit_wake(self, mid):
+        self.edits_woken += 1
+        self._edit_wakes.pop(mid, None)
+        self._edit_wakes[mid] = self.clock()
+        _trim_oldest(self._edit_wakes, NAME_TRACK_LIMIT)
+
+    def _redeliver_edit(self, mid, message, recorded, event):
+        """P24: EDIT_WAKE of an item that has a lane. The item goes back to `assigned` in the
+        lane it is in now (lane and route_reason unchanged, no routing, no thread binding
+        change) and gets a followup inbox record and a wake offer there. The attention flag
+        and notice follow the edited text as before P24. fix1: like the routing path it
+        hydrates a missing thread root and counts in `counters["routed"]`."""
+        lane = message["lane"]
+        # fix1: root hydration and the routed counter as on the other EDIT_WAKE path.
+        self._hydrate(event)
+        self.counters["routed"] += 1
+        self.store.set_state(mid, "assigned")
+        self.store.mark_followup(mid)
+        message = dict(message, state="assigned", followup=True, is_bot=event["is_bot"])
+        if "text" in event:
+            message["text"] = event["text"]
+        decision = route(message, self.routing_config(), self.store.lookup_binding)
+        if decision.attention is not None or message.get("attention") is not None:
+            self.store.set_attention(mid, decision.attention)
+        self._send("lane", lane, [mid], inbox=True)
+        wake = self.wake_engine.offer(lane, message, message.get("author"))
+        self._note_edit_wake(mid)
+        if isinstance(wake, Deliver):
+            self._send("lane", lane, [mid], inbox=False)
+        if getattr(wake, "notice", None) is not None:
+            self._human_notice(mid, kind="storm")
+            self.wake_engine.notices.clear()
+        if decision.attention:
+            self._human_notice(mid, attention=decision.attention)
+        return HandleResult(mid, recorded.kind, state="assigned", lane=lane)
+
     def _edit_verdict(self, mid, message, recorded, event):
         """P22: what a message_changed event of an existing row does, per wake_policy.followup.
 
@@ -899,8 +975,12 @@ class Pipeline:
         edit of an item that was `acked` or `done` before this event (record_event leaves
         the state alone) with no edit wake offered for the same id within
         service.followup_window_seconds (inclusive, like replies). EDIT_IGNORE otherwise.
+
+        P24: the state is the one record_event read before it applied the edit
+        (RecordResult.previous_state). For an item that has a lane, _handle turns EDIT_FIRST
+        into EDIT_IGNORE and serves EDIT_WAKE without routing (see _redeliver_edit).
         """
-        state = message.get("state")
+        state = edit_state(message, recorded)
         if state == "new":
             return EDIT_FIRST
         policy = followup_policy(self.config)

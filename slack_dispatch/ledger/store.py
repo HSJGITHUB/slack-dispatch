@@ -18,6 +18,10 @@ class RecordResult:
     # P22: for a message_changed event of an existing row, the stored body before this
     # update (None when no body was stored, store_body is off, or for other events).
     previous_body: str | None = None
+    # P24: for a message_changed event of an existing row, its state and lane before this
+    # event (an edit never changes either; the pipeline gates the edit on these).
+    previous_state: str | None = None
+    previous_lane: str | None = None
 
 
 class ProposalStateError(Exception):
@@ -220,7 +224,7 @@ class LedgerStore:
             kind, mid = "channel_meta", None
         received = event["received_at"]
         created, duplicate = False, False
-        previous_body = None
+        previous_body = previous_state = previous_lane = None
         with self._transaction() as db:
             if event_id:
                 seen = db.execute("SELECT * FROM events_seen WHERE event_id=?", (event_id,)).fetchone()
@@ -233,8 +237,12 @@ class LedgerStore:
                     if exists:
                         # P22: the body before the edit, so the pipeline can tell a text
                         # change from a metadata-only edit (link previews attaching).
-                        previous_body = db.execute("SELECT body FROM messages WHERE id=?",
-                                                   (mid,)).fetchone()["body"]
+                        before = db.execute("SELECT body, state, lane FROM messages WHERE id=?",
+                                            (mid,)).fetchone()
+                        previous_body = before["body"]
+                        previous_state, previous_lane = before["state"], before["lane"]
+                    # P24: only edit metadata and the body change here; state, lane and
+                    # route_reason are never touched by an edit.
                     db.execute("UPDATE messages SET edited_at=?, followup=1, has_files=?, is_bot=? WHERE id=?",
                                (received, bool(event.get("has_files")), event_is_bot(event), mid))
                     if self.store_body and "text" in event:
@@ -278,7 +286,8 @@ class LedgerStore:
                 db.execute("INSERT INTO events_seen (event_id, received_at, kind, message_id, source, channel) "
                            "VALUES (?, ?, ?, ?, ?, ?)",
                            (event_id, received, kind, mid, source, channel))
-        return RecordResult(mid, created, duplicate, kind, previous_body)
+        return RecordResult(mid, created, duplicate, kind, previous_body, previous_state,
+                            previous_lane)
 
     def get_message(self, message_id, *, include_body=False):
         rows = self._rows("SELECT * FROM messages WHERE id=?", (message_id,))

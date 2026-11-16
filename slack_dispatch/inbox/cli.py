@@ -93,6 +93,8 @@ def build_parser():
             sub.add_argument("--note")
         if command == "reroute":
             sub.add_argument("--to", required=True, dest="lane")
+            # P24: also move the thread's other open items in the old lane and the binding.
+            sub.add_argument("--thread", action="store_true")
         if command == "assign":
             sub.add_argument("lane")
         if command == "claim":
@@ -1747,7 +1749,7 @@ def main(argv=None, *, store=None, stdout=None, stderr=None, client=None):
                                    reason="human:cli", min_evidence=min_evidence(config))
                 else:
                     actions.reroute(store, root, args.id, args.lane, source="cli",
-                                    min_evidence=min_evidence(config))
+                                    min_evidence=min_evidence(config), thread=args.thread)
                 print(args.id, args.lane, file=stdout)
             return 0
         except AmbiguousLane as exc:

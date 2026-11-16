@@ -5,6 +5,23 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P24 edit and reroute guards
+- An edit (`message_changed`) of an item that already has a lane (`assigned`, `acked` or
+  `done`, rerouted or assigned by hand included) is never routed again: lane,
+  route_reason and the thread binding stay. The P22 wake case re-delivers to the item's
+  current lane as a followup instead of a recomputed lane. Live case 2026-11-16: a link
+  preview edit of a reply rerouted from lane A to lane B was routed back to lane A.
+- Edit text comparison compares like with like: the stored body and the edit text are
+  reduced to one form (`comparable_text`: link and mention targets, entities, word-boundary
+  formatting markers, whitespace), so a link preview edit without blocks is no text change.
+- `RecordResult.previous_state` and `previous_lane`: the gate uses the state before the
+  edit was recorded.
+- `reroute` of a reply moves that reply only and leaves the thread binding; a root
+  reroute moves the binding. New CLI flag `reroute --thread` (console API: `"thread": true`
+  in the lane action body) moves every open item of the thread in the old lane and the
+  binding.
+  `assign` of a reply binds only a thread without a binding.
+
 ### P23 catch-up wakes
 - Backfill that a reconcile pass finds within `wake_policy.catchup_minutes` (new, default
   30, 0 disables) of its Slack ts, such as a reply posted while the service restarted, is

@@ -123,9 +123,10 @@ class LearningTests(LedgerCase):
                          ("content", "thread_inherit"))
         row = self.store.get_scope_proposal("channel", "C0000000002", "content")
         self.assertEqual((row["evidence_count"], row["status"], row["last_evidence"]), (1, "open", "reroute"))
-        # Rerouting the reply moves the whole thread again; same lane twice reaches suggested.
+        # P24: rerouting the reply moves the reply only and leaves the binding; same lane
+        # twice reaches suggested.
         actions.reroute(self.store, self.inbox, reply.message_id, "owner")
-        self.assertEqual(self.store.lookup_binding("slack", "C0000000002", "1000.000001"), "owner")
+        self.assertEqual(self.store.lookup_binding("slack", "C0000000002", "1000.000001"), "content")
         actions.reroute(self.store, self.inbox, root.message_id, "content")  # same lane: no event
         self.assertEqual(self.store.get_scope_proposal("channel", "C0000000002", "content")["evidence_count"], 1)
         actions.reroute(self.store, self.inbox, reply.message_id, "content")

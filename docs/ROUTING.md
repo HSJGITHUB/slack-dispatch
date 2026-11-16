@@ -208,6 +208,14 @@ ScopeClaim is inactive for them.
 binding (thread_ts, else ts) at the new lane, overriding an earlier binding, so later
 replies follow the item (first-day defect, 2026-11-13).
 
+Since P24 that applies to thread roots only. A `reroute` of a reply moves the reply and
+leaves the binding, so later replies keep following the thread's lane (a reroute of one
+reply had moved a whole thread owned by another lane, 2026-11-16). `reroute --thread`
+(CLI) or `"thread": true` in the console lane action body moves every open item of the
+thread in the old lane and the binding. `assign` of a reply binds only a thread without a binding.
+Edits never change a binding: an edit of an item that already has a lane is not routed
+again (SERVICE.md, P24), so thread inherit cannot pull a rerouted item back.
+
 ## P15 membership gate and ledger channel exclusions
 
 Before routing, the pipeline applies the membership gate (see INGEST.md): under
