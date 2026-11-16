@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -34,6 +35,9 @@ PROPOSAL_SECTIONS = (("channel_defaults_add", "channel"), ("channel_defaults_cha
 BINDING_SECTIONS = (("thread_bindings_add", False), ("thread_bindings_rebind", True))
 LIVE_PROPOSALS = ("open", "suggested", "confirmed")
 REPAIR_SINCE_DAYS = 30
+# P18 `deliveries`: default window in hours (0 = every row) and the clock (tests patch it).
+DELIVERY_HOURS = 48
+DELIVERY_CLOCK = time.time
 BOT_NOTE = "excluded:bot"
 
 
@@ -154,6 +158,13 @@ def build_parser():
     options(target)
     target.add_argument("--lane")
     target.add_argument("--json", action="store_true")
+    # P18: the delivery log (what the dispatcher sent where, and whether it was received).
+    sub = commands.add_parser("deliveries")
+    options(sub)
+    sub.add_argument("--lane")
+    sub.add_argument("--hours", type=int, default=DELIVERY_HOURS)
+    sub.add_argument("--status")
+    sub.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1107,6 +1118,67 @@ def registry_check(args, store, config, stdout, stderr):
     return 0
 
 
+def delivery_receipt_text(row):
+    """Receipt column of `deliveries`: received, unconfirmed, a card decision, or -."""
+    receipt = row["receipt"]
+    if row["purpose"] == "lane":
+        if receipt["received_time"]:
+            return f"received {receipt['received_time']} (+{round((receipt['latency_seconds'] or 0) / 60)}m)"
+        if row["status"] == "sent":
+            return f"unconfirmed {round((receipt['age_seconds'] or 0) / 60)}m"
+        return "-"
+    return f"decision {receipt['decision_time']}" if receipt["decision_time"] else "-"
+
+
+def delivery_line(row):
+    """One `deliveries` text line: time, kind, lane, target, count, status, receipt."""
+    target = row["target"]
+    if target:
+        name = target["name"] or "-"
+        target_text = name + (f"({target['short_id']})" if target["short_id"] else "")
+    elif row["adapter"] and row["adapter"] != "session_message":
+        target_text = row["adapter"]
+    else:
+        target_text = "no-session"
+    status = row["status"] or "-"
+    if row["relay_outcome"]:
+        status += "/" + row["relay_outcome"]
+    if (row.get("repeat_count") or 1) > 1:
+        status += f" x{row['repeat_count']}"
+    return " ".join(str(part) for part in (row["when"] or "-", row["kind"] or "-", row["lane"] or "-",
+                                          target_text.replace(" ", "_"), row["item_count"], status,
+                                          delivery_receipt_text(row)))
+
+
+def deliveries(args, store, config, stdout, stderr):
+    """P18: delivery_log rows newest first, with receipts, as text lines or JSON."""
+    from types import SimpleNamespace
+    from slack_dispatch.console import queries
+    if args.hours < 0:
+        raise BadInput("Invalid hours")
+    if args.status and args.status not in queries.DELIVERY_STATUS_FILTERS:
+        raise BadInput("Invalid status")
+    if config is None:
+        config = SimpleNamespace(display_timezone="UTC", people={},
+                                 console=SimpleNamespace(channels={}))
+    view = queries.View(config)
+    now = DELIVERY_CLOCK()
+    rows = store.list_deliveries(since=queries.delivery_since(now, args.hours), lane=args.lane,
+                                 status=args.status or None) if hasattr(store, "list_deliveries") else []
+    cache = {}
+    shaped = [queries.delivery_row(store, view, row, cache)
+              for row in store.delivery_receipts(rows, now)] if rows else []
+    if args.json:
+        print(json.dumps(shaped, ensure_ascii=False, indent=2), file=stdout)
+        return 0
+    if not shaped:
+        print("No delivery attempts", file=stdout)
+        return 0
+    for row in shaped:
+        print(delivery_line(row), file=stdout)
+    return 0
+
+
 def configured_session(config_path, lane):
     """Return the lane's configured session from an optional config file, else None."""
     if not config_path:
@@ -1228,6 +1300,8 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 code = repair_command(args, root, store, stdout, stderr)
                 error_reported = code != 0
                 return code
+            elif args.command == "deliveries":
+                return deliveries(args, store, optional_config(args), stdout, stderr)
             elif args.command == "queue":
                 for row in store.list_messages(state="human_pending"):
                     message_id = row.get("id", row.get("message_id"))

@@ -35,6 +35,35 @@ const UI_TEXT = Object.freeze({
     exportExclusions: "Export excluded_channels YAML",
     undo: "Undo",
     undoDone: (channel) => "Channel exclusion ended: " + channel,
+    tabDeliveries: "Deliveries",
+    deliveriesTitle: (total) => total + " delivery attempt(s)",
+    deliveriesEmpty: "No delivery attempts in this window.",
+    deliveriesSummary: (s) => "sent " + s.sent + " · failed " + s.failed + " · skipped " + s.skipped + " · unconfirmed " + s.unconfirmed,
+    deliveryAll: "all",
+    deliveryWindows: { h24: "24h", h48: "48h", d7: "7d", all: "all" },
+    deliveryPurposes: { lane: "lane", human_queue: "human queue" },
+    deliveryStatuses: {
+      sent: "sent", failed: "failed", skipped: "skipped", skipped_no_session: "skipped: no live session",
+      skipped_ambiguous: "skipped: ambiguous session", skipped_paused: "skipped: paused or wake off",
+      dry_run: "dry run", timeout: "timeout",
+    },
+    deliveryKinds: {
+      new: "new", backfill: "backfill", reroute: "reroute", reminder: "reminder", digest: "digest",
+      card: "card", attention: "attention",
+    },
+    relayOutcomes: { delivered: "delivered", not_delivered: "not delivered", unknown: "relay result unknown" },
+    deliveryColumns: {
+      time: "Time", kind: "Kind", lane: "Lane", target: "Target session", items: "Items",
+      result: "Result", receipt: "Receipt", cost: "Cost and time",
+    },
+    deliveryFilters: { lane: "Lane", purpose: "Purpose", status: "Status", hours: "Window" },
+    noTargetSession: "no session",
+    receivedAt: (time, minutes) => "✓ " + time + " (+" + minutes + "m)",
+    unconfirmedFor: (minutes) => "unconfirmed " + minutes + "m",
+    decisionAt: (time) => "decision " + time,
+    itemThread: "thread",
+    itemMissing: "not in ledger",
+    repeated: (count, time) => "x" + count + (time ? " (last " + time + ")" : ""),
     searchPlaceholder: "Search id, channel, author or text",
     searchButton: "Search",
     loading: "Loading...",
@@ -208,6 +237,35 @@ const UI_TEXT = Object.freeze({
     exportExclusions: "excluded_channels YAML 내보내기",
     undo: "되돌리기",
     undoDone: (channel) => "채널 제외 해제: " + channel,
+    tabDeliveries: "전달",
+    deliveriesTitle: (total) => "전달 시도 " + total + "건",
+    deliveriesEmpty: "이 기간에 전달 시도 없음.",
+    deliveriesSummary: (s) => "전송 " + s.sent + " · 실패 " + s.failed + " · 건너뜀 " + s.skipped + " · 미확인 " + s.unconfirmed,
+    deliveryAll: "전체",
+    deliveryWindows: { h24: "24시간", h48: "48시간", d7: "7일", all: "전체" },
+    deliveryPurposes: { lane: "레인", human_queue: "사람 큐" },
+    deliveryStatuses: {
+      sent: "전송", failed: "실패", skipped: "건너뜀", skipped_no_session: "건너뜀: 세션 꺼짐",
+      skipped_ambiguous: "건너뜀: 세션 모호", skipped_paused: "건너뜀: 일시정지 또는 깨우기 꺼짐",
+      dry_run: "드라이런", timeout: "시간 초과",
+    },
+    deliveryKinds: {
+      new: "신규", backfill: "백필", reroute: "재배정", reminder: "리마인더", digest: "다이제스트",
+      card: "카드", attention: "주의",
+    },
+    relayOutcomes: { delivered: "전달됨", not_delivered: "전달 안 됨", unknown: "릴레이 결과 불명" },
+    deliveryColumns: {
+      time: "시각", kind: "종류", lane: "레인", target: "대상 세션", items: "항목 수",
+      result: "전송 결과", receipt: "수신 확인", cost: "비용과 소요 시간",
+    },
+    deliveryFilters: { lane: "레인", purpose: "용도", status: "상태", hours: "기간" },
+    noTargetSession: "세션 없음",
+    receivedAt: (time, minutes) => "✓ " + time + " (+" + minutes + "분)",
+    unconfirmedFor: (minutes) => "미확인 " + minutes + "분",
+    decisionAt: (time) => "결정 " + time,
+    itemThread: "스레드",
+    itemMissing: "원장에 없음",
+    repeated: (count, time) => count + "회" + (time ? " (마지막 " + time + ")" : ""),
     searchPlaceholder: "id, 채널, 작성자, 본문 검색",
     searchButton: "검색",
     loading: "불러오는 중...",
@@ -493,6 +551,7 @@ function refresh() {
   if (state.view === "lanes") return state.lane ? loadLaneInbox() : loadLanes();
   if (state.view === "service") return loadService();
   if (state.view === "proposals") return loadProposals();
+  if (state.view === "deliveries") return loadDeliveries();
   return null;
 }
 
@@ -1411,6 +1470,128 @@ async function runSearch(query) {
     data.rows.map((row) => [el("span", { className: "mono", text: row.id }), row.when, named(row.channel), named(row.author),
       row.state, row.lane, row.route_reason, row.note,
       row.snippet === null ? el("span", { className: "muted", text: UI.noBody }) : row.snippet + (row.truncated ? " " + UI.truncated : "")]))));
+}
+
+// ---------- deliveries (P18) ----------
+
+VIEWS["/deliveries"] = "deliveries";
+const DELIVERY_WINDOWS = [["h24", 24], ["h48", 48], ["d7", 168], ["all", 0]];
+const DELIVERY_STATUS_OPTIONS = ["sent", "failed", "skipped", "dry_run", "timeout"];
+const deliveries = { lane: "", purpose: "", status: "", hours: 48, page: 1, open: new Set() };
+
+function minutes(seconds) {
+  return Math.max(0, Math.round((seconds || 0) / 60));
+}
+
+function deliverySelect(label, value, options, onchange) {
+  return el("label", { className: "small muted" }, label + " ",
+    el("select", { onchange: (event) => onchange(event.target.value) },
+      options.map(([key, text]) => el("option", { value: key, selected: String(key) === String(value), text }))));
+}
+
+function deliveryFilters() {
+  const f = UI.deliveryFilters;
+  const all = ["", UI.deliveryAll];
+  const lanes = (state.config.lanes || []).map((lane) => [lane, lane]).concat([["human_queue", UI.deliveryPurposes.human_queue]]);
+  const set = (key) => (value) => {
+    deliveries[key] = key === "hours" ? Number(value) : value;
+    deliveries.page = 1;
+    loadDeliveries(true);
+  };
+  return el("div", { className: "toolbar" },
+    deliverySelect(f.lane, deliveries.lane, [all].concat(lanes), set("lane")),
+    deliverySelect(f.purpose, deliveries.purpose, [all, ["lane", UI.deliveryPurposes.lane], ["human_queue", UI.deliveryPurposes.human_queue]], set("purpose")),
+    deliverySelect(f.status, deliveries.status, [all].concat(DELIVERY_STATUS_OPTIONS.map((key) => [key, UI.deliveryStatuses[key]])), set("status")),
+    deliverySelect(f.hours, deliveries.hours, DELIVERY_WINDOWS.map(([key, hours]) => [hours, UI.deliveryWindows[key]]), set("hours")));
+}
+
+function deliveryTarget(row) {
+  if (row.target) {
+    return el("span", {}, row.target.name || UI.none,
+      row.target.short_id ? el("span", { className: "mono muted", text: " " + row.target.short_id }) : null);
+  }
+  if (row.adapter && row.adapter !== "session_message") return el("span", { className: "muted", text: row.adapter });
+  return el("span", { className: "muted", text: UI.noTargetSession });
+}
+
+function deliveryItems(row) {
+  const details = el("details", { className: "context", open: deliveries.open.has(row.id) },
+    el("summary", { text: String(row.item_count) }),
+    el("ul", { className: "delivery-items" }, row.items.map((item) => el("li", {},
+      el("span", { className: "mono", text: item.id }), " ",
+      named(item.channel), " · ", named(item.author),
+      item.is_reply ? el("span", { className: "badge", text: UI.itemThread }) : null,
+      item.missing ? el("span", { className: "badge warn", text: UI.itemMissing }) : null))));
+  details.addEventListener("toggle", () => {
+    if (details.open) deliveries.open.add(row.id); else deliveries.open.delete(row.id);
+  });
+  return details;
+}
+
+function deliveryResult(row) {
+  const value = row.status || "";
+  const tone = value === "sent" ? "ok" : (value === "failed" || value === "timeout") ? "bad" : value.startsWith("skipped") ? "warn" : "";
+  const outcome = row.relay_outcome;
+  const outcomeTone = outcome === "delivered" ? "ok" : outcome === "not_delivered" ? "bad" : "";
+  return el("span", { title: row.detail || null },
+    el("span", { className: "badge " + tone, text: UI.deliveryStatuses[value] || value }),
+    outcome ? el("span", { className: "badge " + outcomeTone, text: UI.relayOutcomes[outcome] || outcome }) : null,
+    row.repeat_count > 1 ? el("span", { className: "badge warn", text: UI.repeated(row.repeat_count, row.last_seen_time) }) : null);
+}
+
+function deliveryReceipt(row) {
+  const r = row.receipt || {};
+  if (row.purpose !== "lane") return r.decision_time ? UI.decisionAt(r.decision_time) : UI.none;
+  if (r.received_time) return el("span", { className: "badge ok", text: UI.receivedAt(r.received_time, minutes(r.latency_seconds)) });
+  if (row.status === "sent") return el("span", { className: "badge warn", text: UI.unconfirmedFor(minutes(r.age_seconds)) });
+  return UI.none;
+}
+
+function deliveryCost(row) {
+  const parts = [];
+  if (row.cost_usd !== null && row.cost_usd !== undefined) parts.push("$" + Number(row.cost_usd).toFixed(4));
+  if (row.duration_ms !== null && row.duration_ms !== undefined) parts.push((row.duration_ms / 1000).toFixed(1) + UI.units.s);
+  return parts.length ? parts.join(" · ") : UI.none;
+}
+
+async function loadDeliveries(force) {
+  const section = document.getElementById("view-deliveries");
+  // A poll must not close a filter list the operator has open.
+  if (!force && section.contains(document.activeElement) && document.activeElement.tagName === "SELECT") return;
+  const query = new URLSearchParams({ lane: deliveries.lane, purpose: deliveries.purpose, status: deliveries.status,
+    hours: String(deliveries.hours), page: String(deliveries.page) });
+  let data, summary;
+  try {
+    [data, summary] = await Promise.all([api("/api/deliveries?" + query.toString()),
+      api("/api/deliveries/summary?hours=" + deliveries.hours)]);
+  } catch (error) {
+    status(error.message, true);
+    return;
+  }
+  const c = UI.deliveryColumns;
+  clear(section);
+  const first = data.total ? (data.page - 1) * data.page_size + 1 : 0;
+  const last = Math.min(data.total, data.page * data.page_size);
+  section.append(el("div", { className: "toolbar" },
+    el("strong", { text: UI.deliveriesTitle(data.total) }),
+    el("span", { className: "muted small", text: UI.refreshed(nowText()) }),
+    el("span", { className: "spacer" }),
+    el("span", { className: "muted small", text: data.total ? UI.showing(first, last, data.total) : "" }),
+    el("button", { text: UI.previous, disabled: data.page <= 1, onclick: () => { deliveries.page -= 1; loadDeliveries(true); } }),
+    el("button", { text: UI.next, disabled: last >= data.total, onclick: () => { deliveries.page += 1; loadDeliveries(true); } }),
+    el("button", { text: UI.refresh, onclick: () => loadDeliveries(true) })));
+  section.append(el("div", { className: "meta delivery-summary" }, el("strong", { text: UI.deliveriesSummary(summary) })));
+  section.append(deliveryFilters());
+  if (!data.rows.length) {
+    section.append(el("div", { className: "empty-state", text: UI.deliveriesEmpty }));
+    return;
+  }
+  section.append(el("article", { className: "card" }, table(
+    [c.time, c.kind, c.lane, c.target, c.items, c.result, c.receipt, c.cost],
+    data.rows.map((row) => [el("span", { title: row.when || null, text: row.time || UI.none }),
+      UI.deliveryKinds[row.kind] || row.kind,
+      row.purpose === "human_queue" ? UI.deliveryPurposes.human_queue : row.lane,
+      deliveryTarget(row), deliveryItems(row), deliveryResult(row), deliveryReceipt(row), deliveryCost(row)]))));
 }
 
 // ---------- start ----------

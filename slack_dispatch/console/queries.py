@@ -4,6 +4,7 @@ Every function reads the ledger, the configuration and local files only. Message
 bodies are returned to the console page for display and are never logged.
 """
 import argparse
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import io
@@ -15,6 +16,7 @@ from pathlib import Path
 from slack_dispatch.inbox.cli import display_zone, show_inbox
 from slack_dispatch.ingest.membership import member_status
 from slack_dispatch.ledger.store import LedgerStore
+from slack_dispatch.ledger.store import delivery_item_ids
 from slack_dispatch.notify import effective_lane, wake_switch_path
 from slack_dispatch.notify.session_resolve import is_session_id
 from slack_dispatch.pipeline import HUMAN_QUEUE
@@ -589,3 +591,127 @@ def export_yaml(store, config, view):
     if not rows:
         lines.append("# No learned scope overrides.")
     return "\n".join(lines) + "\n"
+
+
+# P18 delivery log: the Deliveries tab and the inbox CLI `deliveries` command.
+
+DELIVERY_STATUS_FILTERS = ("sent", "failed", "skipped", "skipped_no_session", "skipped_ambiguous",
+                           "skipped_paused", "dry_run", "timeout")
+DELIVERY_PURPOSES = ("lane", HUMAN_QUEUE)
+DELIVERY_DEFAULT_HOURS = 48
+RELAY_OUTCOMES = ("delivered", "not_delivered", "unknown")
+
+
+def delivery_since(now, hours):
+    """UTC ISO lower bound for a window of `hours` before now; None for 0 (all rows)."""
+    if not hours:
+        return None
+    moment = datetime.fromtimestamp(max(0.0, float(now) - hours * 3600), timezone.utc)
+    return moment.isoformat(timespec="microseconds")
+
+
+def relay_outcome(detail):
+    """The relay outcome prefix of a delivery_log detail (`delivered | ...`), or None."""
+    head = (detail or "").split(" | ", 1)[0].strip()
+    return head if head in RELAY_OUTCOMES else None
+
+
+def _clock_time(view, stamp):
+    """HH:MM of an ISO stamp in the display zone, or None."""
+    try:
+        moment = datetime.fromisoformat(stamp)
+        if moment.tzinfo is None:
+            moment = moment.astimezone()
+        return moment.astimezone(view.zone).strftime("%H:%M")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _full_time(view, stamp):
+    try:
+        moment = datetime.fromisoformat(stamp)
+        if moment.tzinfo is None:
+            moment = moment.astimezone()
+        return moment.astimezone(view.zone).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def delivery_item(store, view, message_id, cache):
+    """One covered message: channel name, thread flag, author name and state (no body)."""
+    if message_id not in cache:
+        row = store.get_message(message_id)
+        if row is None:
+            parts = message_id.split(":", 2)
+            channel = parts[1] if len(parts) == 3 else None
+            cache[message_id] = {"id": message_id, "missing": True, "channel": view.channel(channel),
+                                 "is_reply": False, "author": view.person(None), "state": None,
+                                 "lane": None}
+        else:
+            cache[message_id] = {"id": message_id, "missing": False,
+                                 "channel": view.channel(row["channel"]),
+                                 "is_reply": bool(row.get("thread_ts")
+                                                  and row["thread_ts"] != row["ts"]),
+                                 "author": view.person(row.get("author")),
+                                 "state": row.get("state"), "lane": row.get("lane")}
+    return dict(cache[message_id])
+
+
+def delivery_row(store, view, row, cache):
+    """A delivery_log row with receipt fields (from `delivery_receipts`) for display."""
+    session_id, name = row.get("target_session_id"), row.get("target_session_name")
+    target = None
+    if session_id or name:
+        target = {"session_id": session_id, "short_id": session_id[:8] if session_id else None,
+                  "name": name}
+    ids = delivery_item_ids(row.get("item_ids"))
+    return {"id": row["id"], "created_at": row.get("created_at"),
+            "when": _full_time(view, row.get("created_at")),
+            "time": _clock_time(view, row.get("created_at")),
+            "purpose": row.get("purpose"), "kind": row.get("kind"), "lane": row.get("lane"),
+            "adapter": row.get("adapter"), "target": target,
+            "item_count": row.get("item_count") if row.get("item_count") is not None else len(ids),
+            "items": [delivery_item(store, view, mid, cache) for mid in ids],
+            "status": row.get("status"), "relay_outcome": relay_outcome(row.get("detail")),
+            "detail": row.get("detail"), "cost_usd": row.get("cost_usd"),
+            "duration_ms": row.get("duration_ms"), "relay_session_id": row.get("relay_session_id"),
+            "repeat_count": row.get("repeat_count") or 1, "last_seen_at": row.get("last_seen_at"),
+            "last_seen_time": _clock_time(view, row.get("last_seen_at")),
+            "receipt": {"received_at": row.get("received_at"),
+                        "received_time": _clock_time(view, row.get("received_at")),
+                        "latency_seconds": row.get("latency_seconds"),
+                        "age_seconds": row.get("age_seconds"),
+                        "decision_at": row.get("decision_at"),
+                        "decision_time": _clock_time(view, row.get("decision_at"))}}
+
+
+def deliveries_page(store, config, view, now, *, lane=None, purpose=None, status=None,
+                    hours=DELIVERY_DEFAULT_HOURS, page=1, limit=None):
+    """delivery_log rows newest first with receipts, `limit` (default page_size) per page."""
+    limit = config.console.page_size if limit is None else limit
+    since = delivery_since(now, hours)
+    filters = dict(since=since, lane=lane or None, purpose=purpose or None, status=status or None)
+    total = store.count_deliveries(**filters)
+    rows = store.list_deliveries(**filters, limit=limit, offset=(page - 1) * limit)
+    cache = {}
+    return {"hours": hours, "page": page, "page_size": limit, "total": total,
+            "rows": [delivery_row(store, view, row, cache)
+                     for row in store.delivery_receipts(rows, now)]}
+
+
+def deliveries_summary(store, now, *, hours=DELIVERY_DEFAULT_HOURS):
+    """Counts in the window: sent, failed (timeouts included), timeout, skipped, dry_run,
+    not_delivered (sent but the relay said not delivered) and unconfirmed (lane rows sent
+    without a receipt)."""
+    rows = store.delivery_receipts(store.list_deliveries(since=delivery_since(now, hours)), now)
+    statuses = Counter(row.get("status") for row in rows)
+    return {"hours": hours, "total": len(rows), "sent": statuses["sent"],
+            "failed": statuses["failed"] + statuses["timeout"], "timeout": statuses["timeout"],
+            "skipped": sum(count for key, count in statuses.items()
+                           if str(key).startswith("skipped_")),
+            "dry_run": statuses["dry_run"],
+            "not_delivered": sum(row.get("status") == "sent"
+                                 and relay_outcome(row.get("detail")) == "not_delivered"
+                                 for row in rows),
+            "unconfirmed": sum(row.get("purpose") == "lane" and row.get("status") == "sent"
+                               and row.get("received_at") is None for row in rows)}

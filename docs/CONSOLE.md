@@ -343,3 +343,57 @@ true`).
   thread root. `best` is `{lane, confidence, source, evidence}` or null; each candidate is
   `{lane, session, confidence, source, evidence}`. Invalid channel or ts: 400; resolver
   disabled: 404. It is read-only.
+
+## P18 Deliveries tab
+
+`/deliveries` (tab label `Deliveries`, `전달` in `ko`) answers "what did the dispatcher send
+where, and did the session pick it up". It reads the ledger table `delivery_log` (see
+SERVICE.md, "P18 delivery log"); it has no controls.
+
+- Newest first, default window 48 hours, `console.page_size` rows per page. Filters: lane
+  (the configured lanes and `human_queue`), purpose (`lane`, `human_queue`), status (`sent`,
+  `failed`, `skipped` for every skipped reason, `dry_run`, `timeout`) and window (24h, 48h,
+  7d, all).
+- A summary line on top counts sent, failed (timeouts included), skipped and unconfirmed
+  attempts in the window.
+- Columns: time (display time zone; the full date on hover), kind, lane, target session
+  (name and the first 8 hex characters of the session id, the adapter kind for card and
+  file drop rows, else `no session`), items (expandable: id, channel name, author name via
+  `people`, a thread badge for replies, `not in ledger` for unknown ids; never a body), the
+  result badge (status plus the relay outcome, and `xN (last HH:MM)` when a skipped
+  attempt repeated N times; the stored detail on hover), the receipt
+  (`✓ HH:MM (+Nm)` when the lane acked or closed an item after the wake, `unconfirmed Nm`
+  for a sent wake without one, `decision HH:MM` for a card that came back, `-` otherwise)
+  and the relay cost and duration.
+
+`GET /api/deliveries?lane=&purpose=&status=&hours=48&page=1` returns `{"hours", "page",
+"page_size", "total", "rows"}`. `hours=0` means every row. Each row has `id`, `created_at`,
+`when`, `time`, `purpose`, `kind`, `lane`, `adapter`, `target` (`{session_id, short_id,
+name}` or null), `item_count`, `items` (`{id, missing, channel: {id, name}, is_reply,
+author: {id, name}, state, lane}`), `status`, `relay_outcome` (`delivered`, `not_delivered`,
+`unknown` or null), `detail`, `cost_usd`, `duration_ms`, `relay_session_id`,
+`repeat_count` (1 when the attempt did not repeat), `last_seen_at`, `last_seen_time` and
+`receipt`
+(`received_at`, `received_time`, `latency_seconds`, `age_seconds`, `decision_at`,
+`decision_time`). An unknown lane, purpose or status returns 400.
+
+`GET /api/deliveries/summary?hours=48` returns `{"hours", "total", "sent", "failed",
+"timeout", "skipped", "dry_run", "not_delivered", "unconfirmed"}`: `failed` includes
+timeouts, `not_delivered` counts sent rows whose relay outcome is `not_delivered`, and
+`unconfirmed` counts sent lane rows without a receipt.
+
+The inbox CLI prints the same rows for an operator session:
+
+```sh
+python -m slack_dispatch.inbox.cli deliveries --ledger dummy/state/ledger.sqlite3 \
+    [--config dummy-config.yaml] [--lane L] [--hours N] [--status S] [--json]
+```
+
+One line per row, newest first: time, kind, lane, target (`name(8 hex)`, the adapter kind
+or `no-session`), item count, status with the relay outcome (`sent/delivered`, plus
+` xN` for a repeated skipped attempt) and the
+receipt (`received HH:MM (+Nm)`, `unconfirmed Nm`, `decision HH:MM` or `-`). `--hours`
+defaults to 48 (0 = all), `--status` takes the console filter values, `--json` prints the
+console row objects. With `--config` (or `SLACK_DISPATCH_CONFIG`) channel names, people and
+`display_timezone` are used; without it ids and UTC. An invalid status or a negative
+window exits with 2.

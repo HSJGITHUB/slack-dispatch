@@ -60,6 +60,7 @@ class SessionResolver:
         self.lane_state = {}  # lane -> live, not_live or ambiguous (last observation)
         self.last_logged = {}  # lane -> clock value of the last not-live/ambiguous line
         self._skipped = set()  # distinct (lane, message id) pairs skipped as not live
+        self.resolved = {}  # lane -> (session id, name) of the last id-form resolution (P18)
         self._records = None
         self._scanned_at = None
 
@@ -107,9 +108,22 @@ class SessionResolver:
             return None
         self._observe(lane, LIVE)
         name = matches[0][1]
+        self.resolved[lane] = (matches[0][0], name)
         if warn_duplicates:
             self._warn_duplicates(lane, name, by_id=True)
         return name
+
+    def resolved_session(self, lane, target):
+        """(session id or None, name) of the session a delivery addressed (P18 delivery log).
+
+        An id-form lane reports the id it resolved to. A name (or the human queue operator
+        target) reports the id of the one live session with that name, else None.
+        """
+        record = self.resolved.get(lane)
+        if record is not None and record[1] == target:
+            return record
+        ids = {session_id for session_id, name in self.sessions() if name == target}
+        return (ids.pop() if len(ids) == 1 else None), target
 
     def _observe(self, lane, state, count=0):
         """Log state transitions per lane and throttle repeats to one reminder per period."""

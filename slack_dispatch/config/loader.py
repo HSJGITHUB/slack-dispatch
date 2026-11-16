@@ -9,6 +9,7 @@ from .schema import (
     LedgerConfig, Membership, NotifyAdapter, OwnerResolver, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
     SourceConfig, Timers, UserDirectory, WakePolicy,
 )
+from .schema import DeliveryLog
 
 
 class ConfigError(ValueError):
@@ -267,6 +268,7 @@ def parse_config(raw):
     membership = membership_section(data.get("membership", {}))
     directory = user_directory_section(data.get("user_directory", {}))
     resolver = owner_resolver_section(data.get("owner_resolver", {}))
+    delivery_log = delivery_log_section(data.get("delivery_log", {}))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
@@ -274,7 +276,32 @@ def parse_config(raw):
                   human_queue=queue, bot_messages=bots, owner_signals=signals,
                   sessions_dir=sessions_dir, people=people, display_timezone=zone,
                   console=console, decisions=decisions, scope_learning=learning,
-                  membership=membership, user_directory=directory, owner_resolver=resolver)
+                  membership=membership, user_directory=directory, owner_resolver=resolver,
+                  delivery_log=delivery_log)
+
+
+def delivery_log_section(value):
+    """Optional `delivery_log` map (P18): enabled (default true), keep_days (positive,
+    default 60) and result_patterns with `delivered` and `not_delivered` string lists."""
+    data = mapping({} if value is None else value, "delivery_log")
+    patterns = mapping(data.get("result_patterns", {}) or {}, "delivery_log.result_patterns")
+    unknown = set(patterns) - {"delivered", "not_delivered"}
+    if unknown:
+        raise ConfigError("delivery_log.result_patterns keys must be delivered or not_delivered")
+
+    def pattern_list(key, default):
+        values = patterns.get(key, list(default))
+        if not isinstance(values, list):
+            raise ConfigError(f"delivery_log.result_patterns.{key} must be a list")
+        return tuple(string(item, f"delivery_log.result_patterns.{key} entry") for item in values)
+
+    return DeliveryLog(enabled=boolean(data.get("enabled", DeliveryLog.enabled), "delivery_log.enabled"),
+                       keep_days=positive(data.get("keep_days", DeliveryLog.keep_days),
+                                          "delivery_log.keep_days"),
+                       delivered_patterns=pattern_list("delivered", DeliveryLog.delivered_patterns),
+                       not_delivered_patterns=pattern_list("not_delivered",
+                                                           DeliveryLog.not_delivered_patterns))
+
 
 
 def owner_resolver_section(value):

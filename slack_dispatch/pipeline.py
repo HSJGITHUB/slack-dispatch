@@ -1,5 +1,6 @@
 """Service orchestration with transient routing text and metadata-only delivery."""
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from collections import Counter
 import logging
@@ -14,6 +15,8 @@ from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
 from slack_dispatch.notify.dispatch_card import card_wanted
 from slack_dispatch.notify.session_resolve import SessionResolver
+from slack_dispatch.notify.base import DeliveryRecorder, error_detail
+from slack_dispatch.notify.session_resolve import AMBIGUOUS
 from slack_dispatch.queue.human import export_jsonl
 from slack_dispatch.resolver.owner import VERSION as OWNER_VERSION, OwnerResolver, suggestion_for
 from slack_dispatch.router.apply import apply_decision
@@ -75,6 +78,104 @@ def can_notify(config, store, spec, lane, notifier=None, message_ids=None):
     return True
 
 
+# P18 delivery log bookkeeping: one delivery_log row per attempt to reach a session or the
+# assistant DM. file_inbox adapters are never logged (their records are per message).
+
+DELIVERY_PRUNE_SECONDS = 86400
+
+
+def skip_reason(config, store, spec, lane, notifier=None):
+    """The delivery_log status of an attempt `can_notify` refused (P18).
+
+    Call it right after `can_notify` returned False: the ambiguous case reads the state the
+    shared resolver recorded during that call.
+    """
+    if spec.purpose == "lane" and spec.kind != "file_inbox" and (
+            not config.wake_policy.enabled or wake_switch_path(config).exists()):
+        return "skipped_paused"
+    session, paused = effective_lane(config, store, lane)
+    if paused:
+        return "skipped_paused"
+    resolver = getattr(notifier, "session_resolver", None)
+    if session and isinstance(resolver, SessionResolver) and resolver.lane_state.get(lane) == AMBIGUOUS:
+        return "skipped_ambiguous"
+    return "skipped_no_session"
+
+
+def lane_kind(store, ids):
+    """Delivery log kind of a lane wake: `reroute`, `new` or `backfill` (P18)."""
+    kinds = set()
+    for mid in ids:
+        row = store.get_message(mid) or {}
+        if str(row.get("route_reason") or "").startswith("reroute:"):
+            kinds.add("reroute")
+        elif row.get("origin") == "reconcile":
+            kinds.add("backfill")
+        else:
+            kinds.add("new")
+    if "reroute" in kinds:
+        return "reroute"
+    return "backfill" if kinds == {"backfill"} else "new"
+
+
+def human_kind(spec, rows, digest):
+    """Delivery log kind of a human notice: `card`, `digest`, `attention`, `reminder` or `new`."""
+    if spec.kind == "dispatch_card":
+        return "card"
+    if digest:
+        return "digest"
+    kinds = {row["kind"] for row in rows}
+    if any(kind.startswith("attention:") or kind == "storm" for kind in kinds):
+        return "attention"
+    if kinds & {"unassigned", "reassign"}:
+        return "reminder"
+    return "new"
+
+
+def build_recorders(config, store, notifiers, clock):
+    """One DeliveryRecorder per non-file_inbox adapter position (P18), empty when disabled.
+
+    Adapters that log their own attempts (`logs_deliveries = True`) get the recorder as
+    `delivery_recorder`, so timer reminders through the same adapter objects are logged too.
+    """
+    settings = getattr(config, "delivery_log", None)
+    if settings is None or not settings.enabled or not callable(getattr(store, "add_delivery", None)):
+        return {}
+    recorders = {}
+    for index, (spec, notifier) in enumerate(zip(config.notify_adapters, notifiers)):
+        if spec.kind == "file_inbox":
+            continue
+        recorder = DeliveryRecorder(store, purpose=spec.purpose, adapter=spec.kind, clock=clock,
+                                    delivered_patterns=settings.delivered_patterns,
+                                    not_delivered_patterns=settings.not_delivered_patterns)
+        recorders[index] = recorder
+        if getattr(notifier, "logs_deliveries", False) is True:
+            notifier.delivery_recorder = recorder
+    return recorders
+
+
+def logged_call(recorder, notifier, lane, kind, ids, call):
+    """Run one adapter call inside a delivery_log attempt (P18) and re-raise its errors.
+
+    Self-logging adapters write their own row (with the relay result); for the others the
+    row is written here: `sent`, `dry_run` for the service dry-run adapter, or `failed`.
+    """
+    if recorder is None:
+        return call()
+    own = getattr(notifier, "logs_deliveries", False) is True
+    with recorder.attempt(kind, ids):
+        try:
+            result = call()
+        except Exception as error:
+            if not own:
+                recorder.record(lane, ids, "failed", kind=kind, detail=error_detail(error))
+            raise
+    if not own:
+        dry = getattr(notifier, "service_dry_run", False) is True
+        recorder.record(lane, ids, "dry_run" if dry else "sent", kind=kind)
+    return result
+
+
 def queue_human_notice(config, store, mid, kind="message", *, immediate=False, adapter=None, now):
     """Queue one durable human-queue notice row per human_queue adapter (no delivery).
 
@@ -101,6 +202,7 @@ class HumanQueueDelivery:
         self.config, self.store, self.notifiers, self.clock = config, store, notifiers, clock
         self.failures = 0
         self.delivered = 0
+        self.recorders = {}  # P18: adapter position -> DeliveryRecorder (set by the pipeline)
 
     def offer(self, mid, kind="message", *, immediate=False, adapter=None, now=None):
         now = self.clock() if now is None else now
@@ -153,10 +255,14 @@ class HumanQueueDelivery:
                         timers=sorted({row["kind"] for row in rows
                                        if row["kind"] in ("unassigned", "reassign")}))
         try:
+            recorder, kind, covered = self.recorders.get(index), human_kind(spec, rows, digest), sorted(messages)
             if spec.dry_run:
                 LOG.info("Dry-run human notice: %s", summary)
+                if recorder is not None:
+                    recorder.record(HUMAN_QUEUE, covered, "dry_run", kind=kind)
                 return 0
-            notify_human(notifier, ids, metadata)
+            logged_call(recorder, notifier, HUMAN_QUEUE, kind, covered,
+                        lambda: notify_human(notifier, ids, metadata))
             if getattr(notifier, "service_dry_run", False) is True:
                 return 0
             with self.store._transaction() as db:
@@ -289,12 +395,38 @@ class Pipeline:
         # P17: optional owner resolver (owner_resolver.enabled).
         self.owner_resolver = build_owner_resolver(config)
         self.owner_reply_closed = 0
+        # P18: delivery log recorders, shared with the human queue and the adapters.
+        self.recorders = build_recorders(config, store, self.notifiers, clock)
+        self.human.recorders = self.recorders
+        self._pruned_at = None
+        self.prune_deliveries(count_failure=False)
         # Keep the package's v1 migration compatible. This table is service-owned.
         with store._transaction() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS service_deliveries (
                 source TEXT NOT NULL, channel TEXT NOT NULL, thread_ts TEXT NOT NULL,
                 lane TEXT NOT NULL, delivered_at REAL NOT NULL,
                 PRIMARY KEY (source, channel, thread_ts, lane))""")
+
+    def prune_deliveries(self, now=None, *, count_failure=True):
+        """Delete delivery_log rows older than delivery_log.keep_days (P18); returns the count.
+
+        Runs at construction (service start) and from flush once a day.
+        """
+        settings = getattr(self.config, "delivery_log", None)
+        prune = getattr(self.store, "prune_deliveries", None)
+        if settings is None or not callable(prune):
+            return 0
+        try:
+            now = float(self.clock() if now is None else now)
+            self._pruned_at = now
+            cutoff = datetime.fromtimestamp(max(0.0, now - settings.keep_days * 86400), timezone.utc)
+            return prune(cutoff.isoformat(timespec="microseconds"))
+        except Exception as error:
+            if count_failure:
+                self.failure("delivery_prune")
+            else:
+                LOG.error("Pipeline exception operation=delivery_prune class=%s", type(error).__name__)
+            return 0
 
     def failure(self, operation):
         with self.lock:
@@ -348,10 +480,26 @@ class Pipeline:
 
     def _send_one(self, index, lane, ids):
         spec, notifier = self.config.notify_adapters[index], self.notifiers[index]
+        recorder = self.recorders.get(index)
         if not can_notify(self.config, self.store, spec, lane, notifier, list(ids)):
+            if recorder is not None:
+                try:
+                    recorder.record(lane, list(ids),
+                                    skip_reason(self.config, self.store, spec, lane, notifier),
+                                    kind=lane_kind(self.store, ids))
+                except Exception as error:
+                    LOG.error("Delivery log write failed class=%s", type(error).__name__)
             return False
+        kind = None
+        if recorder is not None:
+            try:
+                kind = lane_kind(self.store, ids)
+            except Exception as error:
+                LOG.error("Delivery log write failed class=%s", type(error).__name__)
+                kind = "new"
         try:
-            notifier.notify(lane, list(ids))
+            logged_call(recorder, notifier, lane, kind,
+                        list(ids), lambda: notifier.notify(lane, list(ids)))
         except Exception:
             self._retry.setdefault((index, lane), set()).update(ids)
             self.failure("notify")
@@ -607,6 +755,8 @@ class Pipeline:
 
     def flush(self, now):
         with self.lock:
+            if self._pruned_at is None or not 0 <= now - self._pruned_at < DELIVERY_PRUNE_SECONDS:
+                self.prune_deliveries(now)
             self.human.flush(now)
             for (index, lane), pending in list(self._retry.items()):
                 spec = self.config.notify_adapters[index]

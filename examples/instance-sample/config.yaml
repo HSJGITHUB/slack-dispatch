@@ -211,3 +211,16 @@ owner_resolver:
   closed_statuses: [closed, answered, answered_action_ours, sent_closed_no_action_ours, delivered]
   close_queue_on_owner_reply: true
   activity_days: 60
+# Optional delivery log (P18). Every attempt to wake a lane session or to reach the
+# operator (digests, cards, attention notices) writes one ledger row in delivery_log:
+# kind, lane, target session, message ids, status and the relay result. The console
+# Deliveries tab and the inbox CLI `deliveries` command read it. Rows older than
+# keep_days are pruned at service start and once a day. result_patterns classify the
+# relay result text (case-insensitive substrings) as delivered or not_delivered; a text
+# matching neither is unknown. file_inbox writes are not logged.
+delivery_log:
+  enabled: true
+  keep_days: 60
+  result_patterns:
+    delivered: ['"success":true', "in that session's inbox"]
+    not_delivered: ['"success":false', "ENOINBOX", "no inbox", "could not be delivered", "not found"]

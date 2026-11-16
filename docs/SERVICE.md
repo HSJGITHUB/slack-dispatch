@@ -378,3 +378,82 @@ seconds the loop reads unconsumed rows and calls `wake_engine.offer` once per di
 Deliver decision wakes the lane's session adapters. Only messages still assigned to
 that lane are offered. Every row read is marked `consumed_at`, duplicates included.
 Socket, reconcile and cutover backfill deliveries create no requests.
+
+## P18 delivery log
+
+Every attempt to reach a lane session or the operator writes one row in the ledger table
+`delivery_log` (created by `migrate()`, additive; the schema version stays 2). File inbox
+appends are not logged: they are per message and already visible in the ledger.
+
+```yaml
+delivery_log:
+  enabled: true
+  keep_days: 60          # rows older than this are pruned at startup and once a day
+  result_patterns:
+    delivered: ['"success":true', "in that session's inbox"]
+    not_delivered: ['"success":false', "ENOINBOX", "no inbox", "could not be delivered", "not found"]
+```
+
+Columns: `id`, `created_at` (UTC ISO with microseconds, so text order is time order),
+`purpose` (`lane` or `human_queue`), `lane` (`human_queue` for operator notices), `kind`,
+`adapter` (the adapter kind), `target_session_id`, `target_session_name`, `item_count`,
+`item_ids` (JSON list of message ids), `status`, `detail`, `cost_usd`, `duration_ms`,
+`relay_session_id`, `last_seen_at` and `repeat_count`. For a relay attempt `created_at` is
+the moment the relay started, not when it returned, so an ack that arrives while the relay
+is still running counts as the receipt.
+
+A skipped attempt whose status and item ids equal the previous row of the same lane (for
+example the 30 second flush retrying a wake while the lane stays paused or not live) adds
+no row: that row's `last_seen_at` moves to the new attempt and `repeat_count` grows (null
+means 1). Any other row in between starts a new row.
+
+- `kind`: `new`, `backfill` or `reroute` for lane wakes (from the route reason and the
+  origin of the woken items), `reminder` for timer reminders and timer notices, `digest`,
+  `card` and `attention` (attention and storm notices) for the operator; an immediate
+  ordinary human notice is `new`.
+- `status`: `sent`, `failed`, `timeout`, `dry_run` (adapter `dry_run: true` or the service
+  `--dry-run`), `skipped_no_session` (no session value, or an id that is not live),
+  `skipped_ambiguous` (an id prefix matching several live sessions) and `skipped_paused`
+  (lane paused, `wake_policy.enabled: false` or `wake.off`).
+- `detail` holds at most 500 characters: the relay result text, the error class with a
+  short reason (`CalledProcessError: exit status 1`, `TimeoutExpired: no answer within
+  60s`) or the card count. Never a message body or a token; exception text is not used
+  because it can carry the rendered command. A relay answer that repeats the rendered
+  wake text has that text replaced by `[message]`.
+
+Where rows are written. The pipeline writes the rows of a refused delivery gate (the
+skipped statuses), of the service dry run and of adapters that do not log themselves
+(`file_drop`, custom adapters). The `session_message` adapter writes its own row because it
+holds the relay result, and the `dispatch_card` writer writes one `card` row per attempt.
+The pipeline hands both a shared recorder at construction, so timer reminders sent through
+the same adapter objects are logged too (kind `reminder`). The timer sweep's own gate skips
+are not logged, so a lane that stays not live does not add a row every minute. A failed log
+write is logged by class name and never fails a delivery; the same holds when the skip
+reason, the wake kind or the relay output cannot be read (a relay whose output cannot be
+read is `sent` with `relay output not read | <class>`).
+
+Relay result. The relay runs with `--output-format json`. Its stdout is parsed as one JSON
+object (or a JSON list whose last `type: result` object is used): `result`, `is_error`,
+`total_cost_usd`, `duration_ms` and `session_id` fill `detail`, `cost_usd`, `duration_ms`
+and `relay_session_id`; `is_error: true` makes the row `failed` (the delivery itself is not
+retried, as before). Such an attempt is still recorded as a delivery in
+`service_deliveries` and the heartbeat `delivered` counter, so only the delivery log shows
+it as failed. The result text is classified with `delivery_log.result_patterns`
+(case-insensitive substrings; `"success": true` with spaces also matches) and stored as a
+prefix of `detail`: `delivered | <text>`, `not_delivered | <text>` or `unknown | <text>`.
+When patterns of both lists match, the one found earliest in the text wins, so the
+standard success text that mentions what happens if the session "refuses it" stays
+delivered. Output that is not JSON is `sent` with `unparsed output | <first 200
+characters>`. The older relay answer `DONE` is `sent` with `unknown | DONE`.
+
+Receipt. A one-shot relay cannot see a later refusal by the target session, so receipt is
+measured in the ledger: a `sent` lane row is received at the earliest `ack_at` or `done_at`
+of its items that is later than the row and was set while the item still belongs to the
+row's lane (a later reroute hides it). A `done_at` with a service, operator or cutover note
+(`owner_reaction:`, `human:`, `cutover:` and the other system notes) is no receipt.
+Without a receipt the row reports its age. Operator rows have no receipt; a `card` row
+reports `decision_at` when a card decision assigned an item after the row (route reason
+`human:card`).
+
+Pruning runs when the pipeline is constructed (service start) and from the 30 second flush
+once a day. The console and the inbox CLI only read the table.

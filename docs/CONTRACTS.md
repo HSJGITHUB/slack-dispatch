@@ -366,3 +366,38 @@ All additive; the schema version stays 2 and no table changes.
   sent_closed_no_action_ours, delivered], close_queue_on_owner_reply: true,
   activity_days: 60}`.
 - Heartbeat counter `owner_reply_closed` when the resolver is enabled.
+
+## P18 delivery log
+
+All additive; the schema version stays 2.
+
+- Ledger table created by `migrate()`: `delivery_log(id INTEGER PRIMARY KEY, created_at TEXT,
+  purpose TEXT, lane TEXT, kind TEXT, adapter TEXT, target_session_id TEXT,
+  target_session_name TEXT, item_count INTEGER, item_ids TEXT, status TEXT, detail TEXT,
+  cost_usd REAL, duration_ms INTEGER, relay_session_id TEXT, last_seen_at TEXT,
+  repeat_count INTEGER)` with an index on `created_at`; `migrate()` adds the last two
+  columns to an earlier table. `created_at` is UTC ISO with microseconds (the relay start
+  for relay attempts); `item_ids` is a JSON list. `add_delivery` folds a skipped row equal
+  to the lane's previous row into it (`last_seen_at`, `repeat_count`).
+- `LedgerStore` adds `add_delivery(row)`, `list_deliveries(*, since, lane, purpose, status,
+  limit, offset)` (status `skipped` matches every `skipped_*`), `count_deliveries(...)`,
+  `prune_deliveries(before)` and `delivery_receipts(rows, now=None)`; module helpers
+  `utc_stamp(epoch)` and `delivery_item_ids(value)`.
+- `slack_dispatch.notify.base`: `DeliveryRecorder(store, *, purpose, adapter, clock,
+  delivered_patterns, not_delivered_patterns)` with `attempt(kind, ids)` and
+  `record(lane, ids, status, **fields, at=None)` (`at` = attempt start, epoch seconds),
+  `now()`, `error_detail(error)`, `DELIVERY_STATUSES`.
+- Adapters that log their own attempts set `logs_deliveries = True` and read
+  `delivery_recorder` (`SessionMessageNotifier`, `DispatchCardNotifier`). The ids-only
+  `notify(lane, ids)` protocol is unchanged.
+- `slack_dispatch.notify.session_message`: `relay_result(stdout)`, `classify_relay(text,
+  delivered, not_delivered)`, `relay_fields(stdout, command, delivered, not_delivered)`.
+  `SessionResolver` adds `resolved` and `resolved_session(lane, target)`.
+- `slack_dispatch.pipeline`: `skip_reason`, `lane_kind`, `human_kind`, `build_recorders`,
+  `logged_call`; `Pipeline.recorders`, `Pipeline.prune_deliveries(now=None)`;
+  `HumanQueueDelivery.recorders`.
+- Config: optional `delivery_log: {enabled: true, keep_days: 60, result_patterns:
+  {delivered: [...], not_delivered: [...]}}` (`DeliveryLog` with `delivered_patterns` and
+  `not_delivered_patterns`).
+- Console: page `/deliveries`, `GET /api/deliveries`, `GET /api/deliveries/summary`.
+- Inbox CLI: `deliveries [--lane L] [--hours N] [--status S] [--json]`.

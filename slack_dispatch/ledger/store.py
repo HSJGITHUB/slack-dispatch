@@ -1,8 +1,9 @@
 """Transactional SQLite ledger. Construction performs no I/O."""
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+import json
 from pathlib import Path
 import sqlite3
 import threading
@@ -22,6 +23,51 @@ class ProposalStateError(Exception):
 
 def now():
     return datetime.now().astimezone().isoformat()
+
+
+# P18 delivery log. created_at is UTC ISO with microseconds, so text order is time order.
+DELIVERY_LOG_DDL = """CREATE TABLE IF NOT EXISTS delivery_log (
+    id INTEGER PRIMARY KEY, created_at TEXT, purpose TEXT, lane TEXT, kind TEXT, adapter TEXT,
+    target_session_id TEXT, target_session_name TEXT, item_count INTEGER, item_ids TEXT,
+    status TEXT, detail TEXT, cost_usd REAL, duration_ms INTEGER, relay_session_id TEXT,
+    last_seen_at TEXT, repeat_count INTEGER)"""
+DELIVERY_COLUMNS = ("created_at", "purpose", "lane", "kind", "adapter", "target_session_id",
+                    "target_session_name", "item_count", "item_ids", "status", "detail",
+                    "cost_usd", "duration_ms", "relay_session_id")
+# fix1: a skipped attempt equal to the lane's previous row (same status and item ids) is
+# folded into that row: last_seen_at moves and repeat_count grows (NULL counts as 1).
+DELIVERY_REPEAT_COLUMNS = {"last_seen_at": "TEXT", "repeat_count": "INTEGER"}
+DETAIL_CHARS = 500
+# A done_at with one of these notes was written by the service, the operator or cutover,
+# not by the lane session, so it is no delivery receipt (the inbox CLI SYSTEM_NOTES list).
+RECEIPT_IGNORED_NOTES = ("cutover:", "owner_reaction:", "owner_post", "prehandled", "context",
+                         "message_deleted", "human:")
+CARD_DECISION_REASON = "human:card"
+
+
+def utc_stamp(epoch):
+    """UTC ISO time with microseconds for delivery_log.created_at (sortable as text)."""
+    return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat(timespec="microseconds")
+
+
+def _moment(value):
+    """Aware datetime from an ISO stamp (naive values are local time), or None."""
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo is not None else moment.astimezone()
+
+
+def delivery_item_ids(value):
+    """The message ids of a delivery_log `item_ids` value (JSON list text or a list)."""
+    try:
+        ids = json.loads(value) if isinstance(value, str) else value
+    except ValueError:
+        return []
+    return [item for item in ids if isinstance(item, str)] if isinstance(ids, list) else []
 
 
 class LedgerStore:
@@ -95,6 +141,13 @@ class LedgerStore:
             db.execute("""CREATE TABLE IF NOT EXISTS user_directory (
                 user TEXT PRIMARY KEY, is_bot INTEGER, is_app_user INTEGER, deleted INTEGER,
                 name TEXT, seen_at TEXT)""")
+            # P18: one row per wake or human notice attempt (additive).
+            db.execute(DELIVERY_LOG_DDL)
+            present = {r[1] for r in db.execute("PRAGMA table_info(delivery_log)")}
+            for name, declaration in DELIVERY_REPEAT_COLUMNS.items():
+                if name not in present:
+                    db.execute(f"ALTER TABLE delivery_log ADD COLUMN {name} {declaration}")
+            db.execute("CREATE INDEX IF NOT EXISTS delivery_log_created ON delivery_log (created_at)")
             if not versions:
                 db.execute("INSERT INTO schema_version(version) VALUES (2)")
             elif versions == [1]:
@@ -706,6 +759,145 @@ class LedgerStore:
         for row in rows:
             row.pop("body", None)
         return rows
+
+    # P18 delivery log: one row per wake or human notice attempt.
+
+    def add_delivery(self, row):
+        """Insert one delivery_log row and return its id.
+
+        `item_ids` may be a list (stored as JSON); `detail` is cut to 500 characters;
+        `created_at` defaults to now (UTC). Unknown keys are ignored. A `skipped_*` row whose
+        status and item ids equal the previous row of the same lane and purpose is not
+        inserted: that row gets `last_seen_at` = this created_at and `repeat_count` + 1, and
+        its id is returned.
+        """
+        values = {key: row.get(key) for key in DELIVERY_COLUMNS}
+        if values["created_at"] is None:
+            values["created_at"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        ids = values["item_ids"]
+        if not isinstance(ids, str):
+            ids = json.dumps([str(item) for item in (ids or [])])
+            values["item_ids"] = ids
+        if values["item_count"] is None:
+            values["item_count"] = len(delivery_item_ids(ids))
+        if isinstance(values["detail"], str):
+            values["detail"] = values["detail"][:DETAIL_CHARS]
+        columns = ", ".join(DELIVERY_COLUMNS)
+        marks = ", ".join("?" for _ in DELIVERY_COLUMNS)
+        with self._transaction() as db:
+            if str(values["status"] or "").startswith("skipped_"):
+                previous = db.execute("SELECT id, status, item_ids FROM delivery_log "
+                                      "WHERE lane IS ? AND purpose IS ? ORDER BY id DESC LIMIT 1",
+                                      (values["lane"], values["purpose"])).fetchone()
+                if (previous is not None and previous["status"] == values["status"]
+                        and delivery_item_ids(previous["item_ids"]) == delivery_item_ids(ids)):
+                    db.execute("UPDATE delivery_log SET last_seen_at=?, "
+                               "repeat_count=COALESCE(repeat_count, 1) + 1 WHERE id=?",
+                               (values["created_at"], previous["id"]))
+                    return previous["id"]
+            return db.execute(f"INSERT INTO delivery_log ({columns}) VALUES ({marks})",
+                              tuple(values[key] for key in DELIVERY_COLUMNS)).lastrowid
+
+    @staticmethod
+    def _delivery_filter(since, lane, purpose, status):
+        clauses, params = [], []
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        for column, value in (("lane", lane), ("purpose", purpose)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if status == "skipped":
+            clauses.append("substr(status, 1, 8) = 'skipped_'")
+        elif status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def list_deliveries(self, *, since=None, lane=None, purpose=None, status=None, limit=None,
+                        offset=0):
+        """delivery_log rows newest first. `since` is a UTC ISO bound (created_at >= since);
+        status `skipped` matches every skipped_* status. Empty without the table."""
+        if not self.has_table("delivery_log"):
+            return []
+        where, params = self._delivery_filter(since, lane, purpose, status)
+        limit = -1 if limit is None else limit
+        return self._rows(f"SELECT * FROM delivery_log{where} ORDER BY created_at DESC, id DESC "
+                          "LIMIT ? OFFSET ?", (*params, limit, offset))
+
+    def count_deliveries(self, *, since=None, lane=None, purpose=None, status=None):
+        if not self.has_table("delivery_log"):
+            return 0
+        where, params = self._delivery_filter(since, lane, purpose, status)
+        return self._rows(f"SELECT COUNT(*) AS n FROM delivery_log{where}", params)[0]["n"]
+
+    def prune_deliveries(self, before):
+        """Delete delivery_log rows created before the UTC ISO bound; returns the count."""
+        if not self.has_table("delivery_log"):
+            return 0
+        with self._transaction() as db:
+            return db.execute("DELETE FROM delivery_log WHERE created_at < ?", (before,)).rowcount
+
+    def delivery_receipts(self, rows, now=None):
+        """Receipt fields for delivery_log rows, in order (new dicts; rows are unchanged).
+
+        A `lane` row with status `sent` is received at the earliest `ack_at` or `done_at` of
+        its items that is later than the row's created_at, on items whose lane equals the
+        row lane (a later reroute hides the receipt). A done_at written with a service,
+        operator or cutover note does not count. `latency_seconds` is the delay; without a receipt
+        `received_at` is None and `age_seconds` is the row age at `now` (epoch seconds,
+        default the current time). `human_queue` rows have no receipt; a `card` row has
+        `decision_at` when a card decision assigned an item after the row (route reason
+        `human:card`), else None. Rows that were not sent (skipped, failed, dry run) get
+        no receipt and no age.
+        """
+        now = datetime.now(timezone.utc).timestamp() if now is None else float(now)
+        ids = sorted({mid for row in rows for mid in delivery_item_ids(row.get("item_ids"))})
+        messages = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for message in self._rows(
+                    "SELECT id, lane, state, ack_at, done_at, note, route_reason, assigned_at "
+                    f"FROM messages WHERE id IN ({marks})", chunk):
+                messages[message["id"]] = message
+        result = []
+        for row in rows:
+            created = _moment(row.get("created_at"))
+            receipt = {"received_at": None, "latency_seconds": None, "age_seconds": None,
+                       "decision_at": None}
+            items = delivery_item_ids(row.get("item_ids"))
+            if row.get("purpose") == "lane" and row.get("status") == "sent" and created is not None:
+                best = None
+                for mid in items:
+                    message = messages.get(mid)
+                    if not message or message.get("lane") != row.get("lane"):
+                        continue
+                    stamps = [message.get("ack_at")]
+                    if not str(message.get("note") or "").startswith(RECEIPT_IGNORED_NOTES):
+                        stamps.append(message.get("done_at"))
+                    for stamp in stamps:
+                        moment = _moment(stamp)
+                        if moment is not None and moment > created and (
+                                best is None or moment < best[0]):
+                            best = (moment, stamp)
+                if best is not None:
+                    receipt["received_at"] = best[1]
+                    receipt["latency_seconds"] = int((best[0] - created).total_seconds())
+                else:
+                    receipt["age_seconds"] = max(0, int(now - created.timestamp()))
+            elif row.get("kind") == "card" and created is not None:
+                best = None
+                for mid in items:
+                    message = messages.get(mid) or {}
+                    moment = _moment(message.get("assigned_at"))
+                    if (message.get("route_reason") == CARD_DECISION_REASON and moment is not None
+                            and moment > created and (best is None or moment < best[0])):
+                        best = (moment, message["assigned_at"])
+                receipt["decision_at"] = best[1] if best else None
+            result.append(dict(row, **receipt))
+        return result
 
 
 def event_is_bot(event):

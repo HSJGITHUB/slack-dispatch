@@ -20,6 +20,8 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
+from .base import error_detail
+
 LOG = logging.getLogger(__name__)
 SCHEMA = "dispatch_card/1"
 HUMAN_QUEUE = "human_queue"
@@ -150,6 +152,10 @@ def write_card(directory, card):
 class DispatchCardNotifier:
     """Card request writer for the human queue; see the module docstring."""
 
+    # P18: card writes are logged here (kind `card`); the pipeline sets the recorder.
+    logs_deliveries = True
+    delivery_recorder = None
+
     def __init__(self, directory, config, store, *, only_immediate=True, workspace_domain=None):
         self.directory = Path(directory)
         self.config, self.store = config, store
@@ -161,14 +167,29 @@ class DispatchCardNotifier:
         return None
 
     def write(self, message_ids, metadata):
-        """Write one card per id of an immediate notice; return the written paths."""
-        written = []
-        for message_id in message_ids:
-            card = build_card(self.config, self.store, message_id, metadata.get("summary"),
-                              workspace_domain=self.workspace_domain)
-            if card is None:
-                LOG.warning("Dispatch card skipped: no lane id is valid for a card id=%s", message_id)
-                continue
-            written.append(write_card(self.directory, card))
-            LOG.info("Dispatch card written id=%s lanes=%d", message_id, len(card["lanes"]))
+        """Write one card per id of an immediate notice; return the written paths.
+
+        With a delivery recorder (P18) the attempt becomes one delivery_log row of kind
+        `card`: `sent` with the written count, or `failed` with the error class.
+        """
+        written, skipped = [], 0
+        recorder = self.delivery_recorder
+        try:
+            for message_id in message_ids:
+                card = build_card(self.config, self.store, message_id, metadata.get("summary"),
+                                  workspace_domain=self.workspace_domain)
+                if card is None:
+                    LOG.warning("Dispatch card skipped: no lane id is valid for a card id=%s", message_id)
+                    skipped += 1
+                    continue
+                written.append(write_card(self.directory, card))
+                LOG.info("Dispatch card written id=%s lanes=%d", message_id, len(card["lanes"]))
+        except Exception as error:
+            if recorder is not None:
+                recorder.record(HUMAN_QUEUE, message_ids, "failed", kind="card",
+                                detail=error_detail(error))
+            raise
+        if recorder is not None:
+            detail = f"cards written {len(written)}" + (f", no valid lane {skipped}" if skipped else "")
+            recorder.record(HUMAN_QUEUE, message_ids, "sent", kind="card", detail=detail)
         return written

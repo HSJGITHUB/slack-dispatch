@@ -199,6 +199,25 @@ class OwnerResolver:
     activity_days: int = 60
 
 
+# P18 delivery log: relay result text patterns (case-insensitive substrings).
+DELIVERED_PATTERNS = ('"success":true', "in that session's inbox")
+NOT_DELIVERED_PATTERNS = ('"success":false', "ENOINBOX", "no inbox", "could not be delivered",
+                          "not found")
+
+
+@dataclass(frozen=True)
+class DeliveryLog:
+    """Delivery log (P18): one ledger row per wake or human notice attempt.
+
+    Rows older than `keep_days` are pruned at service start and once a day. The relay
+    result text is classified as delivered or not_delivered with these patterns.
+    """
+    enabled: bool = True
+    keep_days: int = 60
+    delivered_patterns: tuple[str, ...] = DELIVERED_PATTERNS
+    not_delivered_patterns: tuple[str, ...] = NOT_DELIVERED_PATTERNS
+
+
 @dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
@@ -238,3 +257,5 @@ class Config:
     user_directory: UserDirectory = field(default_factory=UserDirectory)
     # Optional owner resolver section (P17).
     owner_resolver: OwnerResolver = field(default_factory=OwnerResolver)
+    # Optional delivery log section (P18).
+    delivery_log: DeliveryLog = field(default_factory=DeliveryLog)

@@ -359,6 +359,31 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
     def channel_exclusion_export():
         return {"yaml": queries.export_exclusions_yaml(store, config, view)}
 
+    # P18: delivery log tab (page, rows with receipts, window summary). Read-only.
+    app.add_api_route("/deliveries", page, methods=["GET"], include_in_schema=False)
+
+    def delivery_filters(lane, purpose, status):
+        if lane and lane not in [row.id for row in config.lanes] + [queries.HUMAN_QUEUE]:
+            raise HTTPException(400, "Unknown lane")
+        if purpose and purpose not in queries.DELIVERY_PURPOSES:
+            raise HTTPException(400, "Unknown purpose")
+        if status and status not in queries.DELIVERY_STATUS_FILTERS:
+            raise HTTPException(400, "Unknown status")
+        return lane or None, purpose or None, status or None
+
+    @app.get("/api/deliveries")
+    def deliveries(lane: str = Query("", max_length=100), purpose: str = Query("", max_length=20),
+                   status: str = Query("", max_length=30),
+                   hours: int = Query(queries.DELIVERY_DEFAULT_HOURS, ge=0, le=24 * 366),
+                   page: int = Query(1, ge=1, le=100000)):
+        lane, purpose, status = delivery_filters(lane, purpose, status)
+        return queries.deliveries_page(store, config, view, clock(), lane=lane, purpose=purpose,
+                                       status=status, hours=hours, page=page)
+
+    @app.get("/api/deliveries/summary")
+    def deliveries_summary(hours: int = Query(queries.DELIVERY_DEFAULT_HOURS, ge=0, le=24 * 366)):
+        return queries.deliveries_summary(store, clock(), hours=hours)
+
     app.add_middleware(ConsoleMiddleware, hosts=allowed_hosts(config, host))
     return app
 

@@ -5,6 +5,25 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P18 delivery log
+- New ledger table `delivery_log`: one row per attempt to wake a lane session or to reach
+  the operator (digest, card, attention, reminder), including the skipped cases
+  (`skipped_no_session`, `skipped_ambiguous`, `skipped_paused`), `dry_run`, `failed` and
+  `timeout`, with kind, lane, adapter, target session, message ids, cost and duration.
+  File inbox appends are not logged. Rows older than `delivery_log.keep_days` (default 60)
+  are pruned at start and once a day. Relay rows are stamped with the relay start; repeated
+  identical skipped attempts fold into one row (`last_seen_at`, `repeat_count`).
+- The session relay's `--output-format json` stdout is parsed (`result`, `is_error`,
+  `total_cost_usd`, `duration_ms`, `session_id`) and its result text is classified with
+  `delivery_log.result_patterns` as delivered, not_delivered or unknown. Both the old `DONE`
+  answer and an echoed SendMessage tool result work; output that is not JSON is kept as
+  `unparsed output`. Details never carry a message body or exception text.
+- Receipts: a sent lane wake is received at the first `ack` or `done` of its items by that
+  lane after the wake; card rows show a returned card decision.
+- Console `Deliveries` tab (`/deliveries`, `GET /api/deliveries`,
+  `GET /api/deliveries/summary`) and inbox CLI `deliveries [--lane] [--hours] [--status]
+  [--json]`.
+
 ### P17 owner resolver and registry sync
 - `slack_dispatch.resolver`: a read-only index of the session thread registry JSON
   (field aliases `ch`/`channel_id`/`channel` and `root_ts`/`thread_ts`, name strings,
