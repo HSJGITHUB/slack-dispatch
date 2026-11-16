@@ -21,9 +21,16 @@ people:
   U0000000091: Dummy Person One
   U0000000093: Dummy Owner
 display_timezone: UTC
+# channel_defaults entries take an optional mention_only flag (P26, default false). In a
+# mention_only channel a post is routed only when it has attention (an exact mention of
+# always_human.owner_user or a mention user, or an always_human author) or replies in a
+# thread that already has a binding; every other post is recorded as excluded with note
+# excluded:no_mention (no inbox record, wake, queue entry or human notice). Bot posts there
+# are excluded:bot under bot_messages.policy route_or_exclude. Not valid in dm_defaults.
 channel_defaults:
   C0000000001: {default: support}
   C0000000002: {default: null}
+  C0000000004: {default: owner, mention_only: true}
 dm_defaults:
   D0000000001: {default: owner}
 person_channel_rules:

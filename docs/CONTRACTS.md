@@ -65,7 +65,8 @@ Decision(lane: str | None, reason: str, rule: str | None, attention: str | None 
 route(message: Message, config: Config, lookup_binding: Callable[[str, str, str], str | None]) -> Decision
 ```
 Order: excluded channel -> bot policy -> collect always-human attention ->
-ThreadInherit -> ExplicitTag -> ChannelDefault -> PersonChannel -> human pending.
+mention-only gate (P26) -> ThreadInherit -> ExplicitTag -> ChannelDefault ->
+PersonChannel -> human pending.
 Attention is independent of lane selection. An unmatched protected item uses
 rule=always_human; an unmatched ordinary item uses rule=none. Only rule=none may
 invoke a suggester. See ROUTING.md for the full precedence table.
@@ -661,3 +662,23 @@ All additive; the schema version stays 2 and no table changes.
 - Dispatch cards: eligibility unchanged (`human_pending` only); documented for direct-lane
   attention items.
 - No ledger schema change and no new store method.
+
+## P26 mention-only channels
+
+All additive; no ledger schema change.
+
+- Config: a `channel_defaults` entry takes an optional boolean `mention_only` (default
+  false): `{default: <lane or null>, mention_only: true}`. A non-boolean value and the key
+  in a `dm_defaults` entry raise `ConfigError`. `Config.channel_defaults` stays
+  `dict[str, str | None]`; `Config.mention_only_channels: tuple[str, ...] = ()` lists the
+  flagged channel ids.
+- Router: `slack_dispatch.router.engine.NO_MENTION = "excluded:no_mention"` and
+  `is_mention_only(message, config)`. In a mention-only channel a message without
+  attention that is not a reply in a bound thread yields
+  `Decision(None, "excluded:no_mention", "excluded")`; a bound reply yields the
+  `thread_inherit` decision; a message with attention follows the normal order. Under
+  `bot_messages.policy: route_or_exclude` a bot message in a mention-only channel yields
+  `excluded:bot`. `route()` signature unchanged.
+- Pipeline: the excluded decision goes through `apply_decision` as before (state
+  `excluded`, note `excluded:no_mention`); `Pipeline.excluded_no_mention` (int) appears in
+  `snapshot()` (and so the heartbeat) once nonzero.

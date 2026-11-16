@@ -279,3 +279,7 @@ class Config:
     owner_resolver: OwnerResolver = field(default_factory=OwnerResolver)
     # Optional delivery log section (P18).
     delivery_log: DeliveryLog = field(default_factory=DeliveryLog)
+    # P26: channel_defaults keys whose entry sets `mention_only: true`. In these channels a
+    # post without attention is excluded (`excluded:no_mention`) unless it replies in a
+    # thread that already has a binding. channel_defaults keeps its {channel: lane} shape.
+    mention_only_channels: tuple[str, ...] = ()

@@ -5,6 +5,20 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P26 mention-only channels
+- `channel_defaults` entries take an optional `mention_only: true` next to `default`
+  (default false; the loader rejects a non-boolean and the key in `dm_defaults`). For
+  channels of other teams where the operator only wants posts that mention them.
+- In a mention-only channel a post with attention (owner or mention user mention, or an
+  `always_human` author) routes as before (to the channel default with the attention
+  flag); a reply in a bound thread inherits as before; every other post is recorded as
+  `excluded` with note `excluded:no_mention`: no lane, queue entry, human notice, inbox
+  record or wake.
+- Bot posts in a mention-only channel are `excluded:bot` under `route_or_exclude`.
+- `Config.mention_only_channels`, `router.engine.NO_MENTION`, heartbeat counter
+  `excluded_no_mention` (present once nonzero). Precedence table in `docs/ROUTING.md`
+  gains the row.
+
 ### P25 operator queue
 - The console queue is the operator queue: `human_pending` items (`queue_kind` `undecided`)
   plus the `assigned` and `acked` items of the direct lane (`console.direct_lane`,

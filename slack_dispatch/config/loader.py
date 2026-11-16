@@ -80,12 +80,20 @@ def parse_config(raw):
             raise ConfigError(f"{path} must reference a configured lane")
         return value
 
+    mention_only = []
+
     def defaults(key):
         result = {}
         for channel, entry in mapping(get(key), key).items():
             string(channel, key + " key")
             entry = mapping(entry, key + " entry")
             result[channel] = lane_ref(required(entry, "default", key), key, True)
+            # P26: optional `mention_only` flag, channel_defaults only (default false).
+            if "mention_only" in entry:
+                if key != "channel_defaults":
+                    raise ConfigError(f"{key} entry does not support mention_only")
+                if boolean(entry["mention_only"], key + " entry.mention_only"):
+                    mention_only.append(channel)
         return result
 
     rules = []
@@ -276,7 +284,8 @@ def parse_config(raw):
     directory = user_directory_section(data.get("user_directory", {}))
     resolver = owner_resolver_section(data.get("owner_resolver", {}))
     delivery_log = delivery_log_section(data.get("delivery_log", {}))
-    return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
+    channel_defaults, dm_defaults = defaults("channel_defaults"), defaults("dm_defaults")
+    return Config(tuple(lanes), channel_defaults, dm_defaults,
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
                   explicit_tag_pattern=pattern, inbox=inbox, service=service,
@@ -284,7 +293,7 @@ def parse_config(raw):
                   sessions_dir=sessions_dir, people=people, display_timezone=zone,
                   console=console, decisions=decisions, scope_learning=learning,
                   membership=membership, user_directory=directory, owner_resolver=resolver,
-                  delivery_log=delivery_log)
+                  delivery_log=delivery_log, mention_only_channels=tuple(mention_only))
 
 
 def delivery_log_section(value):

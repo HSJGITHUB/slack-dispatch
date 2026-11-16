@@ -7,6 +7,10 @@ from slack_dispatch.ingest.user_directory import is_bot_message, message_author
 from .rules import ChannelDefault, ExplicitTag, PersonChannel, ScopeClaim, ThreadInherit, first_match
 
 
+# P26: the reason (ledger note) of a post without attention in a mention-only channel.
+NO_MENTION = "excluded:no_mention"
+
+
 @dataclass(frozen=True)
 class Decision:
     lane: str | None
@@ -48,6 +52,11 @@ def attention_for(message, config):
     return attention
 
 
+def is_mention_only(message, config):
+    """True for a channel whose channel_defaults entry sets `mention_only: true` (P26)."""
+    return message.get("channel") in getattr(config, "mention_only_channels", ())
+
+
 def route(message, config, lookup_binding, lookup_scope=None) -> Decision:
     if lookup_scope is None:
         lookup_scope = scope_lookup(lookup_binding)
@@ -56,7 +65,10 @@ def route(message, config, lookup_binding, lookup_scope=None) -> Decision:
         return Decision(None, "excluded", "excluded")
     bot = message_is_bot(message, config)
     if bot and config.bot_messages.policy != "route_all":
-        if config.bot_messages.policy == "route_or_exclude":
+        # P26: bots never carry attention under these policies, so a mention-only channel
+        # never routes them to its default lane or a channel claim.
+        mention_only = is_mention_only(message, config)
+        if config.bot_messages.policy == "route_or_exclude" and not mention_only:
             # Confirmed channel and dm claims act as ledger-backed channel defaults (P13).
             result = first_match(message, (
                 ScopeClaim(lookup_scope, lanes=lanes, kinds=("channel", "dm")),
@@ -66,6 +78,13 @@ def route(message, config, lookup_binding, lookup_scope=None) -> Decision:
                 return Decision(result.lane, result.reason, result.rule or result.reason)
         return Decision(None, "excluded:bot", "excluded")
     attention = attention_for(message, config)
+    if not attention and is_mention_only(message, config):
+        # P26: without attention only a reply in a bound thread gets through (the same
+        # result ThreadInherit gives first in the normal order); anything else is excluded.
+        inherited = ThreadInherit(lookup_binding).match(message)
+        if inherited is None:
+            return Decision(None, NO_MENTION, "excluded")
+        return Decision(inherited.lane, inherited.reason, inherited.reason)
     result = first_match(message, (
         ThreadInherit(lookup_binding),
         ScopeClaim(lookup_scope, lanes=lanes),

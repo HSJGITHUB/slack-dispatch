@@ -24,7 +24,7 @@ from slack_dispatch.queue.human import digest_counts_text, export_jsonl, queue_c
 from slack_dispatch.resolver.owner import VERSION as OWNER_VERSION, OwnerResolver, suggestion_for
 from slack_dispatch.router.apply import apply_decision
 from slack_dispatch.router.classifier import Suggestion
-from slack_dispatch.router.engine import route
+from slack_dispatch.router.engine import NO_MENTION, route
 
 LOG = logging.getLogger(__name__)
 HUMAN_QUEUE = "human_queue"
@@ -512,6 +512,9 @@ class Pipeline:
         # P15: optional MembershipCache; the service sets it when membership is enabled.
         self.membership = None
         self.excluded_not_member = 0
+        # P26: posts without attention excluded in a mention-only channel; appears in the
+        # heartbeat once nonzero (like the P22 and P23 counters).
+        self.excluded_no_mention = 0
         # P16: optional UserDirectory; the service sets it when user_directory is enabled.
         self.directory = None
         self.app_posts_human = 0
@@ -596,6 +599,8 @@ class Pipeline:
                 result.update(edits_ignored=self.edits_ignored, edits_woken=self.edits_woken)
             if self.catchup_woken or self.backfill_silent:
                 result.update(catchup_woken=self.catchup_woken, backfill_silent=self.backfill_silent)
+            if self.excluded_no_mention:
+                result["excluded_no_mention"] = self.excluded_no_mention
             return result
 
     def _thread_key(self, message, lane):
@@ -872,6 +877,10 @@ class Pipeline:
         if self.owner_resolver is not None:
             suggester = OwnerFirstSuggester(self.owner_resolver, self.store, self.suggester)
         outcome = apply_decision(self.store, mid, decision, suggester)
+        if outcome.state == "excluded" and decision.reason == NO_MENTION:
+            # P26: recorded as excluded with note excluded:no_mention; no inbox record,
+            # wake, queue entry or human notice follows (the branches below skip excluded).
+            self.excluded_no_mention += 1
         if (outcome.state == "human_pending" and self.owner_resolver is not None
                 and not suggester.ran):
             # apply_decision asks a suggester only for rule `none`; other queued items

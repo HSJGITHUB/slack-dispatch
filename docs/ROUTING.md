@@ -7,15 +7,16 @@ mutate the message, call a classifier, or write to the ledger.
 | --- | --- | --- |
 | 1 | Excluded channel | Excluded, no attention or classifier |
 | 2 | Bot with exclude_all | Excluded with excluded:bot |
-| 2 | Bot with route_or_exclude | Channel/DM default only, otherwise excluded:bot |
+| 2 | Bot with route_or_exclude | Channel/DM default only, otherwise excluded:bot (always excluded:bot in a mention-only channel, P26) |
 | 3 | Protected author or configured exact mention | Set attention, continue routing |
-| 4 | Existing reply thread binding | Assign inherited lane |
-| 5 | Confirmed scope claim in the ledger (P13 ScopeClaim) | Assign claimed lane |
-| 6 | First recognized explicit tag | Assign tagged lane |
-| 7 | Non-null channel or DM default | Assign default lane |
-| 8 | First person-channel rule | Assign rule lane |
-| 9 | No lane with attention | Human pending, no classifier |
-| 10 | No lane without attention | Human pending, optional classifier suggestion |
+| 4 | Mention-only channel (P26) without attention, not a reply in a bound thread | Excluded with excluded:no_mention |
+| 5 | Existing reply thread binding | Assign inherited lane |
+| 6 | Confirmed scope claim in the ledger (P13 ScopeClaim) | Assign claimed lane |
+| 7 | First recognized explicit tag | Assign tagged lane |
+| 8 | Non-null channel or DM default | Assign default lane |
+| 9 | First person-channel rule | Assign rule lane |
+| 10 | No lane with attention | Human pending, no classifier |
+| 11 | No lane without attention | Human pending, optional classifier suggestion |
 
 The optional bot policy route_all uses the complete normal routing path, including
 human review and the optional classifier. The default route_or_exclude never
@@ -345,3 +346,46 @@ sets every `human_pending` item of that thread with a lower ts to `done` with no
 and rewrites the queue export. Assigned and acked lane items are not touched; the lane
 inbox shows `owner replied at`. Heartbeat counter `owner_reply_closed` when the resolver
 is enabled.
+
+## P26 mention-only channels
+
+Some channels belong to other teams: the operator wants to see a post there only when it
+mentions them. A `channel_defaults` entry takes an optional boolean `mention_only`
+(default false) next to `default`:
+
+```yaml
+channel_defaults:
+  C0000000004: {default: owner, mention_only: true}
+```
+
+The loader rejects a non-boolean value and rejects the key in `dm_defaults`.
+`Config.channel_defaults` keeps its `{channel: lane}` shape; the flagged channel ids are
+`Config.mention_only_channels` (a tuple, empty by default).
+
+In `route()`, after the excluded channel check, the bot policy and the attention check
+(precedence 4 above), a message in a mention-only channel:
+
+- with attention (an exact mention of `always_human.owner_user` or a
+  `always_human.mention_users` id: `owner_mention`; an `always_human.users` author:
+  `always_human`) continues through the normal precedence unchanged: thread binding,
+  scope claim, explicit tag, channel default, person rule. With `{default: <lane>}` it is
+  assigned to that lane with the attention flag (and the usual immediate human notice);
+  with `{default: null}` and no other match it is a human pending `always_human` item.
+- without attention, as a reply in a thread that already has a binding, inherits the
+  bound lane (`thread_inherit`) exactly as today. A mention post assigned to a lane binds
+  its thread (roots by the pipeline, replies by `apply_decision`), so the later replies of
+  that thread reach the lane.
+- without attention otherwise (a root, or a reply in an unbound thread) gets
+  `Decision(None, "excluded:no_mention", "excluded")`. Explicit tags, scope claims, the
+  channel default and person rules do not apply. The pipeline records it as `excluded`
+  with note `excluded:no_mention`; it is never assigned, queued or counted as
+  `human_pending`, and it gets no human notice, no inbox record and no wake. The
+  heartbeat counter `excluded_no_mention` (present once nonzero) counts these. Like the
+  other router exclusions it still counts in `routed`.
+
+Bots: under `bot_messages.policy: route_or_exclude` a bot post in a mention-only channel
+is `excluded:bot` (bots carry no attention under that policy, so neither the channel
+default nor a channel scope claim routes it). Under `exclude_all` nothing changes; under
+`route_all` bot posts take the human path above.
+
+The console search view shows the note `excluded:no_mention` as text in its note column.
