@@ -91,6 +91,10 @@ class LedgerStore:
             db.execute("""CREATE TABLE IF NOT EXISTS channel_exclusions (
                 id INTEGER PRIMARY KEY, channel TEXT NOT NULL, excluded_at TEXT, by TEXT,
                 removed_at TEXT)""")
+            # P16: users.info answers for the bot flag (additive).
+            db.execute("""CREATE TABLE IF NOT EXISTS user_directory (
+                user TEXT PRIMARY KEY, is_bot INTEGER, is_app_user INTEGER, deleted INTEGER,
+                name TEXT, seen_at TEXT)""")
             if not versions:
                 db.execute("INSERT INTO schema_version(version) VALUES (2)")
             elif versions == [1]:
@@ -128,8 +132,7 @@ class LedgerStore:
                 subtype = event.get("subtype")
                 if subtype == "message_changed":
                     db.execute("UPDATE messages SET edited_at=?, followup=1, has_files=?, is_bot=? WHERE id=?",
-                               (received, bool(event.get("has_files")),
-                                bool(event.get("is_bot") or event.get("bot_id") or not event.get("user")), mid))
+                               (received, bool(event.get("has_files")), event_is_bot(event), mid))
                     if self.store_body and "text" in event:
                         db.execute("UPDATE messages SET body=? WHERE id=?", (event["text"], mid))
                 elif subtype == "message_deleted":
@@ -151,7 +154,7 @@ class LedgerStore:
                                 bool(event.get("is_thread_reply")), received,
                                 event.get("text") if self.store_body else None,
                                 event_id, event.get("channel_type"), bool(event.get("has_files")),
-                                bool(event.get("is_bot") or event.get("bot_id") or not event.get("user")), event.get("origin")))
+                                event_is_bot(event), event.get("origin")))
                     created = True
             elif kind in ("reaction_added", "reaction_removed") and mid:
                 user, reaction = event.get("user"), event.get("reaction")
@@ -642,6 +645,51 @@ class LedgerStore:
             return db.execute("UPDATE messages SET state='excluded', note=? WHERE source=? AND channel=? "
                               "AND state IN ('new', 'assigned', 'acked', 'human_pending')",
                               (note, source, channel)).rowcount
+
+    # P16 user directory and bot flag repair.
+
+    def get_user_directory(self, user):
+        if not self.has_table("user_directory"):
+            return None
+        rows = self._rows("SELECT * FROM user_directory WHERE user=?", (user,))
+        return rows[0] if rows else None
+
+    def put_user_directory(self, row, seen_at):
+        """Store one users.info answer (insert or replace by user id)."""
+        with self._transaction() as db:
+            db.execute("""INSERT INTO user_directory VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user) DO UPDATE SET is_bot=excluded.is_bot,
+                is_app_user=excluded.is_app_user, deleted=excluded.deleted,
+                name=excluded.name, seen_at=excluded.seen_at""",
+                       (row["user"], int(bool(row.get("is_bot"))), int(bool(row.get("is_app_user"))),
+                        int(bool(row.get("deleted"))), row.get("name"), seen_at))
+
+    def list_user_directory(self):
+        if not self.has_table("user_directory"):
+            return []
+        return self._rows("SELECT * FROM user_directory ORDER BY user")
+
+    def bot_flagged_messages(self, *, since=None):
+        """Rows flagged `is_bot = 1` that have an author (repair candidates), oldest first.
+        `since` filters `received_at >= since` like `list_messages`. Bodies are omitted."""
+        rows = self._rows("SELECT * FROM messages WHERE is_bot=1 AND author IS NOT NULL "
+                          "AND (? IS NULL OR received_at >= ?) ORDER BY received_at, id",
+                          (since, since))
+        for row in rows:
+            row.pop("body", None)
+        return rows
+
+    def set_is_bot(self, message_id, value):
+        self._update(message_id, {"is_bot": int(bool(value))})
+
+
+def event_is_bot(event):
+    """The stored bot flag: the pipeline's `is_bot` when the event carries it, else the
+    P16 rule without a directory or known bot users (missing author or `bot_message`)."""
+    if event.get("is_bot") is not None:
+        return bool(event["is_bot"])
+    from slack_dispatch.ingest.user_directory import is_bot_message
+    return is_bot_message(event, None)
 
 
 def _numeric(ts):

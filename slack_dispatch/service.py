@@ -18,6 +18,7 @@ from slack_dispatch.ingest.membership import MembershipCache
 from slack_dispatch.ingest.normalize import TIMESTAMP, message_body, safe
 from slack_dispatch.ingest.slack_reconcile import SlackReconcileSource
 from slack_dispatch.ingest.slack_socket import SlackSocketSource
+from slack_dispatch.ingest.user_directory import UserDirectory
 from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.notify import DEFAULT_STATE_DIR, build_notifiers, wake_dirs_differ, wake_switch_path
 from slack_dispatch.notify.wake import Deliver, WakePolicyEngine
@@ -42,17 +43,13 @@ class _DryRunNotifier:
                  len(message_ids), list(message_ids))
 
 
-def _is_bot(metadata, known=()):
-    return bool(metadata.get("is_bot") or metadata.get("bot_id") or not metadata.get("user")
-                or metadata.get("user") in known)
-
-
 class _ServiceSocketSource(SlackSocketSource):
     """Service configuration uses the shared socket normalization path."""
 
 
 class _ServiceReconcileSource(SlackReconcileSource):
-    """Keep a channel-local bot map while the existing history pass normalizes."""
+    """Resident reconcile source. Since P16 it no longer decides the bot flag: shared
+    normalization keeps `user`, `subtype` and `bot_id`, and the pipeline decides once."""
     # The resident loop must keep heartbeat, stop flag, flush and timers alive
     # while the first catch-up pass runs on the worker thread.
     wait_for_first_pass = False
@@ -60,28 +57,6 @@ class _ServiceReconcileSource(SlackReconcileSource):
     def __init__(self, *args, known_bot_users=(), **kwargs):
         super().__init__(*args, **kwargs)
         self.known_bot_users = known_bot_users
-        self._bots = {}
-        callback = self.on_event
-        def deliver(event):
-            event = dict(event, is_bot=self._bots.get(event.get("ts"),
-                         _is_bot(event, self.known_bot_users)))
-            return callback(event)
-        self.on_event = deliver
-
-    def _call(self, method, **params):
-        response = super()._call(method, **params)
-        if method == "conversations.history":
-            for message in response.get("messages", []):
-                if isinstance(message, dict):
-                    self._bots[message.get("ts")] = _is_bot(message, self.known_bot_users)
-        return response
-
-    def _catch_up_channel(self, channel):
-        self._bots.clear()
-        try:
-            return super()._catch_up_channel(channel)
-        finally:
-            self._bots.clear()
 
 
 class _OnceReconcileSource(_ServiceReconcileSource):
@@ -122,7 +97,6 @@ def build_service_sources(config, on_event, store, *, once=False):
         elif isinstance(source, SlackSocketSource):
             source = _ServiceSocketSource(source.config, source.on_event,
                                            source.env_file, source.app_token_key)
-            source.known_bot_users = config.bot_messages.known_bot_users
         if isinstance(source, SlackReconcileSource):
             source.owner_user = config.always_human.owner_user
         result.append(source)
@@ -149,6 +123,24 @@ def build_membership(config, store, sources, clock):
         source.membership = cache
     cache.load()
     return cache
+
+
+def build_user_directory(config, store, sources, clock):
+    """The P16 user directory used by the pipeline's bot flag (users.info, cached in the
+    ledger table `user_directory`).
+
+    None when `user_directory.enabled` is false or no reconcile source exists (its
+    read-only client is the one the directory uses); the rule then is a missing author,
+    subtype `bot_message` or `bot_messages.known_bot_users` only.
+    """
+    entry = config.user_directory
+    reconcilers = [source for source in sources if isinstance(source, SlackReconcileSource)]
+    if not entry.enabled or not reconcilers:
+        return None
+    reconcile = reconcilers[0]
+    return UserDirectory(lambda: reconcile.client, store, entry.ttl_seconds,
+                         config.bot_messages.known_bot_users, clock=clock,
+                         failure_cooldown_seconds=entry.failure_cooldown_seconds)
 
 
 class CoverageMonitor:
@@ -310,6 +302,7 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
             monitor = CoverageMonitor(store, pipeline, sources, clock, config.service.gap_alert_seconds)
             membership = build_membership(config, store, sources, clock)
             pipeline.membership = membership
+            pipeline.directory = build_user_directory(config, store, sources, clock)
             LOG.info("Service start version=%s config=%s pid=%d", __version__, Path(config_name).name, os.getpid())
             attempt("heartbeat", lambda: publish(force=True))
             for source in sources:

@@ -2,6 +2,8 @@
 import re
 from dataclasses import dataclass
 
+from slack_dispatch.ingest.user_directory import is_bot_message, message_author
+
 from .rules import ChannelDefault, ExplicitTag, PersonChannel, ScopeClaim, ThreadInherit, first_match
 
 
@@ -24,15 +26,35 @@ def scope_lookup(lookup_binding):
     return lookup if callable(lookup) else None
 
 
+def message_is_bot(message, config):
+    """The precomputed flag when the message carries `is_bot` (events from the pipeline and
+    ledger rows), else the P16 rule without a directory. The router never calls Slack."""
+    if message.get("is_bot") is not None:
+        return bool(message["is_bot"])
+    return is_bot_message(message, config)
+
+
+def attention_for(message, config):
+    """`owner_mention` for an exact mention of a mention user or the owner, else
+    `always_human` for a protected author, else None."""
+    protected = config.always_human
+    mentions = set(re.findall(r"<@([A-Za-z0-9]+)(?:\|[^>]*)?>", message.get("text") or ""))
+    targets = set(protected.mention_users)
+    if protected.owner_user:
+        targets.add(protected.owner_user)
+    attention = "always_human" if message_author(message) in protected.users else None
+    if mentions & targets:
+        attention = "owner_mention"
+    return attention
+
+
 def route(message, config, lookup_binding, lookup_scope=None) -> Decision:
     if lookup_scope is None:
         lookup_scope = scope_lookup(lookup_binding)
     lanes = {lane.id for lane in config.lanes}
     if message.get("channel") in config.excluded_channels:
         return Decision(None, "excluded", "excluded")
-    author = message.get("user", message.get("author"))
-    bot = bool(message.get("is_bot") or message.get("bot_id") or not author
-               or author in config.bot_messages.known_bot_users)
+    bot = message_is_bot(message, config)
     if bot and config.bot_messages.policy != "route_all":
         if config.bot_messages.policy == "route_or_exclude":
             # Confirmed channel and dm claims act as ledger-backed channel defaults (P13).
@@ -43,14 +65,7 @@ def route(message, config, lookup_binding, lookup_scope=None) -> Decision:
             if result is not None:
                 return Decision(result.lane, result.reason, result.rule or result.reason)
         return Decision(None, "excluded:bot", "excluded")
-    protected = config.always_human
-    mentions = set(re.findall(r"<@([A-Za-z0-9]+)(?:\|[^>]*)?>", message.get("text") or ""))
-    targets = set(protected.mention_users)
-    if protected.owner_user:
-        targets.add(protected.owner_user)
-    attention = "always_human" if author in protected.users else None
-    if mentions & targets:
-        attention = "owner_mention"
+    attention = attention_for(message, config)
     result = first_match(message, (
         ThreadInherit(lookup_binding),
         ScopeClaim(lookup_scope, lanes=lanes),

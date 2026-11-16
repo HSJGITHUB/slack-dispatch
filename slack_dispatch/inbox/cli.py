@@ -33,6 +33,8 @@ PROPOSAL_SECTIONS = (("channel_defaults_add", "channel"), ("channel_defaults_cha
                      ("person_rules_add", "person"), ("person_lane_candidates", "person"))
 BINDING_SECTIONS = (("thread_bindings_add", False), ("thread_bindings_rebind", True))
 LIVE_PROPOSALS = ("open", "suggested", "confirmed")
+REPAIR_SINCE_DAYS = 30
+BOT_NOTE = "excluded:bot"
 
 
 class BadInput(ValueError):
@@ -120,6 +122,16 @@ def build_parser():
     options(target)
     target.add_argument("path")
     target.add_argument("--dry-run", action="store_true")
+    # P16: repair rows flagged as bot posts that a human wrote through an app.
+    sub = commands.add_parser("repair")
+    options(sub)
+    repair = sub.add_subparsers(dest="repair_command", required=True)
+    target = repair.add_parser("bot-flag")
+    options(target)
+    target.add_argument("--apply", action="store_true")
+    target.add_argument("--since-days", type=int, default=REPAIR_SINCE_DAYS)
+    target.add_argument("--assume-human", action="store_true")
+    target.add_argument("--json", action="store_true")
     sub = commands.add_parser("sent")
     options(sub)
     sub.add_argument("channel")
@@ -547,6 +559,176 @@ def cutover(args, root, store, stdout, stderr):
     return 2 if refused else 0
 
 
+class RepairDelivery:
+    """Delivery for `repair bot-flag`: the mechanisms `assign` and `cutover` use, offline.
+
+    Lane items get a `backfill` record in the lane inbox (no wake, like cutover). Human
+    notices are queued as durable `human_notices` rows that the running service flushes
+    (immediate rows on its next flush), and the human queue export is rewritten.
+    """
+
+    def __init__(self, config, store, root, clock=None):
+        import time
+        self.config, self.store, self.root = config, store, root
+        self.clock = clock or time.time
+
+    def inbox(self, lane, message):
+        append(self.root, lane, [record(dict(message), "backfill")])
+
+    def human(self, message_id, kind, immediate):
+        from slack_dispatch.pipeline import queue_human_notice
+        queue_human_notice(self.config, self.store, message_id, kind, immediate=immediate,
+                           now=self.clock())
+
+    def export(self):
+        from slack_dispatch.queue.human import export_jsonl
+        path = Path(self.config.service.state_dir) / "human_queue.jsonl"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            export_jsonl(self.store, path)
+        except Exception:
+            return False
+        return True
+
+
+def repair_plan(row, config, store, assume_human):
+    """The planned action for one `is_bot = 1` row with an author, or None when the author
+    is still a bot (a known bot user or a `user_directory` row with is_bot). The CLI stays
+    offline: only the ledger table and the config are read."""
+    author = row.get("author")
+    if not author or author in config.bot_messages.known_bot_users:
+        return None
+    lookup = getattr(store, "get_user_directory", None)
+    entry = lookup(author) if callable(lookup) else None
+    if entry is not None and entry.get("is_bot"):
+        return None
+    # Context rows and owner posts are never inbox items (the assign and cutover rule).
+    refusal = inbox_refusal(row)
+    if refusal:
+        return "refused:context" if "context row" in refusal else "refused:owner_post"
+    if author == config.always_human.owner_user:
+        return "refused:owner"
+    if entry is None and not assume_human:
+        return "skip:unknown"
+    if row.get("state") == "excluded" and row.get("note") == BOT_NOTE:
+        return "reroute"
+    if row.get("state") in ("assigned", "acked"):
+        return "attention"
+    return "fix"
+
+
+def repair_row(row, plan, config, store, delivery):
+    """Apply one planned repair; returns the result word.
+
+    The flag is cleared last, after delivery, so a failed inbox append leaves the row as
+    it was (still `is_bot = 1`, still excluded) and a rerun retries it.
+    """
+    from slack_dispatch.pipeline import routing_config
+    from slack_dispatch.router.apply import apply_decision
+    from slack_dispatch.router.engine import attention_for, route
+    if plan.startswith("refused:"):
+        return plan
+    if plan == "skip:unknown":
+        return "skipped:unknown"
+    mid = row["id"]
+    if plan == "fix":
+        store.set_is_bot(mid, False)
+        return "fixed"
+    full = store.get_message(mid, include_body=True) or dict(row)
+    message = dict(full, id=mid, is_bot=0)
+    message["text"] = full.get("text") if "text" in full else full.get("body")
+    immediate = config.human_queue.immediate_flags
+    if plan == "attention":
+        flag = attention_for(message, config)
+        result = "fixed"
+        if flag and not row.get("attention"):
+            store.set_attention(mid, flag)
+            delivery.human(mid, "attention:" + flag, flag in immediate)
+            result = "attention:" + flag
+        store.set_is_bot(mid, False)
+        return result
+    # Route again as if newly received (no classifier: the CLI stays offline).
+    decision = route(message, routing_config(config, store), store.lookup_binding)
+    if decision.lane is not None and decision.rule != "excluded":
+        # Deliver first: a failed append changes nothing.
+        delivery.inbox(decision.lane, message)
+    outcome = apply_decision(store, mid, decision, None)
+    if outcome.state == "assigned":
+        key = (message["source"], message["channel"], message.get("thread_ts") or message["ts"])
+        if store.lookup_binding(*key) is None:
+            store.bind_thread(*key, outcome.lane)
+        if decision.attention:
+            delivery.human(mid, "attention:" + decision.attention,
+                           decision.attention in immediate)
+        result = "rerouted:" + outcome.lane
+    elif outcome.state == "human_pending":
+        flag = decision.attention
+        delivery.human(mid, "attention:" + flag if flag else "message", flag in immediate)
+        delivery.export()
+        result = "rerouted:human"
+    else:
+        result = "rerouted:" + outcome.state
+    store.set_is_bot(mid, False)
+    return result
+
+
+def repair_bot_flag(store, config, *, apply=False, since_days=REPAIR_SINCE_DAYS,
+                    assume_human=False, delivery=None, now=None):
+    """`repair bot-flag`: rows the old `bot_id` rule flagged although a human wrote them.
+
+    Returns one dict per listed row (id, author, state, lane, note, action and, with
+    apply, result). Rows whose author is still a bot are not listed.
+    """
+    now = now or datetime.now().astimezone()
+    since = (now - timedelta(days=since_days)).isoformat()
+    rows = []
+    for row in store.bot_flagged_messages(since=since):
+        plan = repair_plan(row, config, store, assume_human)
+        if plan is None:
+            continue
+        item = {key: row.get(key) for key in ("id", "author", "state", "lane", "note")}
+        item["action"] = plan
+        if apply:
+            try:
+                item["result"] = repair_row(row, plan, config, store, delivery)
+            except Exception as error:
+                item["result"] = "error"
+                item["error_class"] = type(error).__name__
+        rows.append(item)
+    return rows
+
+
+def repair_command(args, root, store, stdout, stderr, *, delivery=None, now=None):
+    """CLI `repair bot-flag [--apply] [--since-days N] [--assume-human] [--json]`."""
+    if args.since_days <= 0:
+        raise BadInput("Invalid --since-days")
+    config = optional_config(args)
+    if config is None:
+        print("Config is required (--config or SLACK_DISPATCH_CONFIG)", file=stderr)
+        return 2
+    if delivery is None:
+        delivery = RepairDelivery(config, store, root)
+    rows = repair_bot_flag(store, config, apply=args.apply, since_days=args.since_days,
+                           assume_human=args.assume_human, delivery=delivery, now=now)
+    mode = "apply" if args.apply else "dry-run"
+    counts = dict(sorted(Counter(row.get("result", row["action"]) for row in rows).items()))
+    if args.json:
+        print(json.dumps({"mode": mode, "since_days": args.since_days, "rows": rows,
+                          "counts": counts}, ensure_ascii=False), file=stdout)
+    else:
+        print(f"repair bot-flag mode={mode} since_days={args.since_days} rows={len(rows)}",
+              file=stdout)
+        for row in rows:
+            print(" ".join(str(row.get(key) or "-") for key in
+                           ("id", "author", "state", "lane", "note")),
+                  row.get("result", row["action"]), file=stdout)
+        if counts:
+            print(" ".join(f"{key}={value}" for key, value in counts.items()), file=stdout)
+        if not args.apply:
+            print("dry run: nothing changed; rerun with --apply", file=stdout)
+    return 1 if any(row.get("result") == "error" for row in rows) else 0
+
+
 def claimant():
     """Who records a scope claim: SLACK_DISPATCH_SESSION, CLAUDE_SESSION_ID, else `cli`."""
     return os.environ.get("SLACK_DISPATCH_SESSION") or os.environ.get("CLAUDE_SESSION_ID") or "cli"
@@ -907,6 +1089,10 @@ def main(argv=None, *, store=None, stdout=None, stderr=None):
                 return code
             elif args.command == "cutover":
                 code = cutover(args, root, store, stdout, stderr)
+                error_reported = code != 0
+                return code
+            elif args.command == "repair":
+                code = repair_command(args, root, store, stdout, stderr)
                 error_reported = code != 0
                 return code
             elif args.command == "queue":

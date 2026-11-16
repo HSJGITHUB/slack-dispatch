@@ -233,3 +233,44 @@ channels from the cache instead of calling `conversations.list`.
 Heartbeat counters gain `member_channels` (member channels in the cache) and
 `excluded_not_member` (events excluded by the gate since start, not counting channels
 already in the config `excluded_channels`, which stay blocked) when the cache exists.
+
+## P16 user directory
+
+`slack_dispatch/ingest/user_directory.py` decides which authors are bots. A teammate
+posting through their own assistant app produces a message with a human `user` plus
+`bot_id`, `app_id` and `bot_profile`, exactly like a real bot user; only `users.info`
+(`is_bot`) tells them apart. The rule is in ROUTING.md (P16).
+
+`UserDirectory(client, store, ttl_seconds=86400, known_bot_users=())` is modelled on
+`MembershipCache`: `is_bot(user)` returns True at once for `known_bot_users`; otherwise
+it reads the ledger table `user_directory(user PK, is_bot, is_app_user, deleted, name,
+seen_at)` and, on a miss or a row older than `ttl_seconds`, calls `users.info` (added to
+the reconcile read-only allowlist `READ_METHODS`) and stores the row. `client` is the
+reconcile source's read-only client or a callable returning it; construction makes no
+request. The pipeline consults it only for message events carrying `bot_id` or
+`app_id`; lookups run under the pipeline lock, at most one per user per TTL.
+
+A lookup failure (exception including HTTP 429, `ok: false`, missing or mismatched
+`user` object, no client) writes nothing to the table and logs one WARNING per user per
+hour with the user id, exception class and Slack error code only. A cached row older
+than the TTL keeps its value (a bot account does not become human); a user with no
+cached row counts as human for that event (fail open: a bot post reaching a lane costs
+one `done`, a lost human post costs a missed reply). After a failure the user is not
+looked up again for `failure_cooldown_seconds` (in memory only; during the cooldown the
+cached row's value is used, else human), so an outage does not cost one call per post.
+
+Socket and reconcile sources no longer set `is_bot`: shared normalization keeps
+`user`, `subtype` and `bot_id`, and the pipeline sets the flag once. `app_id` and
+`bot_profile` are not kept by normalization; app posts carry `bot_id`.
+
+```yaml
+user_directory:
+  enabled: true      # default true; false keeps rules (a)(b)(c) only
+  ttl_seconds: 86400 # positive integer
+  failure_cooldown_seconds: 300 # positive integer; no new lookup for a failed user
+```
+
+The service builds the directory when enabled and a reconcile source exists. Heartbeat
+counters, present with the directory: `directory_lookups` (users.info calls),
+`directory_failures`, `app_posts_human` (new message events with `bot_id` or `app_id`
+judged human) and `bot_posts` (new message events judged bot).

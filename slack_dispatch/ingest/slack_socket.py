@@ -26,7 +26,6 @@ class SlackSocketSource:
         self.disconnected_at = None
         self.on_connection = None
         self.clock = time.time
-        self.known_bot_users = ()
 
     def _observe(self, connected):
         transition = None
@@ -65,8 +64,7 @@ class SlackSocketSource:
                                           store_body=self.config.store_body)
             if event is not None:
                 event["origin"] = "socket"
-                event["is_bot"] = bool(event.get("bot_id") or not event.get("user")
-                                       or event.get("user") in self.known_bot_users)
+                # P16: the bot flag is decided once, in the pipeline (user_directory rule).
                 self.on_event(event)
         except Exception as error:
             LOG.error("Socket callback class=%s operation=receive", type(error).__name__)

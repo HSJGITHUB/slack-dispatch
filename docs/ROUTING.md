@@ -20,9 +20,14 @@ mutate the message, call a classifier, or write to the ledger.
 The optional bot policy route_all uses the complete normal routing path, including
 human review and the optional classifier. The default route_or_exclude never
 sends bot traffic to human review, attention, storm notices, or reassignment
-proposals. A bot is identified by is_bot, bot_id, a missing author, or membership
-in bot_messages.known_bot_users. Channel defaults for bots use the existing DM
-semantics and override explicit tags and thread bindings.
+proposals. A message is a bot message when it has no author, has subtype
+`bot_message`, its author is in bot_messages.known_bot_users, or the user directory
+(`users.info` `is_bot`, see P16 below) says its author is a bot. `bot_id`, `app_id`
+and `bot_profile` alone do not mark a bot: a human posting through an app is a human.
+The pipeline decides the flag once per event and stores it as `is_bot`; `route()`
+uses `is_bot` when the message carries it and otherwise applies the rule without a
+directory. Channel defaults for bots use the existing DM semantics and override
+explicit tags and thread bindings.
 
 Protected authors set attention=always_human; matching mentions set
 attention=owner_mention and take priority when both match. Attention does not
@@ -217,3 +222,62 @@ channel` action) are read at runtime: the pipeline passes `route` a config whose
 `excluded_channels`: precedence 1, rule `excluded`, note `excluded`, no attention, no
 root hydration, and reconcile does not scan them. No YAML edit is needed and the
 override survives restarts; `undo` ends it. Stores without the lookup add nothing.
+
+## P16 bot flag and user directory
+
+One rule, `slack_dispatch.ingest.user_directory.is_bot_message(event, config,
+directory=None)`: a message is a bot message iff (a) it has no `user` (ledger rows:
+`author`), (b) `subtype == "bot_message"`, (c) the author is in
+`bot_messages.known_bot_users`, or (d) a directory is given and says the author is a
+bot. `bot_id`, `app_id` and `bot_profile` by themselves no longer mark a bot.
+
+- The pipeline decides the flag in one place (`Pipeline.is_bot`) for socket and
+  reconcile events and stores it in `messages.is_bot`. Sources no longer set it. A
+  caller-supplied `is_bot: True` is kept. The directory is consulted only for message
+  events that carry `bot_id` or `app_id`, so a human posting by hand never costs a
+  lookup.
+- `route()` uses `message["is_bot"]` when present (events and ledger rows carry it) and
+  otherwise the rule without a directory. The router never calls Slack.
+- With `user_directory.enabled: false`, or without a reconcile source, the rule is
+  (a)(b)(c) only. `bot_messages.policy` and `known_bot_users` are unchanged.
+- Consequence: a human post through an app gets the attention check (owner mentions,
+  protected authors) and, in a channel without a default lane, goes to the human queue
+  instead of `excluded:bot`. A bot user's post keeps the bot policy.
+
+### Repair command
+
+`python -m slack_dispatch.inbox.cli repair bot-flag [--apply] [--since-days N]
+[--assume-human] [--json]` (config required: `--config` or `SLACK_DISPATCH_CONFIG`;
+default dry run; `--since-days` default 30). It stays offline: it reads only the
+ledger (including the `user_directory` table) and the config.
+
+Candidates are ledger rows with `is_bot = 1`, a non-null author and `received_at`
+within the window whose author is not a bot by (c) or (d) as recorded in the
+`user_directory` table. Authors without a table row are listed as `skip:unknown` and
+skipped unless `--assume-human`. Context rows and owner posts are refused with the
+`inbox_refusal` rule that `assign` and `cutover` use (`refused:context`,
+`refused:owner_post`), and rows by `always_human.owner_user` are listed as
+`refused:owner`; refused rows are not changed. Rule (b) cannot be checked offline
+because the ledger does not store the subtype.
+
+The dry run prints one line per candidate: id, author, state, lane, note and the
+planned action (`reroute`, `attention`, `fix`, `skip:unknown`, `refused:<reason>`), then
+the counts. `--apply` per row:
+
+- `excluded` with note `excluded:bot`: routed again with the current config, ledger
+  channel exclusions, bindings and confirmed scope claims as if newly received (no
+  classifier). An assigned lane gets a `backfill` record in its inbox (the cutover
+  mechanism, no wake) and a new root binds its thread; a human pending item or an
+  attention flag queues the usual human notice, and a human pending item rewrites the
+  human queue export. Result `rerouted:<lane>` or `rerouted:human`.
+- `assigned` or `acked`: attention is recomputed from the author and body mentions;
+  when it becomes set the row is updated and the usual immediate human notice is
+  queued. Result `attention:<flag>`, else `fixed`.
+- other states (`done`, `human_pending`, `new`): the flag only. Result `fixed`.
+
+The flag is cleared after delivery, so a failed inbox append leaves the row unchanged
+for a rerun; that row prints `error` and the exit code is 1. Human notices are queued as
+`human_notices` rows; the running service's next flush sends them (immediate rows at
+once, others with the digest; a notice for an `acked` row is dropped by the flush as
+usual). Without a body in the ledger (`ledger.store_body: false`) only author checks
+apply to attention. `--json` prints `{"mode", "since_days", "rows", "counts"}`.

@@ -144,7 +144,8 @@ class ShadowTests(unittest.TestCase):
                 self.assertIsNotNone(decision.attention)
 
     def test_bot_default_routes_only_channel_and_never_classifier_or_human(self):
-        for number, changes in enumerate(({"bot_id": "BDUMMY"}, {"user": None},
+        # P16: bot_id alone no longer marks a bot; subtype bot_message still does.
+        for number, changes in enumerate(({"subtype": "bot_message", "bot_id": "BDUMMY"}, {"user": None},
                                          {"is_bot": True}), 1):
             excluded = self.pipeline.handle_event(event(number, text="[support] <@U0000000093>", **changes))
             self.assertEqual(excluded.state, "excluded")
@@ -169,7 +170,8 @@ class ShadowTests(unittest.TestCase):
     def test_bot_assigned_storm_and_reassign_do_not_notify_human(self):
         self.config = replace(self.config, wake_policy=replace(self.config.wake_policy, storm_per_hour=1))
         self.pipeline = self.make_pipeline()
-        result = self.pipeline.handle_event(event(channel="C0000000001", bot_id="BDUMMY"))
+        result = self.pipeline.handle_event(event(channel="C0000000001", subtype="bot_message",
+                                                  bot_id="BDUMMY"))
         self.store._update(result.message_id, {"assigned_at": event()["received_at"]})
         sweep = TimerSweep(self.config, self.store, self.receivers, self.clock, human=self.pipeline.human)
         sweep.run_once(100000)
@@ -308,8 +310,9 @@ class ShadowTests(unittest.TestCase):
                                                             ts=str(number + 1), **raw)})
             source._receive(client, request)
         self.assertEqual(calls, ["ack", "event"] * 3)
-        self.assertEqual([row["is_bot"] for row in events], [True, True, False])
-        self.assertTrue(all(type(row["is_bot"]) is bool for row in events))
+        # P16: the socket keeps raw bot evidence; the pipeline decides the flag once.
+        self.assertEqual([row["bot_id"] for row in events], ["BDUMMY", None, None])
+        self.assertTrue(all("is_bot" not in row for row in events))
 
     def test_reconcile_service_preserves_bot_id_before_normalization(self):
         cfg = replace(self.config, sources=load_config(SAMPLE).sources)
@@ -319,8 +322,9 @@ class ShadowTests(unittest.TestCase):
         source.client = Mock()
         source.client.api_call.return_value = {"messages": [dict(ts="2", user="UDUMMY", bot_id="BDUMMY")]}
         source.catch_up()
-        self.assertTrue(events[0]["is_bot"])
-        self.assertEqual(source._bots, {})
+        # P16: normalization keeps bot_id; the pipeline decides the flag once.
+        self.assertEqual(events[0]["bot_id"], "BDUMMY")
+        self.assertNotIn("is_bot", events[0])
 
 
 class DiscoveryTests(unittest.TestCase):

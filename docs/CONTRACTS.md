@@ -15,7 +15,7 @@ These contracts let three packets (ingest+ledger, router+queue, inbox+notify) be
 | channel | str or None | conversation id |
 | channel_type | str or None | channel, group, im, mpim |
 | user | str or None | author or actor id |
-| is_bot | bool | Additive service Event field; bot_id, missing user, or configured bot user |
+| is_bot | bool | Additive service Event field, set once by the pipeline (P16): missing user, subtype bot_message, configured bot user, or a bot per the user directory; bot_id alone is not a bot |
 | ts | str or None | message ts; for message_changed the edited message ts; for reactions the reacted item ts |
 | thread_ts | str or None | parent ts when the message is a thread reply |
 | is_thread_reply | bool | thread_ts present and thread_ts != ts |
@@ -98,6 +98,7 @@ Loader changes must keep the existing sample config loading and add the new keys
   normalization discards bot_id. Every Event they deliver has boolean is_bot.
   Pipeline callers may supply is_bot or bot_id; missing users and configured bot
   users are also recognized. P7A also preserves bot_id in shared normalization.
+  Superseded by P16: sources no longer set is_bot and bot_id alone is not a bot.
 - Ledger v1 migration idempotently adds messages.attention (nullable TEXT),
   messages.is_bot, human_notices, and timer_events. Existing v1 data and the
   schema_version value remain intact. set_attention(id, value) accepts None,
@@ -297,3 +298,34 @@ All additive; the schema version stays 2.
 - Console: queue action `exclude_channel` (result `closed`, `channel`), queue item
   `not_member`, `GET /api/proposals` adds `channel_exclusions`,
   `POST /api/channel-exclusions/undo`, `GET /api/channel-exclusions/export`.
+
+## P16 bot flag and user directory
+
+All additive; the schema version stays 2.
+
+- `slack_dispatch.ingest.user_directory`: `is_bot_message(event, config, directory=None)
+  -> bool` (the one rule, see ROUTING.md), `carries_app_evidence(event)`,
+  `UserDirectory(client, store, ttl_seconds=86400, known_bot_users=(), *, clock)` with
+  `is_bot(user)` and `snapshot()`. `users.info` joins the reconcile `READ_METHODS`.
+- Event `is_bot` is decided once by `Pipeline.is_bot(event)`; socket and reconcile
+  sources no longer set it. A caller-supplied `is_bot: True` is kept; `bot_id` alone is
+  human. `Pipeline.directory` (optional) is set by `service.build_user_directory(config,
+  store, sources, clock)`.
+- Router: `route()` signature unchanged; it uses `message["is_bot"]` when present, else
+  `is_bot_message(message, config)`. New helpers `message_is_bot(message, config)` and
+  `attention_for(message, config)`.
+- Ledger table created by `migrate()`: `user_directory(user TEXT PRIMARY KEY, is_bot
+  INTEGER, is_app_user INTEGER, deleted INTEGER, name TEXT, seen_at TEXT)`.
+  `LedgerStore` adds `get_user_directory(user)`, `put_user_directory(row, seen_at)`,
+  `list_user_directory()`, `bot_flagged_messages(*, since=None)` and
+  `set_is_bot(message_id, value)`. `record_event` stores the event's `is_bot` when
+  present, else `is_bot_message(event, None)`.
+- `pipeline.queue_human_notice(config, store, mid, kind, *, immediate, adapter, now)`
+  queues human notice rows without delivery (used by `HumanQueueDelivery.offer` and the
+  repair command).
+- Inbox CLI: `repair bot-flag [--apply] [--since-days N] [--assume-human] [--json]`.
+- Config: optional `user_directory: {enabled: true, ttl_seconds: 86400,
+  failure_cooldown_seconds: 300}` (positive integers). `UserDirectory` gains the
+  keyword `failure_cooldown_seconds`; a failed refresh keeps an expired cached value.
+- Heartbeat counters `directory_lookups`, `directory_failures`, `app_posts_human`,
+  `bot_posts` when the directory exists.

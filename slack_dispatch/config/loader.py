@@ -7,7 +7,7 @@ import yaml
 from .schema import (
     AlwaysHuman, BotMessages, Classifier, Config, Console, Decisions, HumanQueue, Inbox, Lane,
     LedgerConfig, Membership, NotifyAdapter, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
-    SourceConfig, Timers, WakePolicy,
+    SourceConfig, Timers, UserDirectory, WakePolicy,
 )
 
 
@@ -265,6 +265,7 @@ def parse_config(raw):
     decisions = decisions_section(data.get("decisions", {}))
     learning = scope_learning_section(data.get("scope_learning", {}))
     membership = membership_section(data.get("membership", {}))
+    directory = user_directory_section(data.get("user_directory", {}))
     return Config(tuple(lanes), defaults("channel_defaults"), defaults("dm_defaults"),
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
                   ledger=ledger, always_human=human, classifier=classifier,
@@ -272,7 +273,21 @@ def parse_config(raw):
                   human_queue=queue, bot_messages=bots, owner_signals=signals,
                   sessions_dir=sessions_dir, people=people, display_timezone=zone,
                   console=console, decisions=decisions, scope_learning=learning,
-                  membership=membership)
+                  membership=membership, user_directory=directory)
+
+
+def user_directory_section(value):
+    """Optional `user_directory` map (P16): enabled (default true), ttl_seconds
+    (positive, default 86400) and failure_cooldown_seconds (positive, default 300)."""
+    data = mapping({} if value is None else value, "user_directory")
+    return UserDirectory(enabled=boolean(data.get("enabled", UserDirectory.enabled),
+                                         "user_directory.enabled"),
+                         ttl_seconds=positive(data.get("ttl_seconds", UserDirectory.ttl_seconds),
+                                              "user_directory.ttl_seconds"),
+                         failure_cooldown_seconds=positive(
+                             data.get("failure_cooldown_seconds",
+                                      UserDirectory.failure_cooldown_seconds),
+                             "user_directory.failure_cooldown_seconds"))
 
 
 MEMBERSHIP_POLICIES = ("exclude", "off")

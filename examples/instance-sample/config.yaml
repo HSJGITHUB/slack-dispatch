@@ -182,3 +182,15 @@ membership:
   enabled: true
   refresh_seconds: 3600
   policy: exclude
+# Optional bot flag user directory (P16). A message is a bot message only when it has no
+# author, subtype bot_message, an author in bot_messages.known_bot_users, or an author
+# whose users.info profile says is_bot. bot_id or app_id alone (a human posting through
+# an app) is a human post. The directory is consulted only for posts that carry bot_id or
+# app_id; answers are cached in the ledger table user_directory for ttl_seconds. A failed
+# lookup keeps an expired cached answer, else counts the author as human, and the user is
+# not looked up again for failure_cooldown_seconds. enabled false keeps the first three
+# rules.
+user_directory:
+  enabled: true
+  ttl_seconds: 86400
+  failure_cooldown_seconds: 300

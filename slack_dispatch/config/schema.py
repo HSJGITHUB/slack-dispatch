@@ -170,6 +170,17 @@ class Membership:
 
 
 @dataclass(frozen=True)
+class UserDirectory:
+    """Bot flag user directory (P16): `users.info` answers cached for `ttl_seconds`.
+    With `enabled: false` a message is a bot message only for a missing author, subtype
+    `bot_message` or `bot_messages.known_bot_users`."""
+    enabled: bool = True
+    ttl_seconds: int = 86400
+    # After a failed users.info lookup the user is not looked up again for this long.
+    failure_cooldown_seconds: int = 300
+
+
+@dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
     channel_defaults: dict[str, str | None]
@@ -204,3 +215,5 @@ class Config:
     scope_learning: ScopeLearning = field(default_factory=ScopeLearning)
     # Optional membership section (P15).
     membership: Membership = field(default_factory=Membership)
+    # Optional user directory section (P16).
+    user_directory: UserDirectory = field(default_factory=UserDirectory)

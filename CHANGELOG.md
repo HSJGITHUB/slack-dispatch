@@ -5,6 +5,28 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P16 bot flag and user directory
+- One bot rule (`user_directory.is_bot_message`): no author, subtype `bot_message`,
+  `bot_messages.known_bot_users`, or a bot per `users.info`. `bot_id`, `app_id` and
+  `bot_profile` alone no longer mark a bot, so a human posting through an app gets the
+  attention check and reaches the human queue instead of `excluded:bot`.
+- The pipeline decides the flag once for socket and reconcile events; the sources and
+  the router no longer duplicate it. The router uses the stored flag and never calls
+  Slack.
+- `UserDirectory` caches `users.info` (new read-only allowlist entry) in the ledger table
+  `user_directory` for `user_directory.ttl_seconds` (default 86400), consulted only for
+  posts with `bot_id` or `app_id`. A failed lookup keeps an expired cached value, else
+  counts the author as human, warns once per user per hour and is not retried for
+  `user_directory.failure_cooldown_seconds` (default 300). `user_directory.enabled:
+  false` keeps the other three rules. `repair bot-flag` refuses context rows and owner
+  posts like `assign` and `cutover`.
+- Heartbeat counters `directory_lookups`, `directory_failures`, `app_posts_human`,
+  `bot_posts` when the directory exists.
+- Inbox CLI `repair bot-flag` (dry run by default) fixes rows the old rule flagged:
+  re-routes `excluded:bot` rows as backfill, recomputes attention on open lane items and
+  clears the flag elsewhere; owner rows are refused, unknown authors skipped unless
+  `--assume-human`.
+
 ### P15 membership filter
 - Member-only intake: `membership.py` caches `users.conversations` (paginated, through the
   reconcile client) in the ledger table `channel_membership`, refreshed at start and every

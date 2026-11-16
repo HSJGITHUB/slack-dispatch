@@ -19,7 +19,7 @@ PERMANENT_REPLY_ERRORS = frozenset({"thread_not_found", "channel_not_found", "no
 
 READ_METHODS = frozenset({"conversations.history", "conversations.replies",
                           "conversations.info", "conversations.list", "auth.test",
-                          "users.conversations"})
+                          "users.conversations", "users.info"})
 
 
 class SlackReconcileSource:

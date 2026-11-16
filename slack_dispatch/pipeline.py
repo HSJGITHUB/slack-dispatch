@@ -9,6 +9,7 @@ import sys
 from urllib.parse import quote
 
 from slack_dispatch.ingest.membership import NOT_MEMBER
+from slack_dispatch.ingest.user_directory import carries_app_evidence, is_bot_message
 from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
 from slack_dispatch.notify.dispatch_card import card_wanted
@@ -72,6 +73,26 @@ def can_notify(config, store, spec, lane, notifier=None, message_ids=None):
     return True
 
 
+def queue_human_notice(config, store, mid, kind="message", *, immediate=False, adapter=None, now):
+    """Queue one durable human-queue notice row per human_queue adapter (no delivery).
+
+    The service's flush delivers queued rows, so an offline caller (the P16 `repair
+    bot-flag` command) can queue a notice the running service sends. Adapter positions are
+    configuration positions, as the builder creates notifiers in configuration order.
+    """
+    with store._transaction() as db:
+        for index, spec in enumerate(config.notify_adapters):
+            if spec.purpose != HUMAN_QUEUE or (adapter is not None and index != adapter):
+                continue
+            if spec.kind == "dispatch_card" and not card_wanted(
+                    spec, kind, immediate, config.human_queue.mode,
+                    (store.get_message(mid) or {}).get("state")):
+                continue  # P12: cards follow immediate notices of human_pending items only
+            db.execute("INSERT OR IGNORE INTO human_notices "
+                       "(message_id, kind, adapter, queued_at, immediate) VALUES (?, ?, ?, ?, ?)",
+                       (mid, kind, index, now, immediate))
+
+
 class HumanQueueDelivery:
     """Durable ids-only digest backlog and per-adapter one-shot receipts."""
     def __init__(self, config, store, notifiers, clock):
@@ -81,17 +102,8 @@ class HumanQueueDelivery:
 
     def offer(self, mid, kind="message", *, immediate=False, adapter=None, now=None):
         now = self.clock() if now is None else now
-        with self.store._transaction() as db:
-            for index, spec, _ in adapter_entries(self.config, self.notifiers, "human_queue"):
-                if adapter is not None and index != adapter:
-                    continue
-                if spec.kind == "dispatch_card" and not card_wanted(
-                        spec, kind, immediate, self.config.human_queue.mode,
-                        (self.store.get_message(mid) or {}).get("state")):
-                    continue  # P12: cards follow immediate notices of human_pending items only
-                db.execute("INSERT OR IGNORE INTO human_notices "
-                           "(message_id, kind, adapter, queued_at, immediate) VALUES (?, ?, ?, ?, ?)",
-                           (mid, kind, index, now, immediate))
+        queue_human_notice(self.config, self.store, mid, kind, immediate=immediate,
+                           adapter=adapter, now=now)
         if immediate or self.config.human_queue.mode == "immediate":
             return self.flush(now, immediate_only=True)
         return 0
@@ -229,6 +241,10 @@ class Pipeline:
         # P15: optional MembershipCache; the service sets it when membership is enabled.
         self.membership = None
         self.excluded_not_member = 0
+        # P16: optional UserDirectory; the service sets it when user_directory is enabled.
+        self.directory = None
+        self.app_posts_human = 0
+        self.bot_posts = 0
         self.last_event_at = None
         self._missing_human_logged = False
         self._retry = {}
@@ -259,6 +275,10 @@ class Pipeline:
                     resolver.skipped_no_session for resolver in resolvers)
             if self.membership is not None:
                 result.update(self.membership.snapshot(), excluded_not_member=self.excluded_not_member)
+            if self.directory is not None:
+                # P16 counters appear with the directory, like the P15 membership counters.
+                result.update(self.directory.snapshot(), app_posts_human=self.app_posts_human,
+                              bot_posts=self.bot_posts)
             return result
 
     def _thread_key(self, message, lane):
@@ -341,13 +361,32 @@ class Pipeline:
                 # Reconcile must not advance its cursor after a failed callback.
                 raise RuntimeError("Event processing failed") from None
 
+    def is_bot(self, event):
+        """The one P16 bot decision for socket and reconcile events (see user_directory).
+
+        A caller-supplied `is_bot: True` is kept. The directory (users.info) is consulted
+        only for a message posted through an app (`bot_id` or `app_id`), so a human posting
+        by hand never costs a lookup; a failed lookup counts the author as human.
+        """
+        if event.get("is_bot") is True:
+            return True
+        directory = None
+        if (self.directory is not None and event.get("event_type") == "message"
+                and event.get("subtype") != "message_deleted" and carries_app_evidence(event)):
+            directory = self.directory
+        return is_bot_message(event, self.config, directory)
+
     def _handle(self, event):
-        event = dict(event, is_bot=bool(event.get("is_bot") or event.get("bot_id")
-                     or not event.get("user") or event.get("user") in self.config.bot_messages.known_bot_users))
+        event = dict(event, is_bot=self.is_bot(event))
         recorded = self.store.record_event(event)
         mid = recorded.message_id
         if recorded.duplicate:
             self.counters["duplicates"] += 1
+        elif recorded.kind == "message" and event.get("subtype") != "message_deleted":
+            if event["is_bot"]:
+                self.bot_posts += 1
+            elif carries_app_evidence(event):
+                self.app_posts_human += 1
         if not recorded.duplicate and recorded.kind == "reaction_added":
             self._owner_reaction(event, mid)
         if recorded.duplicate or recorded.kind != "message":
