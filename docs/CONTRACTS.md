@@ -709,3 +709,15 @@ All additive; no ledger schema change and no new config key.
   `Queue export failed class=<name>` to stderr; the exit code stays 0). Without a config,
   with the switch off or for another lane nothing changes and no line is printed. The
   service heartbeat counter does not include closes made by the CLI.
+
+## P28 deliveries content
+
+- `GET /api/deliveries` row items add `channel_name`, `author_name`, `when`, `attention`,
+  `preview` (first 120 characters of the stored body, whitespace collapsed;
+  `[no body stored]` when absent) and `preview_truncated`. Existing item keys are unchanged.
+- `slack_dispatch.console.queries` adds `PREVIEW_CHARS`, `NO_BODY_STORED`,
+  `delivery_preview(body)`, `delivery_messages(store, ids)` (one query per 500 ids through
+  the store's `_rows`, else `get_message` per id) and `prefetch_delivery_items(store, view,
+  ids, cache)`. `delivery_item` and `delivery_row` keep their signatures; `deliveries_page`
+  prefetches the items of the whole page once.
+- Inbox CLI `deliveries --json` items carry the same added keys (text output unchanged).

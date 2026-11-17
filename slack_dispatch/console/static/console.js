@@ -94,9 +94,14 @@ const UI_TEXT = Object.freeze({
     relayOutcomes: { delivered: "delivered", not_delivered: "not delivered", unknown: "relay result unknown" },
     deliveryColumns: {
       time: "Time", kind: "Kind", lane: "Lane", target: "Target session", items: "Items",
-      result: "Result", receipt: "Receipt", cost: "Cost and time",
+      content: "Content", result: "Result", receipt: "Receipt", cost: "Cost and time",
     },
-    deliveryFilters: { lane: "Lane", purpose: "Purpose", status: "Status", hours: "Window" },
+    deliveryFilters: { lane: "Lane", purpose: "Purpose", status: "Status", hours: "Window", text: "Find" },
+    deliveryTextPlaceholder: "author, channel or text",
+    deliveryTextTitle: "Filters the rows on this page by author name, channel name and preview text",
+    deliveryTextMatches: (shown, total) => shown + " of " + total + " rows on this page",
+    deliveryNoMatch: "No row on this page matches.",
+    deliveryMoreItems: (count) => "+" + count + " more",
     noTargetSession: "no session",
     receivedAt: (time, minutes) => "✓ " + time + " (+" + minutes + "m)",
     unconfirmedFor: (minutes) => "unconfirmed " + minutes + "m",
@@ -354,9 +359,14 @@ const UI_TEXT = Object.freeze({
     relayOutcomes: { delivered: "전달됨", not_delivered: "전달 안 됨", unknown: "릴레이 결과 불명" },
     deliveryColumns: {
       time: "시각", kind: "종류", lane: "레인", target: "대상 세션", items: "항목 수",
-      result: "전송 결과", receipt: "수신 확인", cost: "비용과 소요 시간",
+      content: "내용", result: "전송 결과", receipt: "수신 확인", cost: "비용과 소요 시간",
     },
-    deliveryFilters: { lane: "레인", purpose: "용도", status: "상태", hours: "기간" },
+    deliveryFilters: { lane: "레인", purpose: "용도", status: "상태", hours: "기간", text: "찾기" },
+    deliveryTextPlaceholder: "작성자, 채널, 본문",
+    deliveryTextTitle: "이 페이지의 행을 작성자 이름, 채널 이름, 본문 미리보기로 거릅니다",
+    deliveryTextMatches: (shown, total) => "이 페이지 " + total + "행 중 " + shown + "행",
+    deliveryNoMatch: "이 페이지에 일치하는 행 없음.",
+    deliveryMoreItems: (count) => "외 " + count + "건",
     noTargetSession: "세션 없음",
     receivedAt: (time, minutes) => "✓ " + time + " (+" + minutes + "분)",
     unconfirmedFor: (minutes) => "미확인 " + minutes + "분",
@@ -2024,7 +2034,10 @@ async function runSearch(query) {
 VIEWS["/deliveries"] = "deliveries";
 const DELIVERY_WINDOWS = [["h24", 24], ["h48", 48], ["d7", 168], ["all", 0]];
 const DELIVERY_STATUS_OPTIONS = ["sent", "failed", "skipped", "dry_run", "timeout"];
-const deliveries = { lane: "", purpose: "", status: "", hours: 48, page: 1, open: new Set() };
+// P28: `text` is the client-side free-text filter of the loaded page; `data` the last page.
+const deliveries = { lane: "", purpose: "", status: "", hours: 48, page: 1, open: new Set(), text: "", data: null };
+// The server's preview for an item without a stored body (shown as UI.noBody).
+const NO_BODY_STORED = "[no body stored]";
 
 function minutes(seconds) {
   return Math.max(0, Math.round((seconds || 0) / 60));
@@ -2049,7 +2062,24 @@ function deliveryFilters() {
     deliverySelect(f.lane, deliveries.lane, [all].concat(lanes), set("lane")),
     deliverySelect(f.purpose, deliveries.purpose, [all, ["lane", UI.deliveryPurposes.lane], ["human_queue", UI.deliveryPurposes.human_queue]], set("purpose")),
     deliverySelect(f.status, deliveries.status, [all].concat(DELIVERY_STATUS_OPTIONS.map((key) => [key, UI.deliveryStatuses[key]])), set("status")),
-    deliverySelect(f.hours, deliveries.hours, DELIVERY_WINDOWS.map(([key, hours]) => [hours, UI.deliveryWindows[key]]), set("hours")));
+    deliverySelect(f.hours, deliveries.hours, DELIVERY_WINDOWS.map(([key, hours]) => [hours, UI.deliveryWindows[key]]), set("hours")),
+    // P28: free text over author name, channel name and preview, matched on the loaded page only.
+    el("label", { className: "small muted", title: UI.deliveryTextTitle }, f.text + " ",
+      el("input", { type: "search", className: "delivery-text", maxlength: "200", value: deliveries.text,
+        placeholder: UI.deliveryTextPlaceholder, "aria-label": f.text,
+        oninput: (event) => { deliveries.text = event.target.value; renderDeliveryRows(); } })));
+}
+
+// P28: the lowercase text the free-text filter matches for one item.
+function deliveryItemText(item) {
+  const channel = item.channel && item.channel.name === GROUP_DM ? UI.groupDm : (item.channel_name || "");
+  const preview = item.preview && item.preview !== NO_BODY_STORED ? item.preview : "";
+  return [item.author_name || "", channel, channelText(item.channel), preview].join("\n").toLowerCase();
+}
+
+function deliveryRowMatches(row, needle) {
+  if (!needle) return true;
+  return (row.items || []).some((item) => deliveryItemText(item).includes(needle));
 }
 
 function deliveryTarget(row) {
@@ -2064,18 +2094,46 @@ function deliveryTarget(row) {
   return el("span", { className: "muted", text: UI.noTargetSession });
 }
 
-function deliveryItems(row) {
-  const details = el("details", { className: "context", open: deliveries.open.has(row.id) },
-    el("summary", { text: String(row.item_count) }),
-    el("ul", { className: "delivery-items" }, row.items.map((item) => el("li", {},
-      el("span", { className: "mono", text: item.id }), " ", linkIcon(item.permalink), " ",
-      nameSpan(item.channel), " · ", nameSpan(item.author),
+// P28: the lane (or human queue) with the target session as a second line.
+function deliveryLane(row) {
+  return el("div", { className: "delivery-lane" },
+    el("div", { text: row.purpose === "human_queue" ? UI.deliveryPurposes.human_queue : (row.lane || UI.none) }),
+    el("div", { className: "delivery-target small", title: UI.deliveryColumns.target }, deliveryTarget(row)));
+}
+
+// P28: one delivered message: author, channel, time, link and badges, then the preview
+// (two lines at most, the full preview on hover).
+function deliveryMessage(item) {
+  const empty = item.preview === null || item.preview === undefined || item.preview === NO_BODY_STORED;
+  const preview = empty ? UI.noBody : item.preview + (item.preview_truncated ? "…" : "");
+  return el("div", { className: "delivery-message" },
+    el("div", { className: "delivery-head" },
+      nameSpan(item.author, { className: "delivery-author" }), " ",
+      el("span", { className: "muted", title: item.channel && item.channel.id ? item.channel.id : null, text: channelText(item.channel) }), " ",
+      el("span", { className: "muted small", title: item.id, text: item.when || UI.none }), " ",
+      linkIcon(item.permalink),
+      item.attention ? el("span", { className: "badge attention", text: UI.attention(item.attention) }) : null,
       item.is_reply ? el("span", { className: "badge", text: UI.itemThread }) : null,
-      item.missing ? el("span", { className: "badge warn", text: UI.itemMissing }) : null))));
-  details.addEventListener("toggle", () => {
-    if (details.open) deliveries.open.add(row.id); else deliveries.open.delete(row.id);
-  });
-  return details;
+      item.missing ? el("span", { className: "badge warn", text: UI.itemMissing }) : null),
+    el("div", { className: "delivery-preview" + (empty ? " empty" : ""), title: empty ? null : item.preview, text: preview }));
+}
+
+// P28: the content cell: the first item, and `+N more` expanding the rest inline.
+function deliveryContent(row) {
+  const items = row.items || [];
+  if (!items.length) return el("span", { className: "muted", text: UI.none });
+  const rest = items.slice(1);
+  const cell = el("div", { className: "delivery-content" }, deliveryMessage(items[0]));
+  if (rest.length) {
+    const details = el("details", { className: "delivery-more", open: deliveries.open.has(row.id) },
+      el("summary", { title: UI.deliveryColumns.items + ": " + row.item_count, text: UI.deliveryMoreItems(rest.length) }),
+      rest.map((item) => deliveryMessage(item)));
+    details.addEventListener("toggle", () => {
+      if (details.open) deliveries.open.add(row.id); else deliveries.open.delete(row.id);
+    });
+    cell.append(details);
+  }
+  return cell;
 }
 
 function deliveryResult(row) {
@@ -2106,8 +2164,8 @@ function deliveryCost(row) {
 
 async function loadDeliveries(force) {
   const section = document.getElementById("view-deliveries");
-  // A poll must not close a filter list the operator has open.
-  if (!force && section.contains(document.activeElement) && document.activeElement.tagName === "SELECT") return;
+  // A poll must not close a filter list the operator has open or interrupt typing (P28).
+  if (!force && section.contains(document.activeElement) && ["SELECT", "INPUT"].includes(document.activeElement.tagName)) return;
   const query = new URLSearchParams({ lane: deliveries.lane, purpose: deliveries.purpose, status: deliveries.status,
     hours: String(deliveries.hours), page: String(deliveries.page) });
   let data, summary;
@@ -2118,7 +2176,6 @@ async function loadDeliveries(force) {
     status(error.message, true);
     return;
   }
-  const c = UI.deliveryColumns;
   clear(section);
   const first = data.total ? (data.page - 1) * data.page_size + 1 : 0;
   const last = Math.min(data.total, data.page * data.page_size);
@@ -2142,12 +2199,32 @@ async function loadDeliveries(force) {
       data.legacy_deliveries ? el("div", { className: "muted small", text: UI.legacyDeliveries(data.legacy_deliveries) }) : null));
     return;
   }
-  section.append(el("article", { className: "card" }, table(
-    [c.time, c.kind, c.lane, c.target, c.items, c.result, c.receipt, c.cost],
-    data.rows.map((row) => [el("span", { title: row.when || null, text: row.time || UI.none }),
+  deliveries.data = data;
+  section.append(el("div", { id: "delivery-rows" }));
+  renderDeliveryRows();
+}
+
+// P28: the table of the loaded page, narrowed by the free-text filter (client side).
+function renderDeliveryRows() {
+  const holder = document.getElementById("delivery-rows");
+  const data = deliveries.data;
+  if (!holder || !data) return;
+  const c = UI.deliveryColumns;
+  const needle = deliveries.text.trim().toLowerCase();
+  const rows = data.rows.filter((row) => deliveryRowMatches(row, needle));
+  clear(holder);
+  if (needle) holder.append(el("div", { className: "muted small", text: UI.deliveryTextMatches(rows.length, data.rows.length) }));
+  if (!rows.length) {
+    holder.append(el("div", { className: "empty-state", text: UI.deliveryNoMatch }));
+    return;
+  }
+  const grid = table(
+    [c.time, c.kind, c.lane, c.content, c.result, c.receipt, c.cost],
+    rows.map((row) => [el("span", { title: row.when || null, text: row.time || UI.none }),
       UI.deliveryKinds[row.kind] || row.kind,
-      row.purpose === "human_queue" ? UI.deliveryPurposes.human_queue : row.lane,
-      deliveryTarget(row), deliveryItems(row), deliveryResult(row), deliveryReceipt(row), deliveryCost(row)]))));
+      deliveryLane(row), deliveryContent(row), deliveryResult(row), deliveryReceipt(row), deliveryCost(row)]));
+  grid.classList.add("deliveries-table");
+  holder.append(el("article", { className: "card" }, grid));
 }
 
 // ---------- start ----------

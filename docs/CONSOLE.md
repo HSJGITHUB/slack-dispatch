@@ -376,7 +376,8 @@ SERVICE.md, "P18 delivery log"); it has no controls.
   attempt repeated N times; the stored detail on hover), the receipt
   (`✓ HH:MM (+Nm)` when the lane acked or closed an item after the wake, `unconfirmed Nm`
   for a sent wake without one, `decision HH:MM` for a card that came back, `-` otherwise)
-  and the relay cost and duration.
+  and the relay cost and duration. P28 replaces the target and items columns with the
+  target as a second lane line and a content column ("P28 Deliveries content" below).
 
 `GET /api/deliveries?lane=&purpose=&status=&hours=48&page=1` returns `{"hours", "page",
 "page_size", "total", "rows"}`. `hours=0` means every row. Each row has `id`, `created_at`,
@@ -796,3 +797,49 @@ the reply stay. The switch is `owner_resolver.close_queue_on_owner_reply` (with
 records with the inbox CLI `sent ... --lane <direct lane> --thread ROOT_TS` closes the same
 rows. The page drops the closed rows on its next poll; the heartbeat `owner_reply_closed`
 counts both kinds (SERVICE.md, P27).
+
+## P28 Deliveries content
+
+The Deliveries tab shows what was delivered and who wrote it, not only an item count.
+
+Payload. Each item of a `GET /api/deliveries` row keeps the P18 and P20 keys (`id`, `missing`,
+`channel` and `author` as `{id, name}`, `is_reply`, `state`, `lane`, `permalink`) and adds
+`channel_name` and `author_name` (the resolved name, else the id), `when` (message time in
+the display time zone, `YYYY-MM-DD HH:MM`; from the id for a message not in the ledger),
+`attention` (`always_human`, `owner_mention` or null), `preview` and `preview_truncated`.
+`preview` is the stored body with whitespace runs collapsed to one space, cut to the first
+120 characters (`queries.PREVIEW_CHARS`); `preview_truncated` is true when the collapsed body
+was longer. A missing or blank body (body storage off, a deleted message, an id not in the
+ledger) gives `[no body stored]` (`queries.NO_BODY_STORED`). The whole body is never
+returned. Names follow `DisplayNames` (people, then the ledger directory or membership,
+then the id) and permalinks need `console.workspace_domain` (P20).
+
+Reads. `deliveries_page` reads the messages of every item on the page with one ledger
+query (`queries.delivery_messages`, chunks of 500 ids), not one per row or per item;
+`delivery_row` called without that prefetch (the inbox CLI `deliveries`) reads the ids of
+its own row once. The inbox CLI `deliveries --json` prints the same item objects; its text
+lines are unchanged.
+
+Table. Columns: time, kind, lane, content, result, receipt, cost and time (`시각`, `종류`,
+`레인`, `내용`, `전송 결과`, `수신 확인`, `비용과 소요 시간` in `ko`).
+
+- Lane: the lane, or `human queue` (`사람 큐`) for human_queue rows, with the target session
+  (P18 and P21 text: title, session name and id8, the adapter kind for card and file drop
+  rows, else `no session`) as a muted second line.
+- Content: the first item as a header line (author name in bold with the id on hover,
+  channel name, message time with the message id on hover, the `↗` permalink, an attention
+  badge when set, the thread and `not in ledger` badges) and the preview below it. The
+  preview wraps to two lines at most and ends with an ellipsis after that; hovering shows the
+  full preview. A row with several items adds `+N more` (`외 N건`), which expands the other
+  items inline in the same form; the open state survives polls. Human queue rows show their
+  item the same way.
+- The main column stays readable at 1400 px: the content column takes about half the table
+  width and the preview is clamped to two lines.
+
+Find box. The filter row adds `Find` (`찾기`), a free-text box (placeholder `author, channel
+or text`). It matches, case-insensitively, the author name, the channel name and the preview
+text of any item of a row, on the rows of the loaded page only (client side; other pages
+and the server are not searched). A line above the table says how many rows of the page
+match, and `No row on this page matches.` shows when none does. A poll does not rebuild the
+tab while the box has focus. The global search (header) still covers message ids, bodies,
+channels and authors across the ledger.

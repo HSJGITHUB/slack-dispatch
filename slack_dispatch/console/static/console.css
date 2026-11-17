@@ -243,9 +243,28 @@ h2:first-child { margin-top: 0; }
 
 /* P18: delivery log tab. */
 .delivery-summary { margin-bottom: 8px; }
-.delivery-items { margin: 4px 0 0; padding-left: 18px; }
-.delivery-items li { margin: 2px 0; }
-.delivery-items .badge { margin-left: 4px; }
+/* P28: the content cell (author, channel, time, preview) and the lane cell's target line. */
+.deliveries-table .delivery-lane { min-width: 110px; }
+.delivery-target { color: var(--muted); overflow-wrap: anywhere; }
+.deliveries-table td:nth-child(4) { width: 46%; }
+.delivery-content { min-width: 260px; }
+.delivery-message + .delivery-message, .delivery-more .delivery-message { margin-top: 6px; }
+.delivery-head { overflow-wrap: anywhere; }
+.delivery-head .badge { margin-left: 4px; }
+.delivery-author { font-weight: 600; }
+.delivery-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+}
+.delivery-preview.empty { color: var(--muted); font-style: italic; }
+details.delivery-more { margin-top: 4px; }
+details.delivery-more summary { cursor: pointer; color: var(--accent); }
+.delivery-text { width: 220px; max-width: 40vw; }
 
 /* P19: undo toast and the inline "Handled · Undo" lane row. */
 .toast {

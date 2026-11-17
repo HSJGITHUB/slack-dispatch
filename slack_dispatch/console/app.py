@@ -471,6 +471,8 @@ def create_app(config, store, *, clock=time.time, resolver=None, host=None, owne
         return {"yaml": queries.export_exclusions_yaml(store, config, view.bind(store))}
 
     # P18: delivery log tab (page, rows with receipts, window summary). Read-only.
+    # P28: each row's items carry author, channel, time, attention flag and a body preview,
+    # read from the ledger once per page.
     app.add_api_route("/deliveries", page, methods=["GET"], include_in_schema=False)
 
     def delivery_filters(lane, purpose, status):

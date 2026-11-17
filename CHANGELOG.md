@@ -5,6 +5,19 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P28 deliveries content
+- The Deliveries tab shows what was delivered: a content column with the author name,
+  channel name, message time, permalink and attention badge of the first item and a
+  two-line preview of its body (full preview on hover), plus `+N more` (`외 N건`) that
+  expands the other items inline. The target session moves under the lane as a second
+  line; human queue rows show their item the same way. Live case: the tab showed only a
+  collapsed item count, so the operator could not tell what had been delivered.
+- `GET /api/deliveries` items add `channel_name`, `author_name`, `when`, `attention`,
+  `preview` (first 120 characters, whitespace collapsed, `[no body stored]` when absent)
+  and `preview_truncated`; the items of a page are read with one ledger query.
+- The Deliveries filters add a free-text box over author name, channel name and preview,
+  applied to the loaded page on the client.
+
 ### P27 owner reply closes direct items
 - An owner reply in a thread now also closes the thread's earlier direct-lane items
   (`console.direct_lane`, state `assigned` or `acked`) next to its `human_pending` items:

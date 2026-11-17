@@ -979,26 +979,86 @@ def _full_time(view, stamp):
         return None
 
 
+PREVIEW_CHARS = 120
+NO_BODY_STORED = "[no body stored]"
+MESSAGE_READ_CHUNK = 500
+
+
+def delivery_preview(body):
+    """(preview, truncated) of a stored body for a Deliveries item (P28).
+
+    Whitespace runs collapse to one space, then the first PREVIEW_CHARS characters are kept.
+    A missing or blank body gives NO_BODY_STORED (truncated False)."""
+    collapsed = " ".join(str(body).split()) if body is not None else ""
+    if not collapsed:
+        return NO_BODY_STORED, False
+    return collapsed[:PREVIEW_CHARS], len(collapsed) > PREVIEW_CHARS
+
+
+def delivery_messages(store, ids):
+    """{id: messages row with body} for the ids present in the ledger (P28).
+
+    One read-only SELECT per MESSAGE_READ_CHUNK ids through the ledger store's query helper,
+    so a Deliveries page reads its items once, not once per row. A store without that helper
+    (a test double) falls back to `get_message` per id."""
+    ids = list(dict.fromkeys(str(item) for item in ids or ()))
+    reader = getattr(store, "_rows", None)
+    if not callable(reader):
+        rows = {}
+        for message_id in ids:
+            row = store.get_message(message_id, include_body=True)
+            if row is not None:
+                rows[message_id] = row
+        return rows
+    rows = {}
+    for start in range(0, len(ids), MESSAGE_READ_CHUNK):
+        chunk = ids[start:start + MESSAGE_READ_CHUNK]
+        marks = ", ".join("?" for _ in chunk)
+        for row in reader(f"SELECT * FROM messages WHERE id IN ({marks})", chunk):
+            rows[row["id"]] = row
+    return rows
+
+
+def _delivery_item_value(view, message_id, row):
+    """The display object of one covered message (P18 fields plus the P28 content fields)."""
+    if row is None:
+        parts = message_id.split(":", 2)
+        channel = parts[1] if len(parts) == 3 else None
+        ts = parts[2] if len(parts) == 3 else None
+        thread_ts, author, state, lane, attention, body = None, None, None, None, None, None
+        missing = True
+    else:
+        channel, ts, thread_ts = row["channel"], row["ts"], row.get("thread_ts")
+        author, state, lane = row.get("author"), row.get("state"), row.get("lane")
+        attention, body, missing = row.get("attention"), row.get("body"), False
+    channel_ref, author_ref = view.channel(channel), view.person(author)
+    preview, truncated = delivery_preview(body)
+    return {"id": message_id, "missing": missing, "channel": channel_ref,
+            "channel_name": channel_ref["name"] or channel_ref["id"],
+            "is_reply": bool(thread_ts and thread_ts != ts),
+            "author": author_ref, "author_name": author_ref["name"] or author_ref["id"],
+            "when": view.when_ts(ts) if ts else None,
+            "attention": attention, "preview": preview, "preview_truncated": truncated,
+            "state": state, "lane": lane,
+            "permalink": view.permalink(channel, ts, thread_ts)}
+
+
+def prefetch_delivery_items(store, view, ids, cache):
+    """Fill `cache` ({id: item}) for every id not cached yet with one ledger read (P28)."""
+    wanted = [message_id for message_id in dict.fromkeys(ids) if message_id not in cache]
+    if not wanted:
+        return cache
+    rows = delivery_messages(store, wanted)
+    for message_id in wanted:
+        cache[message_id] = _delivery_item_value(view, message_id, rows.get(message_id))
+    return cache
+
+
 def delivery_item(store, view, message_id, cache):
-    """One covered message: channel name, thread flag, author name and state (no body)."""
+    """One covered message: channel, author, thread flag, state, message time, attention flag
+    and a body preview (P28; first PREVIEW_CHARS characters, never the whole body)."""
     if message_id not in cache:
-        row = store.get_message(message_id)
-        if row is None:
-            parts = message_id.split(":", 2)
-            channel = parts[1] if len(parts) == 3 else None
-            ts = parts[2] if len(parts) == 3 else None
-            cache[message_id] = {"id": message_id, "missing": True, "channel": view.channel(channel),
-                                 "is_reply": False, "author": view.person(None), "state": None,
-                                 "lane": None, "permalink": view.permalink(channel, ts)}
-        else:
-            cache[message_id] = {"id": message_id, "missing": False,
-                                 "channel": view.channel(row["channel"]),
-                                 "is_reply": bool(row.get("thread_ts")
-                                                  and row["thread_ts"] != row["ts"]),
-                                 "author": view.person(row.get("author")),
-                                 "state": row.get("state"), "lane": row.get("lane"),
-                                 "permalink": view.permalink(row["channel"], row["ts"],
-                                                             row.get("thread_ts"))}
+        prefetch_delivery_items(store, view, [message_id], cache)
     return dict(cache[message_id])
 
 
@@ -1014,6 +1074,7 @@ def delivery_row(store, view, row, cache, titles=None):
         if titles is not None:
             target["title"] = titles(session_id) if session_id else None
     ids = delivery_item_ids(row.get("item_ids"))
+    prefetch_delivery_items(store, view, ids, cache)  # no read when the page prefetched them
     return {"id": row["id"], "created_at": row.get("created_at"),
             "when": _full_time(view, row.get("created_at")),
             "time": _clock_time(view, row.get("created_at")),
@@ -1038,13 +1099,17 @@ def deliveries_page(store, config, view, now, *, lane=None, purpose=None, status
                     hours=DELIVERY_DEFAULT_HOURS, page=1, limit=None, titles=None):
     """delivery_log rows newest first with receipts, `limit` (default page_size) per page.
 
-    `titles` (P21, `session_titles(resolver)`) adds the session title to each target."""
+    `titles` (P21, `session_titles(resolver)`) adds the session title to each target. P28:
+    the items of every row on the page are read from the ledger in one query."""
     limit = config.console.page_size if limit is None else limit
     since = delivery_since(now, hours)
     filters = dict(since=since, lane=lane or None, purpose=purpose or None, status=status or None)
     total = store.count_deliveries(**filters)
     rows = store.list_deliveries(**filters, limit=limit, offset=(page - 1) * limit)
     cache = {}
+    # P28: one ledger read for every item of the page (not one per row or per item).
+    prefetch_delivery_items(store, view, [mid for row in rows
+                                          for mid in delivery_item_ids(row.get("item_ids"))], cache)
     result = {"hours": hours, "page": page, "page_size": limit, "total": total,
               "rows": [delivery_row(store, view, row, cache, titles)
                        for row in store.delivery_receipts(rows, now)]}
