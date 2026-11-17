@@ -150,6 +150,9 @@ human_queue:
   mode: digest
   digest_seconds: 1800
   immediate_flags: [always_human, owner_mention]
+  # P29: attention flags whose items routed to a lane still notify the operator (FYI).
+  # [always_human] stops owner-mention FYIs the lane sessions already handle.
+  assigned_notice_flags: [always_human, owner_mention]
 bot_messages:
   policy: route_or_exclude
   known_bot_users: []

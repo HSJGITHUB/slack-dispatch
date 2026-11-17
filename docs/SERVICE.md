@@ -374,7 +374,10 @@ Heartbeat delivered includes human message deliveries per successful adapter;
 timer-only delivery does not increment that counter.
 
 always_human collects attention while normal lane rules continue. Assigned work
-still reaches its lane inbox and additionally sends an operator FYI. Bot traffic
+still reaches its lane inbox and additionally sends an operator FYI titled
+`Attention notice` when its flag is in `human_queue.assigned_notice_flags` (default
+`[always_human, owner_mention]`; `[always_human]` drops the owner-mention FYIs a lane
+session already handles, P29). Bot traffic
 uses channel/DM defaults or is excluded by default. It never reaches the human
 queue or classifier under route_or_exclude or exclude_all. route_all explicitly
 restores full routing. See ROUTING.md for precedence and alternative policies.

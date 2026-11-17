@@ -90,7 +90,8 @@ Loader changes must keep the existing sample config loading and add the new keys
 ## Shadow-day additive contracts
 
 - Config adds human_queue (mode=digest, digest_seconds=1800,
-  immediate_flags=[always_human, owner_mention]), bot_messages
+  immediate_flags=[always_human, owner_mention], P29
+  assigned_notice_flags=[always_human, owner_mention]), bot_messages
   (policy=route_or_exclude, known_bot_users=[]), and
   sources[].discover_channels=false. mode=immediate preserves per-item delivery.
 - SourceConfig carries excluded_channels from the global configuration for
@@ -235,7 +236,9 @@ replaced by `_`, written as `<dir>/cards/.tmp/<name>.part` and renamed. A card i
 written only for a message still in the human queue (state `human_pending`): an
 attention item the router already assigned to a lane gets its immediate FYI notice on
 the other human-queue adapters (session_message, file_drop and so on) but no card, and
-a queued card whose message has left `human_pending` before delivery is dropped.
+a queued card whose message has left `human_pending` before delivery is dropped. P29:
+that FYI notice is queued only when the attention flag is in
+`human_queue.assigned_notice_flags`.
 
 
 ```json
@@ -721,3 +724,30 @@ All additive; no ledger schema change and no new config key.
   ids, cache)`. `delivery_item` and `delivery_row` keep their signatures; `deliveries_page`
   prefetches the items of the whole page once.
 - Inbox CLI `deliveries --json` items carry the same added keys (text output unchanged).
+
+## P29 assigned attention notice
+
+- Config: `human_queue.assigned_notice_flags`, a list of attention flags (each
+  `always_human` or `owner_mention`, validated like `immediate_flags`). Default when
+  absent: `[always_human, owner_mention]` (behaviour before P29). The loader raises
+  `ConfigError` naming `human_queue.assigned_notice_flags` for a non-list value or an
+  unsupported entry. `HumanQueue.assigned_notice_flags: tuple[str, ...]` carries it.
+- Pipeline: an attention item routed to a lane (state `assigned`, first routing or the
+  P24 edit-on-assigned path) queues its human notice only when its flag is in
+  `assigned_notice_flags`. Otherwise no `human_notices` row is written and no adapter is
+  called; the attention flag is still stored on the message (`set_attention`) and the lane
+  inbox record, wake offer, storm notice, console and inbox views are unchanged.
+  `human_pending` notices, cards and timer notices are unchanged.
+- Flush: `HumanQueueDelivery.flush` deletes an unsent `attention:<flag>` row whose message
+  is `assigned` and whose flag is not in `assigned_notice_flags`, like the other invalid
+  rows (rows queued before a restart with a narrower list, or by the inbox CLI
+  `repair bot-flag`).
+- Notice title: a batch whose rows are all `attention:<flag>` rows of `assigned` messages is
+  titled `Attention notice` (immediate and digest) instead of `Human queue notice` or
+  `Human queue digest`; the `FYI, assigned to lane X` fragment stays. Any other batch keeps
+  its title. Delivery log kind stays `attention` (P18 `human_kind`).
+- Heartbeat: `attention_notice_skipped` (notices not queued plus queued rows dropped at
+  flush for this rule) appears once nonzero. A skip is logged at DEBUG only.
+- `slack_dispatch.pipeline` adds `DEFAULT_ASSIGNED_NOTICE_FLAGS`,
+  `assigned_notice_flags(config)` (the default for a config without the key),
+  `assigned_notice_dropped(config, kind, state)` and `attention_only(rows, messages)`.

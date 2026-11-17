@@ -5,6 +5,20 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P29 assigned attention notice
+- New `human_queue.assigned_notice_flags` (default `[always_human, owner_mention]`, the
+  behaviour before P29): an attention item routed to a lane queues the operator FYI
+  notice only for the listed flags. Live case: the operator's assistant DM received twelve
+  `FYI, assigned to lane ...` notices in one day for owner mentions the lane sessions
+  already handle, while the console queue was empty. The instance config sets
+  `[always_human]`.
+- The attention flag is still stored and shown in the inbox and console; lane delivery,
+  wakes, `human_pending` notices, cards and timers are unchanged. The same rule applies to
+  the edit-on-assigned path, and flush drops queued rows that no longer qualify.
+- A notice batch made only of attention items assigned to a lane is titled
+  `Attention notice` instead of `Human queue notice` / `Human queue digest`.
+- Heartbeat `attention_notice_skipped` appears once nonzero.
+
 ### P28 deliveries content
 - The Deliveries tab shows what was delivered: a content column with the author name,
   channel name, message time, permalink and attention badge of the first item and a

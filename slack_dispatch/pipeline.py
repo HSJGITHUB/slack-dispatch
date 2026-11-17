@@ -281,6 +281,28 @@ def logged_call(recorder, notifier, lane, kind, ids, call):
     return result
 
 
+DEFAULT_ASSIGNED_NOTICE_FLAGS = ("always_human", "owner_mention")
+
+
+def assigned_notice_flags(config):
+    """P29: attention flags whose items routed to a lane still queue a human notice."""
+    queue = getattr(config, "human_queue", None)
+    return tuple(getattr(queue, "assigned_notice_flags", DEFAULT_ASSIGNED_NOTICE_FLAGS))
+
+
+def assigned_notice_dropped(config, kind, state):
+    """P29: True for an `attention:<flag>` notice of an `assigned` item whose flag is not in
+    `human_queue.assigned_notice_flags` (the lane session handles that item itself)."""
+    return (state == "assigned" and str(kind).startswith("attention:")
+            and str(kind).split(":", 1)[1] not in assigned_notice_flags(config))
+
+
+def attention_only(rows, messages):
+    """P29: True when a batch holds only attention notices of items assigned to a lane."""
+    return bool(rows) and all(str(row["kind"]).startswith("attention:") for row in rows) and all(
+        message is not None and message.get("state") == "assigned" for message in messages.values())
+
+
 def queue_human_notice(config, store, mid, kind="message", *, immediate=False, adapter=None, now):
     """Queue one durable human-queue notice row per human_queue adapter (no delivery).
 
@@ -307,6 +329,9 @@ class HumanQueueDelivery:
         self.config, self.store, self.notifiers, self.clock = config, store, notifiers, clock
         self.failures = 0
         self.delivered = 0
+        # P29: queued attention notices of assigned items dropped at flush because their
+        # flag is not in human_queue.assigned_notice_flags.
+        self.attention_dropped = 0
         self.recorders = {}  # P18: adapter position -> DeliveryRecorder (set by the pipeline)
 
     def offer(self, mid, kind="message", *, immediate=False, adapter=None, now=None):
@@ -328,6 +353,9 @@ class HumanQueueDelivery:
         counts = dict(sorted(Counter(row["channel"] for row in messages.values()).items()))
         commands = "Run: python -m slack_dispatch.inbox.cli queue; python -m slack_dispatch.inbox.cli assign ID LANE"
         title = "Human queue digest" if digest else "Human queue notice"
+        if attention_only(rows, messages):
+            # P29: an FYI about items a lane already holds, not a human queue item.
+            title = "Attention notice"
         assigned = sorted({f"FYI, assigned to lane {row['lane']}" for row in messages.values()
                            if row.get("attention") and row["state"] == "assigned"})
         timer_counts = dict(Counter(row["kind"] for row in rows
@@ -412,6 +440,11 @@ class HumanQueueDelivery:
                 if spec.kind == "dispatch_card":
                     # P12: a queued card is dropped once its message left the human queue.
                     valid = valid and message["state"] == "human_pending"
+                if valid and assigned_notice_dropped(self.config, row["kind"], message["state"]):
+                    # P29: rows queued before a restart with a narrower
+                    # human_queue.assigned_notice_flags are dropped too.
+                    valid = False
+                    self.attention_dropped += 1
                 if valid:
                     active.append(row)
                 else:
@@ -556,6 +589,10 @@ class Pipeline:
         # P26: posts without attention excluded in a mention-only channel; appears in the
         # heartbeat once nonzero (like the P22 and P23 counters).
         self.excluded_no_mention = 0
+        # P29: attention notices not queued for items routed to a lane (flag not in
+        # human_queue.assigned_notice_flags), plus queued rows dropped at flush for the same
+        # reason; appears in the heartbeat once nonzero.
+        self.attention_notice_skipped = 0
         # P16: optional UserDirectory; the service sets it when user_directory is enabled.
         self.directory = None
         self.app_posts_human = 0
@@ -643,6 +680,9 @@ class Pipeline:
                 result.update(catchup_woken=self.catchup_woken, backfill_silent=self.backfill_silent)
             if self.excluded_no_mention:
                 result["excluded_no_mention"] = self.excluded_no_mention
+            skipped = self.attention_notice_skipped + self.human.attention_dropped
+            if skipped:
+                result["attention_notice_skipped"] = skipped
             return result
 
     def _thread_key(self, message, lane):
@@ -978,7 +1018,7 @@ class Pipeline:
             self._export_queue()
             self._human_notice(mid, attention=decision.attention)
         if outcome.state == "assigned" and decision.attention:
-            self._human_notice(mid, attention=decision.attention)
+            self._assigned_attention_notice(mid, decision.attention)
         return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane, backfill=backfill,
                             catchup=catchup)
 
@@ -1019,7 +1059,7 @@ class Pipeline:
             self._human_notice(mid, kind="storm")
             self.wake_engine.notices.clear()
         if decision.attention:
-            self._human_notice(mid, attention=decision.attention)
+            self._assigned_attention_notice(mid, decision.attention)
         return HandleResult(mid, recorded.kind, state="assigned", lane=lane)
 
     def _edit_verdict(self, mid, message, recorded, event):
@@ -1136,6 +1176,15 @@ class Pipeline:
             self._missing_human_logged = True
         self.human.offer(mid, "attention:" + attention if attention else kind,
                          immediate=attention in self.config.human_queue.immediate_flags)
+
+    def _assigned_attention_notice(self, mid, attention):
+        """P29: the human notice of an attention item routed to a lane, only for flags in
+        `human_queue.assigned_notice_flags`. The attention flag stays on the message."""
+        if attention in assigned_notice_flags(self.config):
+            self._human_notice(mid, attention=attention)
+            return
+        self.attention_notice_skipped += 1
+        LOG.debug("Attention notice skipped id=%s flag=%s", mid, attention)
 
     def flush(self, now):
         with self.lock:

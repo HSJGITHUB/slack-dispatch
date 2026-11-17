@@ -251,8 +251,17 @@ def parse_config(raw):
     flags = queue.get("immediate_flags", ["always_human", "owner_mention"])
     if not isinstance(flags, list) or any(flag not in ("always_human", "owner_mention") for flag in flags):
         raise ConfigError("human_queue.immediate_flags must contain supported flags")
+    # P29: flags whose items routed to a lane still queue a human notice.
+    assigned = queue.get("assigned_notice_flags", ["always_human", "owner_mention"])
+    if not isinstance(assigned, list):
+        raise ConfigError("human_queue.assigned_notice_flags must be a list")
+    if any(not isinstance(flag, str) or flag not in ("always_human", "owner_mention")
+           for flag in assigned):
+        raise ConfigError("human_queue.assigned_notice_flags must contain supported flags "
+                          "(always_human, owner_mention)")
     queue = HumanQueue(mode, positive(queue.get("digest_seconds", 1800),
-                                     "human_queue.digest_seconds"), tuple(flags))
+                                     "human_queue.digest_seconds"), tuple(flags),
+                       tuple(assigned))
     bots = mapping(data.get("bot_messages", {}), "bot_messages")
     policy = bots.get("policy", "route_or_exclude")
     if policy not in ("route_or_exclude", "exclude_all", "route_all"):

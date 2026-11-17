@@ -125,6 +125,9 @@ class HumanQueue:
     mode: str = "digest"
     digest_seconds: int = 1800
     immediate_flags: tuple[str, ...] = ("always_human", "owner_mention")
+    # P29: attention flags for which an item routed to a lane (state `assigned`) still
+    # queues a human notice; the default keeps the notice for both flags.
+    assigned_notice_flags: tuple[str, ...] = ("always_human", "owner_mention")
 
 
 @dataclass(frozen=True)
