@@ -1187,7 +1187,36 @@ def sent(args, store, config, stdout, stderr):
         claimed = store.add_scope_claim(lane, "dm", channel, claimed_by=claimant())
         store.record_scope_evidence("dm", channel, lane, "sent", min_evidence=min_evidence(config))
         print(f"dm {channel} {lane} {'claimed' if claimed else 'refreshed'}", file=stdout)
+    if root is not None:
+        close_on_operator_reply(config, store, channel, ts, root, lane, stdout, stderr)
     return 0
+
+
+def close_on_operator_reply(config, store, channel, ts, root, lane, stdout, stderr):
+    """P27: a reply recorded by the operator session (`--lane` is `console.direct_lane`)
+    closes the thread's earlier operator items as a live owner reply does: `human_pending`
+    items and `assigned` or `acked` items of the direct lane with a lower ts become `done`
+    with note `owner_reply`, their unsent human notices are dropped and the queue export is
+    rewritten. Needs `owner_resolver.enabled` and `close_queue_on_owner_reply`; other lanes
+    and a missing config change nothing. Returns the closed ids, or None when not applied."""
+    from slack_dispatch.console.queries import direct_lane
+    from slack_dispatch.pipeline import (close_owner_reply_items, owner_reply_enabled,
+                                         owner_reply_targets)
+    from slack_dispatch.queue.human import export_jsonl
+    if config is None or not owner_reply_enabled(config) or direct_lane(config) != lane:
+        return None
+    closed = owner_reply_targets(config, store, "slack", channel, root, ts)
+    close_owner_reply_items(store, closed)
+    print(f"owner_reply closed={len(closed)}" + (" " + ",".join(closed) if closed else ""),
+          file=stdout)
+    if closed:
+        path = Path(config.service.state_dir) / "human_queue.jsonl"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            export_jsonl(store, path)
+        except Exception as error:
+            print(f"Queue export failed class={type(error).__name__}", file=stderr)
+    return closed
 
 
 OWNER_COLUMNS = ("id", "channel", "thread", "best_lane", "confidence", "source")

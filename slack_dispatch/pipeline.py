@@ -473,6 +473,47 @@ def owner_suggestion(resolver, store, message):
         return None
 
 
+def owner_reply_enabled(config):
+    """P17/P27: whether an owner reply closes thread items (`owner_resolver.enabled` and
+    `owner_resolver.close_queue_on_owner_reply`)."""
+    settings = getattr(config, "owner_resolver", None)
+    return bool(settings is not None and settings.enabled and settings.close_queue_on_owner_reply)
+
+
+def owner_reply_targets(config, store, source, channel, root, reply_ts):
+    """P27: ids an owner reply at `reply_ts` in the thread `root` closes, oldest first.
+
+    Items of the thread (the root included) with a ts lower than `reply_ts` that are
+    `human_pending` (P17) or that are in the configured direct lane (`console.direct_lane`)
+    in state `assigned` or `acked` (P27). Items of other lanes are never returned; context
+    rows and owner posts are left out. A store without `owner_reply_items` falls back to
+    the P17 `pending_in_thread`."""
+    from slack_dispatch.console.queries import direct_lane  # lazy: queries imports this module
+    lane = direct_lane(config) if getattr(config, "console", None) is not None else None
+    lookup = getattr(store, "owner_reply_items", None)
+    if callable(lookup):
+        rows = lookup(source, channel, root, lane)
+    else:
+        legacy = getattr(store, "pending_in_thread", None)
+        rows = legacy(source, channel, root) if callable(legacy) else []
+    limit = Decimal(str(reply_ts))
+    # edit_redeliverable is false for owner posts, context rows and prehandled items.
+    return [row["id"] for row in rows
+            if Decimal(str(row["ts"])) < limit and edit_redeliverable(row)]
+
+
+def close_owner_reply_items(store, ids):
+    """P17/P27: set `ids` to `done` with note `owner_reply` and drop their unsent human
+    notices, so a pending digest no longer lists them. The caller rewrites the queue export."""
+    for mid in ids:
+        store.set_state(mid, "done", note="owner_reply")
+    if ids:
+        with store._transaction() as db:
+            for mid in ids:
+                db.execute("DELETE FROM human_notices WHERE message_id=? AND sent_at IS NULL", (mid,))
+    return len(ids)
+
+
 @dataclass(frozen=True)
 class HandleResult:
     message_id: str | None
@@ -593,7 +634,8 @@ class Pipeline:
                 result.update(self.directory.snapshot(), app_posts_human=self.app_posts_human,
                               bot_posts=self.bot_posts, directory_names=self.directory_names)
             if self.owner_resolver is not None:
-                # P17: human queue items closed by an owner reply in their thread.
+                # P17/P27: operator queue items (human_pending and direct lane) closed by an
+                # owner reply in their thread.
                 result["owner_reply_closed"] = self.owner_reply_closed
             if self.edits_ignored or self.edits_woken:
                 result.update(edits_ignored=self.edits_ignored, edits_woken=self.edits_woken)
@@ -1014,35 +1056,27 @@ class Pipeline:
         return EDIT_WAKE
 
     def _close_on_owner_reply(self, message):
-        """P17: an owner reply in a thread closes the thread's earlier human queue items.
+        """P17/P27: an owner reply in a thread closes the thread's earlier operator items.
 
-        Only `human_pending` items of the same thread with a lower ts become `done` with
-        note `owner_reply`; their unsent human notices are dropped so a pending digest no
-        longer lists them, and the queue export is rewritten. Lane items are untouched
-        (the lane inbox shows `owner replied at`). Needs `owner_resolver.enabled` and
-        `owner_resolver.close_queue_on_owner_reply`.
+        The `human_pending` items (P17) and the `assigned` or `acked` items of the direct
+        lane (`console.direct_lane`, P27) of the same thread with a lower ts become `done`
+        with note `owner_reply` (see `owner_reply_targets`); their unsent human notices are
+        dropped so a pending digest no longer lists them, and the queue export is rewritten.
+        Items of other lanes are untouched (the lane inbox shows `owner replied at`). Needs
+        `owner_resolver.enabled` and `owner_resolver.close_queue_on_owner_reply`.
         """
-        settings = getattr(self.config, "owner_resolver", None)
         root, ts = message.get("thread_ts"), message.get("ts")
-        if (self.owner_resolver is None or not settings.close_queue_on_owner_reply
-                or not root or root == ts):
-            return 0
-        lookup = getattr(self.store, "pending_in_thread", None)
-        if not callable(lookup):
+        if self.owner_resolver is None or not owner_reply_enabled(self.config) or not root or root == ts:
             return 0
         try:
-            owner_ts = Decimal(str(ts))
-            closed = [row["id"] for row in lookup(message["source"], message["channel"], root)
-                      if Decimal(str(row["ts"])) < owner_ts]
+            closed = owner_reply_targets(self.config, self.store, message["source"],
+                                         message["channel"], root, ts)
         except Exception:
             self.failure("owner_reply_close")
             return 0
-        for mid in closed:
-            self.store.set_state(mid, "done", note="owner_reply")
+        close_owner_reply_items(self.store, closed)
         if closed:
-            with self.store._transaction() as db:
-                for mid in closed:
-                    db.execute("DELETE FROM human_notices WHERE message_id=? AND sent_at IS NULL", (mid,))
+            # P27: counts both kinds (human_pending and direct-lane items).
             self.owner_reply_closed += len(closed)
             self._export_queue()
         return len(closed)

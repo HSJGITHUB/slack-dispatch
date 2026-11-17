@@ -682,3 +682,30 @@ All additive; no ledger schema change.
 - Pipeline: the excluded decision goes through `apply_decision` as before (state
   `excluded`, note `excluded:no_mention`); `Pipeline.excluded_no_mention` (int) appears in
   `snapshot()` (and so the heartbeat) once nonzero.
+
+## P27 owner reply closes direct items
+
+All additive; no ledger schema change and no new config key.
+
+- `LedgerStore.owner_reply_items(source, channel, root, direct_lane=None)`: rows of the
+  thread (the root included), oldest first, without bodies, that are `human_pending` or,
+  with `direct_lane`, `assigned` or `acked` in that lane. `pending_in_thread` is unchanged.
+- `slack_dispatch.pipeline`: `owner_reply_enabled(config)` (`owner_resolver.enabled` and
+  `close_queue_on_owner_reply`), `owner_reply_targets(config, store, source, channel, root,
+  reply_ts)` (ids with a ts lower than `reply_ts`; the direct lane is
+  `console.queries.direct_lane(config)`, lazy import; owner posts, context rows and
+  prehandled items left out; a store without `owner_reply_items` falls back to
+  `pending_in_thread`), `close_owner_reply_items(store, ids)` (state `done`, note
+  `owner_reply`, unsent `human_notices` rows deleted; returns the count).
+  `Pipeline._close_on_owner_reply` uses them; it still runs only for an owner thread reply
+  (not a root post) and rewrites the queue export when something closed.
+  `owner_reply_closed` counts every closed item of both kinds.
+- Inbox CLI: `sent CHANNEL TS --lane LANE --thread ROOT_TS` (a reply, also a DM thread
+  reply) with a config where `owner_reply_enabled` holds and `LANE` is the direct lane
+  calls `close_on_operator_reply(config, store, channel, ts, root, lane, stdout, stderr)`
+  after the send is first recorded: same targets and close as the pipeline, then prints
+  `owner_reply closed=N` (followed by the comma-separated ids when N > 0) and rewrites
+  `<service.state_dir>/human_queue.jsonl` when something closed (a failed write prints
+  `Queue export failed class=<name>` to stderr; the exit code stays 0). Without a config,
+  with the switch off or for another lane nothing changes and no line is printed. The
+  service heartbeat counter does not include closes made by the CLI.

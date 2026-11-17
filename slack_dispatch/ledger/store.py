@@ -821,6 +821,18 @@ class LedgerStore:
             row.pop("body", None)
         return sorted(rows, key=lambda row: (_numeric(row["ts"]), row["id"]))
 
+    def owner_reply_items(self, source, channel, root, direct_lane=None):
+        """P27: rows of a thread (the root included) an owner reply may close, oldest first:
+        `human_pending` rows, plus `assigned` and `acked` rows of `direct_lane` when one is
+        given. Rows of other lanes are never returned. No bodies; the caller applies the ts
+        rule."""
+        rows = self._rows("SELECT * FROM messages WHERE source=? AND channel=? AND (ts=? OR thread_ts=?) "
+                          "AND (state='human_pending' OR (lane=? AND state IN ('assigned', 'acked')))",
+                          (source, channel, root, root, direct_lane))
+        for row in rows:
+            row.pop("body", None)
+        return sorted(rows, key=lambda row: (_numeric(row["ts"]), row["id"]))
+
     def open_messages(self, *, lane=None):
         """Open items (human_pending, assigned, acked), optionally of one lane. No bodies."""
         rows = self._rows("SELECT * FROM messages WHERE state IN ('human_pending', 'assigned', 'acked') "

@@ -421,6 +421,7 @@ also adds a `dm` claim for the lane and one evidence event per new send. A repea
 with `--thread`, `dm` for a D conversation, else `root`; `reply` without `--thread` and
 `root` with a different `--thread` return 2. The owner's own post arriving through the
 socket is still recorded as `owner_post` and stays done.
+P27: a first-recorded reply (`--thread`) with `--lane` set to the direct lane, under a config with `owner_resolver.enabled` and `close_queue_on_owner_reply`, closes the thread's earlier `human_pending` and direct-lane `assigned`/`acked` items (note `owner_reply`) and prints `owner_reply closed=N` (then the comma-separated ids when N > 0).
 
 Exit codes for `scope` and `sent`: 0 success, 2 invalid input or an unreadable config, 3
 unknown lane or missing claim, 1 unexpected error.

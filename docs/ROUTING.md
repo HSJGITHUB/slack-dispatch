@@ -343,8 +343,9 @@ Owner reply close. With `owner_resolver.enabled` and `close_queue_on_owner_reply
 an owner post (`always_human.owner_user`, recorded as `owner_post`) that is a thread reply
 sets every `human_pending` item of that thread with a lower ts to `done` with note
 `owner_reply`, drops their unsent human notices (a pending digest no longer lists them)
-and rewrites the queue export. Assigned and acked lane items are not touched; the lane
-inbox shows `owner replied at`. Heartbeat counter `owner_reply_closed` when the resolver
+and rewrites the queue export. Assigned and acked items of other lanes are not touched
+(the lane inbox shows `owner replied at`); items of the direct lane are closed too, see
+SERVICE.md P27. Heartbeat counter `owner_reply_closed` when the resolver
 is enabled.
 
 ## P26 mention-only channels

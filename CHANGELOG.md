@@ -5,6 +5,20 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P27 owner reply closes direct items
+- An owner reply in a thread now also closes the thread's earlier direct-lane items
+  (`console.direct_lane`, state `assigned` or `acked`) next to its `human_pending` items:
+  `done` with note `owner_reply`, unsent human notices dropped, queue export rewritten.
+  Live case: after the operator answered a thread with eight replies the console still
+  listed all eight direct rows until they were closed by hand.
+- Same for live socket events, catch-up, and a reply the operator session records with the
+  inbox CLI `sent ... --lane <direct lane> --thread ROOT_TS`.
+- Items of other lanes, items newer than the reply and the owner's own root posts are
+  unchanged. Switch stays `owner_resolver.close_queue_on_owner_reply` (now covering direct
+  items); heartbeat `owner_reply_closed` counts both kinds.
+- `LedgerStore.owner_reply_items`, `pipeline.owner_reply_targets`,
+  `pipeline.close_owner_reply_items`, `pipeline.owner_reply_enabled`.
+
 ### P26 mention-only channels
 - `channel_defaults` entries take an optional `mention_only: true` next to `default`
   (default false; the loader rejects a non-boolean and the key in `dm_defaults`). For

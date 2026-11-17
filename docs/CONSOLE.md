@@ -787,3 +787,12 @@ notices are unchanged; digests end with the operator queue counts line (fix1). D
 routed to the direct lane gets the usual human-queue notice on the other adapters (`FYI,
 assigned to lane <direct lane>`) and waits in the queue as a direct row. The inbox CLI
 `queue` command lists both kinds (INBOX.md).
+
+Owner replies (P27). An owner reply in a thread closes both kinds of earlier queue rows of
+that thread: `human_pending` rows (P17) and the `assigned` or `acked` rows of the direct
+lane, each set to `done` with note `owner_reply`. Rows of other lanes and rows newer than
+the reply stay. The switch is `owner_resolver.close_queue_on_owner_reply` (with
+`owner_resolver.enabled`); it now covers direct rows too. A reply the operator session
+records with the inbox CLI `sent ... --lane <direct lane> --thread ROOT_TS` closes the same
+rows. The page drops the closed rows on its next poll; the heartbeat `owner_reply_closed`
+counts both kinds (SERVICE.md, P27).

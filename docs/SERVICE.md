@@ -570,3 +570,28 @@ reports `decision_at` when a card decision assigned an item after the row (route
 
 Pruning runs when the pipeline is constructed (service start) and from the 30 second flush
 once a day. The console and the inbox CLI only read the table.
+
+## P27 owner reply closes direct items
+
+The P17 owner reply close (ROUTING.md, "Owner reply close") now also covers the operator's
+direct lane. With `owner_resolver.enabled` and `owner_resolver.close_queue_on_owner_reply:
+true` (the same switch, no new key), an owner reply in a thread (`always_human.owner_user`,
+recorded as `owner_post`; a live socket event or a catch-up/reconcile event alike) sets to
+`done` with note `owner_reply` every item of that thread (the root included) with a lower
+ts that is:
+
+- `human_pending` (as in P17), or
+- in the configured direct lane (`console.direct_lane`, when it is a configured lane) in
+  state `assigned` or `acked`.
+
+Items of other lanes are untouched as before (their lane inbox shows `owner replied at`);
+items with a higher ts than the reply stay open; context rows and owner posts are never
+items. Unsent human notices of the closed items are dropped and the queue export
+(`<state_dir>/human_queue.jsonl`) is rewritten. The owner's own root post closes nothing.
+The heartbeat counter `owner_reply_closed` counts both kinds. Without a configured direct
+lane only `human_pending` items close, as in P17.
+
+The operator session can record its reply with the inbox CLI instead of waiting for the
+event: `sent CHANNEL TS --lane <direct lane> --thread ROOT_TS` with the instance config
+closes the same items (see CONTRACTS.md, P27). The service sees the event later and finds
+nothing left to close.
