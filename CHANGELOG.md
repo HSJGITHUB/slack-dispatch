@@ -5,6 +5,24 @@ This project follows Semantic Versioning while remaining pre-alpha.
 
 ## [Unreleased]
 
+### P30 mention-only owner mode
+- A `channel_defaults` entry accepts `mention_only: owner` next to `true` and `false`.
+  Owner mode is mention-only and only an exact owner mention (attention `owner_mention`)
+  opens the channel: a post by an `always_human.users` author outside a bound thread is
+  excluded with `excluded:no_mention` like any post without attention. A reply in a bound
+  thread keeps its attention value. Live case: the operator joined marketplace team rooms
+  where protected authors post routinely to other people, and every such post reached the
+  operator queue. `mention_only: true` channels are unchanged.
+- An owner post (`owner_signals.posts: record`, live or reconcile) in a mention-only
+  channel of either mode binds its thread (the post itself or its thread root) to the
+  channel default lane when the thread has no binding and the default is not null, so
+  replies to the operator's own post reach that lane by `thread_inherit`. The owner post
+  itself stays `done` with `owner_post`; existing bindings are never changed.
+- `Config.mention_only_owner_channels` (subset of `mention_only_channels`),
+  `router.engine.is_mention_only_owner` and `gate_attention`, heartbeat counter
+  `owner_threads_bound` (present once nonzero). Any other `mention_only` value raises
+  `ConfigError` (`must be true, false or owner`).
+
 ### P29 assigned attention notice
 - New `human_queue.assigned_notice_flags` (default `[always_human, owner_mention]`, the
   behaviour before P29): an attention item routed to a lane queues the operator FYI

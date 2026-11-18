@@ -40,6 +40,20 @@ def boolean(value, path):
     return value
 
 
+# P30: the `mention_only` string value that selects owner mode.
+MENTION_ONLY_OWNER = "owner"
+
+
+def mention_only_mode(value, path):
+    """P26/P30: a `mention_only` value: true, false or the string `owner`. Returns whether
+    the channel is mention-only (true for both true and owner)."""
+    if type(value) is bool:
+        return value
+    if isinstance(value, str) and value == MENTION_ONLY_OWNER:
+        return True
+    raise ConfigError(f"{path} must be true, false or {MENTION_ONLY_OWNER}")
+
+
 def positive(value, path):
     if type(value) is not int or value <= 0:
         raise ConfigError(f"{path} must be a positive integer")
@@ -81,6 +95,7 @@ def parse_config(raw):
         return value
 
     mention_only = []
+    mention_only_owner = []
 
     def defaults(key):
         result = {}
@@ -89,11 +104,14 @@ def parse_config(raw):
             entry = mapping(entry, key + " entry")
             result[channel] = lane_ref(required(entry, "default", key), key, True)
             # P26: optional `mention_only` flag, channel_defaults only (default false).
+            # P30: the string `owner` selects owner mode (mention-only, owner_mention only).
             if "mention_only" in entry:
                 if key != "channel_defaults":
                     raise ConfigError(f"{key} entry does not support mention_only")
-                if boolean(entry["mention_only"], key + " entry.mention_only"):
+                if mention_only_mode(entry["mention_only"], key + " entry.mention_only"):
                     mention_only.append(channel)
+                if entry["mention_only"] == MENTION_ONLY_OWNER:
+                    mention_only_owner.append(channel)
         return result
 
     rules = []
@@ -302,7 +320,8 @@ def parse_config(raw):
                   sessions_dir=sessions_dir, people=people, display_timezone=zone,
                   console=console, decisions=decisions, scope_learning=learning,
                   membership=membership, user_directory=directory, owner_resolver=resolver,
-                  delivery_log=delivery_log, mention_only_channels=tuple(mention_only))
+                  delivery_log=delivery_log, mention_only_channels=tuple(mention_only),
+                  mention_only_owner_channels=tuple(mention_only_owner))
 
 
 def delivery_log_section(value):

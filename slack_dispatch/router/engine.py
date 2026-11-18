@@ -53,8 +53,24 @@ def attention_for(message, config):
 
 
 def is_mention_only(message, config):
-    """True for a channel whose channel_defaults entry sets `mention_only: true` (P26)."""
-    return message.get("channel") in getattr(config, "mention_only_channels", ())
+    """True for a channel whose channel_defaults entry sets `mention_only: true` (P26) or
+    `mention_only: owner` (P30)."""
+    channel = message.get("channel")
+    return (channel in getattr(config, "mention_only_channels", ())
+            or channel in getattr(config, "mention_only_owner_channels", ()))
+
+
+def is_mention_only_owner(message, config):
+    """True for a channel whose channel_defaults entry sets `mention_only: owner` (P30)."""
+    return message.get("channel") in getattr(config, "mention_only_owner_channels", ())
+
+
+def gate_attention(message, config, attention):
+    """The attention that opens a mention-only channel: any attention in a P26 channel, only
+    `owner_mention` in a P30 owner mode channel (a protected author alone does not)."""
+    if attention != "owner_mention" and is_mention_only_owner(message, config):
+        return None
+    return attention
 
 
 def route(message, config, lookup_binding, lookup_scope=None) -> Decision:
@@ -78,13 +94,15 @@ def route(message, config, lookup_binding, lookup_scope=None) -> Decision:
                 return Decision(result.lane, result.reason, result.rule or result.reason)
         return Decision(None, "excluded:bot", "excluded")
     attention = attention_for(message, config)
-    if not attention and is_mention_only(message, config):
+    if not gate_attention(message, config, attention) and is_mention_only(message, config):
         # P26: without attention only a reply in a bound thread gets through (the same
         # result ThreadInherit gives first in the normal order); anything else is excluded.
+        # P30: in owner mode only `owner_mention` counts here; a bound reply keeps its
+        # normal attention (None in a P26 channel, where attention never reaches here).
         inherited = ThreadInherit(lookup_binding).match(message)
         if inherited is None:
             return Decision(None, NO_MENTION, "excluded")
-        return Decision(inherited.lane, inherited.reason, inherited.reason)
+        return Decision(inherited.lane, inherited.reason, inherited.reason, attention)
     result = first_match(message, (
         ThreadInherit(lookup_binding),
         ScopeClaim(lookup_scope, lanes=lanes),

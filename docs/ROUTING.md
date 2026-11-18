@@ -9,7 +9,7 @@ mutate the message, call a classifier, or write to the ledger.
 | 2 | Bot with exclude_all | Excluded with excluded:bot |
 | 2 | Bot with route_or_exclude | Channel/DM default only, otherwise excluded:bot (always excluded:bot in a mention-only channel, P26) |
 | 3 | Protected author or configured exact mention | Set attention, continue routing |
-| 4 | Mention-only channel (P26) without attention, not a reply in a bound thread | Excluded with excluded:no_mention |
+| 4 | Mention-only channel (P26) without attention, or in owner mode (P30) without `owner_mention`, not a reply in a bound thread | Excluded with excluded:no_mention |
 | 5 | Existing reply thread binding | Assign inherited lane |
 | 6 | Confirmed scope claim in the ledger (P13 ScopeClaim) | Assign claimed lane |
 | 7 | First recognized explicit tag | Assign tagged lane |
@@ -351,17 +351,26 @@ is enabled.
 ## P26 mention-only channels
 
 Some channels belong to other teams: the operator wants to see a post there only when it
-mentions them. A `channel_defaults` entry takes an optional boolean `mention_only`
-(default false) next to `default`:
+mentions them. A `channel_defaults` entry takes an optional `mention_only` value next to
+`default`: `true`, `false` (the default) or, since P30, the string `owner` (owner mode,
+see below):
 
 ```yaml
 channel_defaults:
   C0000000004: {default: owner, mention_only: true}
+  C0000000006: {default: owner, mention_only: owner}
 ```
 
-The loader rejects a non-boolean value and rejects the key in `dm_defaults`.
-`Config.channel_defaults` keeps its `{channel: lane}` shape; the flagged channel ids are
-`Config.mention_only_channels` (a tuple, empty by default).
+The loader rejects any other value (`must be true, false or owner`) and rejects the key in
+`dm_defaults`. `Config.channel_defaults` keeps its `{channel: lane}` shape; the ids of every
+mention-only channel (both modes) are `Config.mention_only_channels` and the ids of the
+owner mode channels (a subset) are `Config.mention_only_owner_channels` (tuples, empty by
+default).
+
+Owner mode (P30) is for reference rooms where protected authors post routinely to other
+people: only attention `owner_mention` opens the channel. A message whose attention is not
+`owner_mention` (an `always_human.users` author without an owner mention included) is
+treated by the gate exactly like a message without attention.
 
 In `route()`, after the excluded channel check, the bot policy and the attention check
 (precedence 4 above), a message in a mention-only channel:
@@ -372,17 +381,34 @@ In `route()`, after the excluded channel check, the bot policy and the attention
   scope claim, explicit tag, channel default, person rule. With `{default: <lane>}` it is
   assigned to that lane with the attention flag (and the usual immediate human notice);
   with `{default: null}` and no other match it is a human pending `always_human` item.
-- without attention, as a reply in a thread that already has a binding, inherits the
-  bound lane (`thread_inherit`) exactly as today. A mention post assigned to a lane binds
-  its thread (roots by the pipeline, replies by `apply_decision`), so the later replies of
-  that thread reach the lane.
-- without attention otherwise (a root, or a reply in an unbound thread) gets
+  This holds for `mention_only: true`. In owner mode only `owner_mention` continues this
+  way; `always_human` alone falls under the two bullets below, so outside a bound thread
+  it is excluded.
+- without attention (in owner mode: without `owner_mention`), as a reply in a thread that
+  already has a binding, inherits the bound lane (`thread_inherit`) exactly as today and
+  keeps its attention value (in owner mode a protected author's bound reply is assigned
+  with `always_human`). A mention post assigned to a lane binds its thread (roots by the
+  pipeline, replies by `apply_decision`), so the later replies of that thread reach the
+  lane.
+- without attention (in owner mode: without `owner_mention`) otherwise (a root, or a
+  reply in an unbound thread) gets
   `Decision(None, "excluded:no_mention", "excluded")`. Explicit tags, scope claims, the
   channel default and person rules do not apply. The pipeline records it as `excluded`
   with note `excluded:no_mention`; it is never assigned, queued or counted as
   `human_pending`, and it gets no human notice, no inbox record and no wake. The
   heartbeat counter `excluded_no_mention` (present once nonzero) counts these. Like the
   other router exclusions it still counts in `routed`.
+
+Operator posts (P30): a post by `always_human.owner_user` recorded as an owner post
+(`owner_signals.posts: record`, live or reconcile origin) in a mention-only channel of
+either mode binds its thread (the post itself when it is a root, else its thread root) to
+the channel's `channel_defaults` lane when that thread has no binding. An existing binding
+is never changed, a null default binds nothing, and nothing is bound in an excluded channel
+(config `excluded_channels` or a ledger channel exclusion). The owner post itself stays
+`done` with `owner_post` (no inbox record, wake or notice). Later replies in that thread
+pass the gate by inheritance and reach that lane like any bound-thread reply. Outside
+mention-only channels nothing changes. The heartbeat counter `owner_threads_bound`
+(present once nonzero) counts these bindings.
 
 Bots: under `bot_messages.policy: route_or_exclude` a bot post in a mention-only channel
 is `excluded:bot` (bots carry no attention under that policy, so neither the channel

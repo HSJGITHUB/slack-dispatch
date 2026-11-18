@@ -751,3 +751,33 @@ All additive; no ledger schema change and no new config key.
 - `slack_dispatch.pipeline` adds `DEFAULT_ASSIGNED_NOTICE_FLAGS`,
   `assigned_notice_flags(config)` (the default for a config without the key),
   `assigned_notice_dropped(config, kind, state)` and `attention_only(rows, messages)`.
+
+## P30 mention-only owner mode
+
+All additive; no ledger schema change and no new store method.
+
+- Config: a `channel_defaults` entry's `mention_only` takes `true`, `false` (P26 meaning)
+  or the string `owner`. Any other value raises `ConfigError` with
+  `<key> entry.mention_only must be true, false or owner`; the key in a `dm_defaults` entry
+  still raises (`does not support mention_only`). `Config.mention_only_channels` lists
+  every mention-only channel (both modes); `Config.mention_only_owner_channels:
+  tuple[str, ...] = ()` lists the `owner` mode channels. `config.loader` adds
+  `MENTION_ONLY_OWNER = "owner"` and `mention_only_mode(value, path)`.
+- Router: `is_mention_only(message, config)` is true for a channel in either tuple;
+  `is_mention_only_owner(message, config)` for a channel in `mention_only_owner_channels`;
+  `gate_attention(message, config, attention)` returns `attention`, except None for an
+  attention other than `owner_mention` in an owner mode channel. The P26 gate uses
+  `gate_attention`: in owner mode an `always_human` message that is not a reply in a bound
+  thread yields `Decision(None, "excluded:no_mention", "excluded")`; a reply in a bound
+  thread yields the `thread_inherit` decision with the message's normal attention (for
+  example `always_human`). An `owner_mention` message follows the normal order as in P26.
+  `mention_only: true` channels and `route()`'s signature are unchanged.
+- Pipeline: `Pipeline._bind_owner_thread(message)` runs for every recorded owner post
+  (note `owner_post`, live or reconcile origin) before `_close_on_owner_reply`. In a
+  mention-only channel (either mode) that is not excluded (config or ledger channel
+  exclusions), with a non-null `channel_defaults` lane, it binds the thread key
+  `(source, channel, thread_ts or ts)` to that lane when the thread has no binding, and
+  returns whether it bound. An existing binding is never changed. The owner post keeps
+  state `done`, route reason and note `owner_post`, and gets no inbox record, wake or
+  notice. `Pipeline.owner_threads_bound` (int) appears in `snapshot()` (and so the
+  heartbeat) once nonzero.

@@ -286,3 +286,7 @@ class Config:
     # post without attention is excluded (`excluded:no_mention`) unless it replies in a
     # thread that already has a binding. channel_defaults keeps its {channel: lane} shape.
     mention_only_channels: tuple[str, ...] = ()
+    # P30: the channels of mention_only_channels whose entry sets `mention_only: owner`. In
+    # these only attention `owner_mention` opens the channel (a protected author's post
+    # outside a bound thread is excluded like a post without attention).
+    mention_only_owner_channels: tuple[str, ...] = ()

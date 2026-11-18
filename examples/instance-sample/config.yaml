@@ -27,6 +27,11 @@ display_timezone: UTC
 # thread that already has a binding; every other post is recorded as excluded with note
 # excluded:no_mention (no inbox record, wake, queue entry or human notice). Bot posts there
 # are excluded:bot under bot_messages.policy route_or_exclude. Not valid in dm_defaults.
+# mention_only: owner (P30) is mention-only too, but only an exact owner mention opens the
+# channel (an always_human author's post outside a bound thread is excluded as well). In
+# both modes a post by always_human.owner_user (owner_signals.posts: record) binds its
+# thread to the channel default lane (when not null), so replies to it are routed there.
+# Example: C0000000006: {default: owner, mention_only: owner}
 channel_defaults:
   C0000000001: {default: support}
   C0000000002: {default: null}

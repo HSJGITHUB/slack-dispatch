@@ -24,7 +24,7 @@ from slack_dispatch.queue.human import digest_counts_text, export_jsonl, queue_c
 from slack_dispatch.resolver.owner import VERSION as OWNER_VERSION, OwnerResolver, suggestion_for
 from slack_dispatch.router.apply import apply_decision
 from slack_dispatch.router.classifier import Suggestion
-from slack_dispatch.router.engine import NO_MENTION, route
+from slack_dispatch.router.engine import NO_MENTION, is_mention_only, route
 
 LOG = logging.getLogger(__name__)
 HUMAN_QUEUE = "human_queue"
@@ -589,6 +589,9 @@ class Pipeline:
         # P26: posts without attention excluded in a mention-only channel; appears in the
         # heartbeat once nonzero (like the P22 and P23 counters).
         self.excluded_no_mention = 0
+        # P30: threads bound to the channel default lane by an owner post in a mention-only
+        # channel; appears in the heartbeat once nonzero (like excluded_no_mention).
+        self.owner_threads_bound = 0
         # P29: attention notices not queued for items routed to a lane (flag not in
         # human_queue.assigned_notice_flags), plus queued rows dropped at flush for the same
         # reason; appears in the heartbeat once nonzero.
@@ -680,6 +683,8 @@ class Pipeline:
                 result.update(catchup_woken=self.catchup_woken, backfill_silent=self.backfill_silent)
             if self.excluded_no_mention:
                 result["excluded_no_mention"] = self.excluded_no_mention
+            if self.owner_threads_bound:
+                result["owner_threads_bound"] = self.owner_threads_bound
             skipped = self.attention_notice_skipped + self.human.attention_dropped
             if skipped:
                 result["attention_notice_skipped"] = skipped
@@ -949,6 +954,7 @@ class Pipeline:
             if note.startswith("prehandled:"):
                 self.counters["prehandled"] += 1
             if note == "owner_post":
+                self._bind_owner_thread(message)
                 self._close_on_owner_reply(message)
             return HandleResult(mid, recorded.kind, state="done", lane=message.get("lane"))
         if "text" in event:
@@ -1094,6 +1100,27 @@ class Pipeline:
         if last is not None and 0 <= self.clock() - last <= self.config.service.followup_window_seconds:
             return EDIT_IGNORE
         return EDIT_WAKE
+
+    def _bind_owner_thread(self, message):
+        """P30: an owner post in a mention-only channel (either mode) binds its thread (the
+        post itself when it is a root, else its thread root) to the channel's
+        `channel_defaults` lane, so later replies there pass the mention-only gate by
+        inheritance. Nothing happens for a null default, an existing binding (never
+        changed), an excluded channel or a channel that is not mention-only. Returns
+        whether a binding was written."""
+        config = self.routing_config()
+        channel = message.get("channel")
+        if channel in config.excluded_channels or not is_mention_only(message, config):
+            return False
+        lane = config.channel_defaults.get(channel)
+        if lane is None:
+            return False
+        key = (message["source"], channel, message.get("thread_ts") or message["ts"])
+        if self.store.lookup_binding(*key) is not None:
+            return False
+        self.store.bind_thread(*key, lane)
+        self.owner_threads_bound += 1
+        return True
 
     def _close_on_owner_reply(self, message):
         """P17/P27: an owner reply in a thread closes the thread's earlier operator items.
