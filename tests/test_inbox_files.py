@@ -1,5 +1,6 @@
 import builtins
 import multiprocessing
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,16 +20,27 @@ class InboxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             context = multiprocessing.get_context("spawn")
             processes = [context.Process(target=writer, args=(root, str(i))) for i in range(2)]
-            for process in processes:
-                process.start()
-            for process in processes:
-                process.join(30)
-                self.assertEqual(process.exitcode, 0)
+            try:
+                for process in processes:
+                    process.start()
+                for process in processes:
+                    process.join(30)
+            finally:
+                # P33: never leave a writer running. A live child keeps inbox files open, and
+                # the temporary directory cleanup then fails (WinError 145) and hides the cause.
+                for process in processes:
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(5)
+            self.assertEqual([process.exitcode for process in processes], [0, 0])
             rows = read(root, "support")
             self.assertEqual(len(rows), 40)
             self.assertEqual(len({r["id"] for r in rows}), 40)
             self.assertNotIn("PRIVATE_BODY", (Path(root) / "support.jsonl").read_text())
             self.assertTrue((Path(root) / "support.lock").exists())
+            # The lock file format is unchanged: one marker byte on Windows, empty on POSIX.
+            self.assertEqual((Path(root) / "support.lock").read_bytes(),
+                             b"0" if os.name == "nt" else b"")
 
     def test_join_done_and_reroute(self):
         store = FakeStore()

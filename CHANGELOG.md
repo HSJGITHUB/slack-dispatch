@@ -6,8 +6,27 @@ This project follows Semantic Versioning. Versions below 1.0 may change interfac
 
 ## [Unreleased]
 
+### P34 license
+- The project license is AGPL-3.0-only (`LICENSE`, `COPYRIGHT`, package metadata, README License section, `CONTRIBUTING.md`); no runtime change.
+
+### P33 inbox lock on Windows
+- Fix an intermittent `PermissionError: [Errno 13]` when two processes append to (or read)
+  one lane inbox on Windows. `lane_lock` wrote the one-byte marker into a new, empty lock
+  file before taking the `msvcrt` byte-range lock, so its write could land on byte 0 just
+  after another process locked it (a lock violation reported at `flush()`). The lock is now
+  taken first and only the holder writes the marker. The public signatures are unchanged;
+  on POSIX the lock (`fcntl.flock`) and the on-disk format are unchanged.
+- The Windows lock wait retries only the lock-busy errors of `msvcrt.locking` (other
+  `OSError` propagates). Opening and reading inbox files wait out transient sharing or
+  lock violations (WinError 32 or 33) for up to 5 seconds, then raise `TimeoutError`
+  `Inbox file busy`. On every platform, `read` rechecks for a lock file after an unlocked
+  read and, when one appeared during the read, reads again under the lock.
+- The two-process inbox test always joins and terminates its children, so a failure is no
+  longer masked by a temporary directory cleanup error (WinError 145); new contention
+  tests cover a held empty lock file, lock timeout, fresh lock races and concurrent readers.
+
 ### P31 public showcase
-- Rewrite the README as the public front page, add the MIT `LICENSE`, `SECURITY.md` and package metadata, and use the neutral name `card bot` for the external card consumer in comments, docstrings and docs; no runtime behaviour changes.
+- Rewrite the README as the public front page, add a `LICENSE` (MIT at that point, replaced in P34), `SECURITY.md` and package metadata, and use the neutral name `card bot` for the external card consumer in comments, docstrings and docs; no runtime behaviour changes.
 
 ### P30 mention-only owner mode
 - A `channel_defaults` entry accepts `mention_only: owner` next to `true` and `false`.

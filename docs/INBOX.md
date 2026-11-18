@@ -106,6 +106,13 @@ retries for up to 30 seconds. The fallback releases by renaming the lock to
 inspection and a move aside. Native and fallback lock modes must not be mixed
 for the same inbox. Lane names allow lowercase letters, digits, underscores and
 hyphens. Appends flush and fsync before releasing the lock.
+On Windows a writer or reader takes the byte-range lock first and only then writes the
+one-byte marker into a new lock file, so a second process waits for the lock (polling
+every 10 ms for up to 30 seconds, then `TimeoutError: Inbox lock unavailable`) instead
+of failing with `PermissionError`. Opening or reading an inbox file also waits out a
+transient Windows sharing or lock violation for up to 5 seconds (then `TimeoutError:
+Inbox file busy`); any other `OSError` propagates at once. A read that started without
+a lock file reads again under the lock if a first writer created it meanwhile.
 
 `FileInboxNotifier(root, lookup=store.get_message)` preserves thread and followup
 metadata. Without lookup it derives channel and timestamp from the message id.

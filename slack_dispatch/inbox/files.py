@@ -1,4 +1,5 @@
 """Body-free JSONL records protected by a per-lane lock."""
+import errno
 import json
 import os
 import re
@@ -6,11 +7,47 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
+# Total wait for the lane lock itself (the existing 30 second bound).
+LOCK_TIMEOUT = 30.0
+# Total wait for a transient Windows sharing or lock violation on an inbox file.
+SHARING_TIMEOUT = 5.0
+RETRY_SLEEP = 0.01
+# ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION: another handle holds the file
+# or the byte range. Any other OSError (for example ERROR_ACCESS_DENIED) is not retried.
+_TRANSIENT_WINERRORS = (32, 33)
+# msvcrt.locking reports a byte range held by another process as EACCES (LK_NBLCK)
+# or EDEADLOCK (LK_LOCK after its own retries).
+_LOCK_BUSY_ERRNOS = (errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK))
+
 
 def validate_lane(lane):
     if not isinstance(lane, str) or not re.fullmatch(r"[a-z0-9_-]+", lane):
         raise ValueError("Invalid lane")
     return lane
+
+
+def _is_transient(err):
+    return isinstance(err, OSError) and getattr(err, "winerror", None) in _TRANSIENT_WINERRORS
+
+
+def _retry_transient(action, what, timeout=None):
+    """Run `action`, waiting out transient Windows sharing or lock violations.
+
+    Retries only errors whose winerror is a sharing or lock violation, with short sleeps,
+    for at most `timeout` seconds (default SHARING_TIMEOUT), then raises TimeoutError
+    naming `what`. Other errors propagate unchanged. On POSIX `winerror` is never set,
+    so this is a single call.
+    """
+    deadline = time.monotonic() + (SHARING_TIMEOUT if timeout is None else timeout)
+    while True:
+        try:
+            return action()
+        except OSError as err:
+            if not _is_transient(err):
+                raise
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Inbox file busy: {what}") from err
+            time.sleep(RETRY_SLEEP)
 
 
 @contextmanager
@@ -26,7 +63,7 @@ def lane_lock(root, lane):
             import fcntl as locking
     except ImportError:
         locking = None
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + LOCK_TIMEOUT
     if locking is None:
         while True:
             try:
@@ -43,30 +80,39 @@ def lane_lock(root, lane):
             # Preserve the lock artifact while releasing the atomic-create name.
             os.replace(path, root / (lane + ".lock.released"))
         return
-    with path.open("a+b") as handle:
-        if os.name == "nt":
+    if os.name != "nt":
+        with path.open("a+b") as handle:
+            locking.flock(handle.fileno(), locking.LOCK_EX)
+            try:
+                yield
+            finally:
+                locking.flock(handle.fileno(), locking.LOCK_UN)
+        return
+    with _retry_transient(lambda: path.open("a+b"), path.name) as handle:
+        # P33: lock first, write second. The lock covers byte 0, which Windows allows
+        # beyond the end of file, so an empty lock file needs no content to be locked.
+        # Writing the marker byte before holding the lock raced with another process
+        # that had just locked byte 0 and failed with PermissionError (lock violation).
+        while True:
+            try:
+                handle.seek(0)
+                locking.locking(handle.fileno(), locking.LK_NBLCK, 1)
+                break
+            except OSError as err:
+                if err.errno not in _LOCK_BUSY_ERRNOS:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Inbox lock unavailable") from None
+                time.sleep(RETRY_SLEEP)
+        try:
             if handle.seek(0, 2) == 0:
+                # Keep the one-byte lock file format; only the lock holder writes it.
                 handle.write(b"0")
                 handle.flush()
-            while True:
-                try:
-                    handle.seek(0)
-                    locking.locking(handle.fileno(), locking.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("Inbox lock unavailable") from None
-                    time.sleep(0.01)
-        else:
-            locking.flock(handle.fileno(), locking.LOCK_EX)
-        try:
             yield
         finally:
-            if os.name == "nt":
-                handle.seek(0)
-                locking.locking(handle.fileno(), locking.LK_UNLCK, 1)
-            else:
-                locking.flock(handle.fileno(), locking.LOCK_UN)
+            handle.seek(0)
+            locking.locking(handle.fileno(), locking.LK_UNLCK, 1)
 
 
 def record(message, kind=None):
@@ -97,19 +143,39 @@ def append(root, lane, records):
         if any(not isinstance(row[k], str) or not row[k] for k in keys[:4]):
             raise ValueError("Invalid inbox record metadata")
     with lane_lock(root, lane):
-        with (Path(root) / (lane + ".jsonl")).open("a", encoding="utf-8") as handle:
+        path = Path(root) / (lane + ".jsonl")
+        with _retry_transient(lambda: path.open("a", encoding="utf-8"), path.name) as handle:
             for row in clean:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
 
 
+def _read_rows(root, lane, locked):
+    with lane_lock(root, lane) if locked else nullcontext():
+        path = Path(root) / (lane + ".jsonl")
+        if not path.exists():
+            return []
+        text = _retry_transient(lambda: path.read_text(encoding="utf-8"), path.name)
+        return [json.loads(line) for line in text.splitlines()]
+
+
 def read(root, lane, *, include_done=False, store=None):
     validate_lane(lane)
-    lock = lane_lock(root, lane) if (Path(root) / (lane + ".lock")).exists() else nullcontext()
-    with lock:
-        path = Path(root) / (lane + ".jsonl")
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    lock_path = Path(root) / (lane + ".lock")
+    rows = None
+    if not lock_path.exists():
+        try:
+            rows = _read_rows(root, lane, False)
+        except ValueError:
+            if not lock_path.exists():
+                raise
+        if lock_path.exists():
+            # A first writer created the lock while this unlocked read ran, so the read may
+            # have seen a partly written append. Read again under the lock.
+            rows = None
+    if rows is None:
+        rows = _read_rows(root, lane, True)
     result = []
     for row in rows:
         if store is not None:
