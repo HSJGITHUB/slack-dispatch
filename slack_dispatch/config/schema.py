@@ -241,6 +241,21 @@ class DeliveryLog:
     not_delivered_patterns: tuple[str, ...] = NOT_DELIVERED_PATTERNS
 
 
+# P35: credential kinds `ingest.redact` replaces before message text reaches the ledger.
+REDACTION_KINDS = ("private_key", "aws_access_key_id", "slack_token", "slack_webhook",
+                   "github_token", "google_api_key", "stripe_key", "api_key", "bearer_token",
+                   "jwt", "basic_auth", "url_password", "aws_secret_access_key",
+                   "labelled_secret")
+
+
+@dataclass(frozen=True)
+class Redaction:
+    """Credential redaction (P35). With `enabled` (default true) every path that persists
+    message text replaces credentials of `kinds` (default all) with `[redacted:<kind>]`."""
+    enabled: bool = True
+    kinds: tuple[str, ...] = REDACTION_KINDS
+
+
 @dataclass(frozen=True)
 class Config:
     lanes: tuple[Lane, ...]
@@ -290,3 +305,5 @@ class Config:
     # these only attention `owner_mention` opens the channel (a protected author's post
     # outside a bound thread is excluded like a post without attention).
     mention_only_owner_channels: tuple[str, ...] = ()
+    # Optional credential redaction section (P35).
+    redaction: Redaction = field(default_factory=Redaction)

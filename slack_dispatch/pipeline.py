@@ -10,9 +10,10 @@ import sys
 import time
 from urllib.parse import quote
 
-from slack_dispatch.config.schema import FOLLOWUP_POLICIES
+from slack_dispatch.config.schema import FOLLOWUP_POLICIES, Redaction
 from slack_dispatch.ingest.membership import NOT_MEMBER
 from slack_dispatch.ingest.normalize import comparable_text
+from slack_dispatch.ingest.redact import redact
 from slack_dispatch.ingest.user_directory import carries_app_evidence, is_bot_message
 from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
@@ -147,6 +148,22 @@ def edit_text_changed(previous_body, text):
     if not isinstance(previous_body, str) or not isinstance(text, str):
         return True
     return comparable_text(text) != comparable_text(previous_body)
+
+
+def redaction_settings(config):
+    """P35: the config's `redaction` section; configs without one redact every kind."""
+    settings = getattr(config, "redaction", None)
+    return settings if isinstance(settings, Redaction) else Redaction()
+
+
+def redact_event(event, settings):
+    """P35: (event, kinds). A copy of `event` whose `text` has its credentials replaced,
+    or the event itself when redaction is off, there is no text or nothing matched."""
+    text = event.get("text")
+    if not settings.enabled or not isinstance(text, str):
+        return event, ()
+    clean, kinds = redact(text, settings.kinds)
+    return (dict(event, text=clean), kinds) if kinds else (event, ())
 
 
 def edit_state(message, recorded):
@@ -615,6 +632,12 @@ class Pipeline:
         self.wake_now_ids = set()
         self._export_pending = False
         self.human = HumanQueueDelivery(config, store, self.notifiers, clock)
+        # P35: credential redaction before any text reaches the store or the router; the
+        # store applies the same settings to every body it writes.
+        self.redaction = redaction_settings(config)
+        self.credentials_redacted = 0
+        if hasattr(store, "redaction"):
+            store.redaction = self.redaction
         # P17: optional owner resolver (owner_resolver.enabled).
         self.owner_resolver = build_owner_resolver(config)
         self.owner_reply_closed = 0
@@ -688,6 +711,11 @@ class Pipeline:
             skipped = self.attention_notice_skipped + self.human.attention_dropped
             if skipped:
                 result["attention_notice_skipped"] = skipped
+            # P35: messages whose text was redacted, here or by the store's safety net.
+            stored = getattr(self.store, "credentials_redacted", 0)
+            redacted = self.credentials_redacted + (stored if type(stored) is int else 0)
+            if redacted:
+                result["credentials_redacted"] = redacted
             return result
 
     def _thread_key(self, message, lane):
@@ -886,9 +914,25 @@ class Pipeline:
             directory = self.directory
         return is_bot_message(event, self.config, directory)
 
+    def _redact(self, event):
+        """P35: (event, kinds) with credentials replaced in the event text."""
+        return redact_event(event, self.redaction)
+
+    def _note_redacted(self, recorded, kinds):
+        """P35: one INFO line per message whose text was redacted, without any value. A
+        duplicate delivery of a message already recorded writes nothing and logs nothing."""
+        if kinds and not recorded.duplicate:
+            self.credentials_redacted += 1
+            LOG.info("Redacted credentials id=%s kinds=%s", recorded.message_id or "-",
+                     ",".join(kinds))
+
     def _handle(self, event):
         event = dict(event, is_bot=self.is_bot(event))
+        # P35: the store, the router and the wake engine see only the redacted text
+        # (Slack mentions are never redacted, so attention is unchanged).
+        event, kinds = self._redact(event)
         recorded = self.store.record_event(event)
+        self._note_redacted(recorded, kinds)
         mid = recorded.message_id
         if recorded.duplicate:
             self.counters["duplicates"] += 1
@@ -1090,7 +1134,11 @@ class Pipeline:
         policy = followup_policy(self.config)
         if policy != "changed_after_ack":
             return EDIT_WAKE if policy == "always" else EDIT_IGNORE
-        if not edit_text_changed(getattr(recorded, "previous_body", None), event.get("text")):
+        # P35: a body stored before redaction existed is compared in its redacted form.
+        previous = getattr(recorded, "previous_body", None)
+        if isinstance(previous, str) and self.redaction.enabled:
+            previous = redact(previous, self.redaction.kinds)[0]
+        if not edit_text_changed(previous, event.get("text")):
             return EDIT_IGNORE
         if state == "human_pending":
             return EDIT_FIRST
@@ -1161,7 +1209,9 @@ class Pipeline:
 
     def record_context(self, event):
         with self.lock:
+            event, kinds = self._redact(event)  # P35: hydrated thread roots too
             result = self.store.record_event(event)
+            self._note_redacted(result, kinds)
             if result.created:
                 self.store.set_route(result.message_id, None, "context:root", state="done")
                 self.store.set_state(result.message_id, "done", note="context")

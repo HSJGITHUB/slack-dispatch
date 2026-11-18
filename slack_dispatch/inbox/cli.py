@@ -36,6 +36,9 @@ PROPOSAL_SECTIONS = (("channel_defaults_add", "channel"), ("channel_defaults_cha
 BINDING_SECTIONS = (("thread_bindings_add", False), ("thread_bindings_rebind", True))
 LIVE_PROPOSALS = ("open", "suggested", "confirmed")
 REPAIR_SINCE_DAYS = 30
+# P35 `repair redact`: default window in days and the clock (tests patch it).
+REDACT_DAYS = 30
+REDACT_CLOCK = time.time
 # P18 `deliveries`: default window in hours (0 = every row) and the clock (tests patch it).
 DELIVERY_HOURS = 48
 DELIVERY_CLOCK = time.time
@@ -160,6 +163,12 @@ def build_parser():
     target.add_argument("--apply", action="store_true")
     target.add_argument("--since-days", type=int, default=REPAIR_SINCE_DAYS)
     target.add_argument("--assume-human", action="store_true")
+    target.add_argument("--json", action="store_true")
+    # P35: replace credentials already stored in bodies (and raw payloads) in place.
+    target = repair.add_parser("redact")
+    options(target)
+    target.add_argument("--apply", action="store_true")
+    target.add_argument("--days", type=int, default=REDACT_DAYS)
     target.add_argument("--json", action="store_true")
     sub = commands.add_parser("sent")
     options(sub)
@@ -858,8 +867,107 @@ def repair_bot_flag(store, config, *, apply=False, since_days=REPAIR_SINCE_DAYS,
     return rows
 
 
+def _epoch(value):
+    """Epoch seconds of a Slack ts or an ISO stamp (naive = local time), else None."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return (moment if moment.tzinfo is not None else moment.astimezone()).timestamp()
+
+
+def _redact_payload(payload, kinds):
+    """(payload, Counter): a stored raw payload with every JSON string value redacted; a
+    payload that is not JSON is redacted as text."""
+    from slack_dispatch.ingest.redact import redact_counts, redact_json
+    try:
+        value = json.loads(payload)
+    except ValueError:
+        return redact_counts(payload, kinds)
+    clean, counts = redact_json(value, kinds)
+    return (json.dumps(clean, ensure_ascii=False) if counts else payload), counts
+
+
+def repair_redact(store, *, apply=False, days=REDACT_DAYS, kinds=None, now=None):
+    """`repair redact` (P35): credentials in stored message bodies (Slack ts within the
+    last `days` days) and stored `events_raw` payloads (received within the window; an
+    unreadable stamp counts as inside it). Returns a dict with `scanned`, `rows` (table,
+    id and kind -> match counts per changed row; never text), `counts` (kind -> rows and
+    matches) and `updated`. With `apply` each match is rewritten in place; a row whose
+    stored value changed since it was read is left alone (compare and set)."""
+    from slack_dispatch.ingest.redact import KINDS, redact_counts
+    now = REDACT_CLOCK() if now is None else now
+    floor = now - days * 86400
+    scanned, updated, rows = 0, 0, []
+    totals = {}
+    candidates = [("messages", row["id"], row["body"], row["ts"]) for row in store._rows(
+        "SELECT id, ts, body FROM messages WHERE body IS NOT NULL ORDER BY id")]
+    if store.has_table("events_raw"):
+        candidates += [("events_raw", row["event_id"], row["payload"], row["received_at"])
+                       for row in store._rows("SELECT event_id, received_at, payload FROM events_raw "
+                                              "WHERE payload IS NOT NULL ORDER BY event_id")]
+    for table, key, value, stamp in candidates:
+        moment = _epoch(stamp)
+        if not isinstance(value, str) or (moment is not None and moment < floor) or (
+                moment is None and table == "messages"):
+            continue
+        scanned += 1
+        clean, counts = (redact_counts(value, kinds) if table == "messages"
+                         else _redact_payload(value, kinds))
+        if not counts:
+            continue
+        found = {kind: counts[kind] for kind in KINDS if counts[kind]}
+        for kind, matches in found.items():
+            entry = totals.setdefault(kind, {"rows": 0, "matches": 0})
+            entry["rows"] += 1
+            entry["matches"] += matches
+        rows.append({"table": table, "id": key, "kinds": found})
+        if apply:
+            column, ident = ("body", "id") if table == "messages" else ("payload", "event_id")
+            with store._transaction() as db:
+                updated += db.execute(f"UPDATE {table} SET {column}=? WHERE {ident}=? AND {column}=?",
+                                      (clean, key, value)).rowcount
+    counts = {kind: totals[kind] for kind in KINDS if kind in totals}
+    return {"scanned": scanned, "rows": rows, "counts": counts, "updated": updated}
+
+
+def repair_redact_command(args, store, stdout):
+    """CLI `repair redact [--apply] [--days N] [--json]` (P35). Prints ids and counts only,
+    never a value or message text. The kinds come from `redaction.kinds` when a config is
+    given (also with `redaction.enabled: false`: the command is an explicit request), else
+    every kind."""
+    if args.days <= 0:
+        raise BadInput("Invalid --days")
+    config = optional_config(args)
+    kinds = config.redaction.kinds if config is not None else None
+    result = repair_redact(store, apply=args.apply, days=args.days, kinds=kinds)
+    mode = "apply" if args.apply else "dry-run"
+    if args.json:
+        print(json.dumps(dict(result, mode=mode, days=args.days), ensure_ascii=False), file=stdout)
+        return 0
+    print(f"repair redact mode={mode} days={args.days} scanned={result['scanned']} "
+          f"rows={len(result['rows'])}", file=stdout)
+    for row in result["rows"]:
+        prefix = "" if row["table"] == "messages" else row["table"] + ":"
+        print(prefix + str(row["id"]), ",".join(row["kinds"]), file=stdout)
+    for kind, entry in result["counts"].items():
+        print(f"kind={kind} rows={entry['rows']} matches={entry['matches']}", file=stdout)
+    if args.apply:
+        print(f"updated={result['updated']}", file=stdout)
+    else:
+        print("dry run: nothing changed; rerun with --apply", file=stdout)
+    return 0
+
+
 def repair_command(args, root, store, stdout, stderr, *, delivery=None, now=None):
-    """CLI `repair bot-flag [--apply] [--since-days N] [--assume-human] [--json]`."""
+    """CLI `repair bot-flag [--apply] [--since-days N] [--assume-human] [--json]` and, since
+    P35, `repair redact [--apply] [--days N] [--json]`."""
+    if args.repair_command == "redact":
+        return repair_redact_command(args, store, stdout)
     if args.since_days <= 0:
         raise BadInput("Invalid --since-days")
     config = optional_config(args)

@@ -465,6 +465,7 @@ def run_rehydrate(config, days, *, client=None, clock=None, sleep=None, stdout=N
         print("Ledger not found", file=sys.stderr)
         return 2
     store = LedgerStore(config.ledger.path, store_body=True)
+    store.redaction = config.redaction  # P35: honour redaction.enabled and redaction.kinds
     source = SlackReconcileSource(replace(entry, store_body=True), lambda event: None,
                                   entry.env_file, entry.user_token_key, store, sleep=sleep,
                                   clock=clock, excluded_channels=config.excluded_channels)

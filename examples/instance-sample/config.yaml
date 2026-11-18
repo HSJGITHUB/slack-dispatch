@@ -105,6 +105,18 @@ notify_adapters:
 ledger:
   path: state/ledger.sqlite3
   store_body: false
+# Optional credential redaction (P35). With enabled true (default) credentials in message
+# text are replaced with [redacted:<kind>] before anything reaches the ledger; the original
+# stays in Slack. kinds limits the kinds (default all): private_key, aws_access_key_id,
+# slack_token, slack_webhook, github_token, google_api_key, stripe_key, api_key,
+# bearer_token, jwt, basic_auth, url_password, aws_secret_access_key, labelled_secret.
+# Only known shapes are caught (see docs/INGEST.md, Limits); rotate a leaked credential.
+# `slack-dispatch repair redact [--apply] [--days N]` cleans stored bodies.
+redaction:
+  enabled: true
+  kinds: [private_key, aws_access_key_id, slack_token, slack_webhook, github_token,
+          google_api_key, stripe_key, api_key, bearer_token, jwt, basic_auth, url_password,
+          aws_secret_access_key, labelled_secret]
 sources:
   - kind: slack_socket
     enabled: true

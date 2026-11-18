@@ -19,6 +19,17 @@ steps to reproduce and the impact you expect.
   real tokens, channel ids or names into the repository.
 - With `ledger.store_body: true`, message bodies are stored in the local SQLite ledger.
   Protect the ledger, state, inbox and log directories with file system permissions.
+- Credentials pasted into Slack (cloud access keys, Slack tokens and webhooks, GitHub,
+  Google, Stripe and provider keys, bearer, JWT and basic auth credentials, private keys,
+  URL passwords and labelled passwords) are replaced with
+  `[redacted:<kind>]` before message text reaches the ledger (`redaction`, on by default).
+  The original stays in Slack. Logs name only the message id and the kinds. Bodies stored
+  before this existed can be cleaned with `slack-dispatch repair redact --apply`.
+  Redaction is pattern based: a credential in an unusual form, without a label, under 8
+  characters or split across messages can still get through (see the Limits list in
+  `docs/INGEST.md`), so the ledger keeps needing the protection above. `repair redact`
+  does not clean card files, backups or SQLite free pages (run `VACUUM` after it). After
+  a leak, rotate the credential: the original stays in Slack.
 - Slack message text is untrusted data. It is never turned into a command: wake
   messages carry ledger ids, the console renders bodies as plain text, and an agent
   session must treat a body it reads as data, not as instructions.

@@ -9,7 +9,7 @@ from .schema import (
     LedgerConfig, Membership, NotifyAdapter, OwnerResolver, OwnerSignals, PersonChannelRule, ScopeLearning, Service,
     SourceConfig, Timers, UserDirectory, WakePolicy,
 )
-from .schema import DeliveryLog, FOLLOWUP_POLICIES
+from .schema import DeliveryLog, FOLLOWUP_POLICIES, REDACTION_KINDS, Redaction
 
 
 class ConfigError(ValueError):
@@ -311,6 +311,7 @@ def parse_config(raw):
     directory = user_directory_section(data.get("user_directory", {}))
     resolver = owner_resolver_section(data.get("owner_resolver", {}))
     delivery_log = delivery_log_section(data.get("delivery_log", {}))
+    redaction = redaction_section(data.get("redaction", {}))
     channel_defaults, dm_defaults = defaults("channel_defaults"), defaults("dm_defaults")
     return Config(tuple(lanes), channel_defaults, dm_defaults,
                   tuple(rules), tags, excluded, timers, wake, tuple(adapters), tuple(sources),
@@ -321,7 +322,25 @@ def parse_config(raw):
                   console=console, decisions=decisions, scope_learning=learning,
                   membership=membership, user_directory=directory, owner_resolver=resolver,
                   delivery_log=delivery_log, mention_only_channels=tuple(mention_only),
-                  mention_only_owner_channels=tuple(mention_only_owner))
+                  mention_only_owner_channels=tuple(mention_only_owner),
+                  redaction=redaction)
+
+
+def redaction_section(value):
+    """Optional `redaction` map (P35): enabled (boolean, default true) and kinds (a
+    non-empty list of credential kinds, default all). Other keys are rejected."""
+    data = mapping({} if value is None else value, "redaction")
+    unknown = sorted(str(key) for key in set(data) - {"enabled", "kinds"})
+    if unknown:
+        raise ConfigError("redaction keys must be enabled or kinds")
+    kinds = data.get("kinds", list(REDACTION_KINDS))
+    if not isinstance(kinds, list) or not kinds:
+        raise ConfigError("redaction.kinds must be a non-empty list")
+    for kind in kinds:
+        if not isinstance(kind, str) or kind not in REDACTION_KINDS:
+            raise ConfigError("redaction.kinds entries must be one of: " + ", ".join(REDACTION_KINDS))
+    return Redaction(enabled=boolean(data.get("enabled", Redaction.enabled), "redaction.enabled"),
+                     kinds=tuple(dict.fromkeys(kinds)))
 
 
 def delivery_log_section(value):

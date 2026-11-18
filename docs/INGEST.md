@@ -286,3 +286,122 @@ The service builds the directory when enabled and a reconcile source exists. Hea
 counters, present with the directory: `directory_lookups` (users.info calls),
 `directory_failures`, `app_posts_human` (new message events with `bot_id` or `app_id`
 judged human) and `bot_posts` (new message events judged bot).
+
+## P35 credential redaction
+
+People paste credentials into chat. The dispatcher must never be the place where such a
+value persists, so credentials are replaced before message text reaches the ledger. The
+original stays in Slack, where the operator can read it.
+
+`slack_dispatch.ingest.redact.redact(text, kinds=None)` returns `(text, kinds)`: the text
+with each match replaced by `[redacted:<kind>]` and the distinct kinds replaced. It is
+pure (no I/O, no logging), idempotent and linear in the input length (every quantifier is
+bounded or followed by a class it cannot overlap; a 1 MB input finishes in well under a
+second).
+High-confidence patterns only:
+
+| kind | what is replaced |
+| --- | --- |
+| `private_key` | a PEM block from its `BEGIN ... PRIVATE KEY` line to the next `END ... PRIVATE KEY` line, or to the end of the text without one |
+| `aws_access_key_id` | `AKIA`, `ASIA`, `AIDA`, `AROA` or `AGPA` and 16 upper-case letters or digits, not inside a longer word |
+| `slack_token` | `xoxa-`, `xoxb-`, `xoxc-`, `xoxe-`, `xoxp-`, `xoxr-`, `xoxs-` or `xapp-<digit>-` and at least 10 token characters |
+| `slack_webhook` | the path after `hooks.slack.com/services/` (at least 10 characters); the host stays |
+| `github_token` | `ghp_`, `gho_`, `ghs_`, `ghu_` or `github_pat_` and at least 20 token characters |
+| `google_api_key` | `AIza` and exactly 35 token characters, as a whole token |
+| `stripe_key` | `sk_live_`, `rk_live_` or `sk_test_` and at least 16 letters or digits |
+| `api_key` | `sk-` and at least 20 token characters, not inside a longer word |
+| `bearer_token` | the token after `Bearer` in any case (`bearer`, `BEARER`): at least 16 token characters, of which at least one is a digit (so prose such as "Bearer responsibilities" stays); the word stays |
+| `jwt` | three base64url segments separated by dots, the first two starting with `eyJ` |
+| `basic_auth` | the credentials after `Authorization: Basic` (any case, at least 16 base64 characters); the header words stay |
+| `url_password` | the password of `scheme://user:password@host`; the rest of the URL stays |
+| `aws_secret_access_key` | a 40 character token of `[A-Za-z0-9/+=]`, only when the message also holds an AWS access key id or the word `secret` comes earlier on the same line |
+| `labelled_secret` | the value after a label and `:` or `=` on the same line, when the value has at least 8 characters and no spaces (see below) |
+
+Labels for `labelled_secret` are `password`, `passwd`, `passphrase`, `secret`,
+`secret key`, `api key`, `access key`, `private key` and `token` (spaces, `_` or `-`
+inside the label), and the Korean labels `비밀번호`, `비번`, `암호` and `패스워드`. A label
+matches as the tail of an identifier: after a character that is not a letter
+(`AWS_SESSION_TOKEN`, `x-api-key`, `DB_PASSWORD`), at a camelCase boundary
+(`sessionToken`, `refreshToken`, `clientSecret`, `myApiKey`) or in upper case after
+upper-case letters (`GITHUBTOKEN`), in any case otherwise (`SECRET_KEY`, `Password`). Slack
+or Markdown emphasis and quotes around the label or the value are allowed
+(`*password:* value`, `*password*: value`, `_token_ = value`, `` `password`: `value` ``,
+`"password": "value"`); a wrapped value keeps its wrapper and only the inside is replaced.
+Any horizontal space, a non-breaking space included, may follow the separator. A value
+never starts at `<` and stops before `<@`, `<#`, `<!` and `<http`, so a Slack mention,
+channel link, broadcast or link next to a label is never part of a value. A value that is
+exactly one placeholder of a known kind is left alone (idempotence); a placeholder followed
+by more characters is redacted as a value. The URL password rule skips the same way.
+
+What redaction never changes: Slack mentions (`<@U...>`, with or without a label),
+channel links, broadcasts and Slack links are never replaced or cut by any rule, so
+attention (`owner_mention`) is unchanged, with one exception: text inside a private key
+block (between its BEGIN and END lines, or after a BEGIN line without an END line, to the
+end of the message) is replaced as a whole, mentions included. A mention right after a
+label is kept (`token: <@U...>` stays). Message ids, timestamps, URLs without a password or webhook
+path, commit hashes and prose without a label and separator are not changed. Text that
+does match is replaced, even when it is an ordinary word: `password: required` becomes
+`password: [redacted:labelled_secret]`.
+
+Limits (redaction lowers the risk, it does not remove it):
+
+- Only known shapes are caught. A secret with no label and no known prefix, and an
+  unlabelled 40 character secret without an AWS access key id in the same message, is
+  stored as received.
+- An AWS access key id and its secret sent in separate messages are not paired: the id is
+  redacted, the lone unlabelled secret is not.
+- Values under 8 characters and phrasing without `:` or `=` ("the password is X",
+  `비밀번호는 X`) are not caught; neither is a value on the line after its label.
+- An edit that changes only a credential compares equal after redaction, so it does not
+  wake the lane again (with redaction off it would).
+- `repair redact` rewrites ledger rows only. Card files already written (`cards/*.json`),
+  backups, the SQLite WAL and free pages keep earlier text; run `VACUUM` on the ledger
+  (with the service stopped) after a repair, and replace or delete old backups.
+- The original message stays in Slack. After a leak, rotating the credential is the real
+  remedy; redaction only keeps the dispatcher from becoming another copy.
+
+Configuration (optional section, both keys optional):
+
+```yaml
+redaction:
+  enabled: true        # default true
+  kinds: [private_key, slack_token]  # default every kind; a non-empty list of the kinds above
+```
+
+The loader rejects a non-boolean `enabled`, a `kinds` value that is not a non-empty list,
+an unknown kind and any other key, with a `ConfigError` naming the key.
+
+Where it applies when enabled:
+
+- The pipeline redacts the event text first (`Pipeline._handle` for new messages and edits,
+  `Pipeline.record_context` for hydrated thread roots), so the ledger row, the router, the
+  wake engine and the edit comparison all see the redacted text. Mentions are never part of
+  a replaced value, so `owner_mention` and `always_human` attention are unchanged. A body stored before P35 is
+  compared with an edit in its redacted form, so an unchanged edit does not wake a lane.
+- `LedgerStore` applies the same settings to every body it writes (`record_event` for new
+  messages and edits, `set_body` for `--rehydrate-bodies`), as a safety net for callers
+  that did not redact first. The pipeline and `--rehydrate-bodies` copy the configured
+  settings to the store; a store that was not given settings (`LedgerStore(...)` alone)
+  redacts every kind.
+- `events_raw` has no writer; `repair redact` still covers rows another tool may have
+  written, redacting every string value inside a stored JSON payload.
+
+With `enabled: false` the text is stored as received. Nothing redacted is logged: each
+message whose text was redacted logs one INFO line `Redacted credentials id=<message id>
+kinds=<comma list>` (a duplicate delivery of a recorded message logs nothing), and the
+heartbeat counter `credentials_redacted` (messages) appears once nonzero. Inbox records,
+wakes, notices and the console are otherwise unchanged; the console and the CLI show the
+redacted body.
+
+### repair redact
+
+`slack-dispatch repair redact [--apply] [--days N] [--json]` (default 30 days) scans the
+stored bodies of messages whose Slack ts lies within the last N days and the stored
+`events_raw` payloads received within that window (a payload without a readable stamp is
+scanned too). It prints the scanned count, one line per affected row (`<id> <kinds>`,
+`events_raw:<event id> <kinds>` for raw payloads) and `kind=<kind> rows=<n> matches=<n>`
+per kind; it never prints a value or message text. The default is a dry run; `--apply`
+rewrites the matches in place (compare and set, so a row changed meanwhile is left alone)
+and prints `updated=<n>`. With `--config` the kinds come from `redaction.kinds` (also with
+`enabled: false`, since the command is an explicit request); without a config every kind
+is used. `--days` must be a positive integer.

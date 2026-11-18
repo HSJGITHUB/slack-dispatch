@@ -781,3 +781,40 @@ All additive; no ledger schema change and no new store method.
   state `done`, route reason and note `owner_post`, and gets no inbox record, wake or
   notice. `Pipeline.owner_threads_bound` (int) appears in `snapshot()` (and so the
   heartbeat) once nonzero.
+
+## P35 credential redaction
+
+All additive; no ledger schema change.
+
+- Config: optional `redaction` map with `enabled` (bool, default true) and `kinds` (a
+  non-empty list from `REDACTION_KINDS`, duplicates dropped, default all). Other keys,
+  a non-list or empty `kinds`, an unknown kind and a non-boolean `enabled` raise
+  `ConfigError` naming the key. `config.schema` adds `REDACTION_KINDS` and
+  `Redaction(enabled: bool = True, kinds: tuple[str, ...] = REDACTION_KINDS)`;
+  `Config.redaction` defaults to `Redaction()`. `config.loader` adds
+  `redaction_section(value)`.
+- `REDACTION_KINDS` (fix1, 14 kinds in replacement order): `private_key`,
+  `aws_access_key_id`, `slack_token`, `slack_webhook`, `github_token`, `google_api_key`,
+  `stripe_key`, `api_key`, `bearer_token`, `jwt`, `basic_auth`, `url_password`,
+  `aws_secret_access_key`, `labelled_secret`. Labels, wrappers and limits: INGEST.md P35.
+- `slack_dispatch.ingest.redact` (pure): `KINDS`, `MARK = "[redacted:"`,
+  `placeholder(kind)`, `is_marker(value)` (exactly one placeholder of a known kind),
+  `redact(text, kinds=None) -> (text, tuple[str, ...])` (distinct
+  kinds in `KINDS` order), `redact_counts(text, kinds=None) -> (text, Counter)` and
+  `redact_json(value, kinds=None) -> (value, Counter)` (every string value of a JSON
+  value; keys unchanged). Non-string input is returned unchanged. `redact` is idempotent.
+- `LedgerStore`: attributes `redaction` (default `Redaction()`) and
+  `credentials_redacted` (int); `redact_text(text) -> (text, kinds)`. `record_event`
+  (new message, `message_changed`) and `set_body` write the redacted body when enabled and
+  log `Redacted credentials id=<id> kinds=<list>` once per row they wrote with a match.
+- Pipeline: `redaction_settings(config)` and `redact_event(event, settings) -> (event,
+  kinds)`. `Pipeline.__init__` sets `store.redaction` from the config when the store has
+  the attribute. `_handle` and `record_context` redact the event text before
+  `record_event`; the INFO line is written unless the ledger reported a duplicate.
+  `Pipeline.credentials_redacted` (int); `snapshot()["credentials_redacted"]` (pipeline
+  plus store count) appears once nonzero. `_edit_verdict` compares the redacted form of
+  `RecordResult.previous_body`.
+- Inbox CLI: `repair redact [--apply] [--days N] [--json]`; `inbox.cli.repair_redact(store,
+  *, apply=False, days=30, kinds=None, now=None)` returns `scanned`, `rows` (`table`, `id`,
+  `kinds` as kind -> match count), `counts` (kind -> `rows`, `matches`) and `updated`.
+  JSON output adds `mode` and `days`. Exit 0, or 2 for an invalid `--days`.

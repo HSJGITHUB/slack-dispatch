@@ -6,6 +6,34 @@ This project follows Semantic Versioning. Versions below 1.0 may change interfac
 
 ## [Unreleased]
 
+### P35 credential redaction
+- Credentials in message text are replaced with `[redacted:<kind>]` before anything reaches
+  the ledger: PEM private keys, AWS access key ids (and a 40 character secret next to one
+  or after the word `secret`), Slack, GitHub and `sk-` provider tokens, bearer tokens, URL
+  passwords and values labelled `password`, `secret`, `api key`, `access key`, `token` or
+  `비밀번호`. New `slack_dispatch.ingest.redact` (pure, linear time, idempotent). Live
+  case: a cloud access key pair sent in a direct message was stored in plain text.
+- Covered writes: new messages, edits and hydrated thread roots (the pipeline redacts the
+  event text, so routing and the edit comparison see the redacted text; mentions survive)
+  and `--rehydrate-bodies` (`LedgerStore.record_event` and `set_body` redact as a safety
+  net). `events_raw` still has no writer.
+- Config `redaction.enabled` (default true) and `redaction.kinds` (default all). One INFO
+  line `Redacted credentials id=<id> kinds=<list>` per message, never a value; heartbeat
+  counter `credentials_redacted` once nonzero.
+- Inbox CLI `repair redact [--apply] [--days N] [--json]` reports per-kind counts of stored
+  bodies and raw payloads (dry run by default) and rewrites them in place with `--apply`.
+- `--rehydrate-bodies` uses the configured `redaction` settings.
+- Fix pass after review: a labelled value never starts at `<` and stops before `<@`, `<#`,
+  `<!` and `<http`, so a mention after a label is kept and still raises `owner_mention`;
+  labels match as identifier tails (`sessionToken`, `clientSecret`, `AWS_SESSION_TOKEN`,
+  `SECRET_KEY`, `passphrase`, `private_key`) and the Korean labels `비번`, `암호`,
+  `패스워드`; emphasis, backticks and quotes around a label or value and Unicode spaces
+  after the separator are handled; only an exact placeholder is skipped; `Bearer` matches
+  in any case (a digit is still required); new kinds `slack_webhook`, `google_api_key`,
+  `stripe_key`, `jwt` and `basic_auth`, and `xoxc-`/`xoxe-` Slack tokens. INGEST.md lists
+  the limits (unlabelled secrets, split messages, short values, credential-only edits,
+  what `repair redact` cannot clean, rotation).
+
 ### P34 license
 - The project license is AGPL-3.0-only (`LICENSE`, `COPYRIGHT`, package metadata, README License section, `CONTRIBUTING.md`); no runtime change.
 

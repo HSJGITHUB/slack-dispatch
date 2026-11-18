@@ -4,9 +4,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
+import logging
 from pathlib import Path
 import sqlite3
 import threading
+
+from slack_dispatch.config.schema import Redaction
+from slack_dispatch.ingest.redact import redact
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,10 @@ class LedgerStore:
     def __init__(self, path, *, store_body=False):
         self.path = Path(path)
         self.store_body = store_body
+        # P35: credential redaction applied to every body this store writes (safety net
+        # for callers that did not redact first). The pipeline sets it from the config.
+        self.redaction = Redaction()
+        self.credentials_redacted = 0
         self._db = None
         self._lock = threading.RLock()
 
@@ -208,6 +218,20 @@ class LedgerStore:
                 self._db.close()
                 self._db = None
 
+    def redact_text(self, text):
+        """(text, kinds): `text` with credentials replaced under `self.redaction` (P35).
+        Non-string text and a disabled redaction return the text unchanged."""
+        settings = self.redaction
+        if not isinstance(text, str) or settings is None or not settings.enabled:
+            return text, ()
+        return redact(text, settings.kinds)
+
+    def _note_redacted(self, message_id, kinds):
+        """One INFO line per written message whose text this store redacted; never a value."""
+        if kinds:
+            self.credentials_redacted += 1
+            LOG.info("Redacted credentials id=%s kinds=%s", message_id, ",".join(kinds))
+
     def _rows(self, query, params=()):
         with self._lock:
             if self._db is None:
@@ -225,6 +249,10 @@ class LedgerStore:
         received = event["received_at"]
         created, duplicate = False, False
         previous_body = previous_state = previous_lane = None
+        # P35: the body this event may write, redacted before the transaction.
+        body, kinds = (self.redact_text(event.get("text")) if self.store_body and "text" in event
+                       else (event.get("text"), ()))
+        wrote_body = False
         with self._transaction() as db:
             if event_id:
                 seen = db.execute("SELECT * FROM events_seen WHERE event_id=?", (event_id,)).fetchone()
@@ -246,7 +274,8 @@ class LedgerStore:
                     db.execute("UPDATE messages SET edited_at=?, followup=1, has_files=?, is_bot=? WHERE id=?",
                                (received, bool(event.get("has_files")), event_is_bot(event), mid))
                     if self.store_body and "text" in event:
-                        db.execute("UPDATE messages SET body=? WHERE id=?", (event["text"], mid))
+                        wrote_body = db.execute("UPDATE messages SET body=? WHERE id=?",
+                                                (body, mid)).rowcount > 0
                 elif subtype == "message_deleted":
                     # P12: deleted_at marks the row; an open row is closed. Text is never kept.
                     db.execute("UPDATE messages SET body=NULL, note='message_deleted', "
@@ -264,10 +293,11 @@ class LedgerStore:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)""",
                                (mid, source, channel, ts, event.get("thread_ts"), event.get("user"),
                                 bool(event.get("is_thread_reply")), received,
-                                event.get("text") if self.store_body else None,
+                                body if self.store_body else None,
                                 event_id, event.get("channel_type"), bool(event.get("has_files")),
                                 event_is_bot(event), event.get("origin")))
                     created = True
+                    wrote_body = self.store_body and isinstance(body, str)
             elif kind in ("reaction_added", "reaction_removed") and mid:
                 user, reaction = event.get("user"), event.get("reaction")
                 if user and reaction:
@@ -286,6 +316,8 @@ class LedgerStore:
                 db.execute("INSERT INTO events_seen (event_id, received_at, kind, message_id, source, channel) "
                            "VALUES (?, ?, ?, ?, ?, ?)",
                            (event_id, received, kind, mid, source, channel))
+        if wrote_body:
+            self._note_redacted(mid, kinds)
         return RecordResult(mid, created, duplicate, kind, previous_body, previous_state,
                             previous_lane)
 
@@ -348,10 +380,13 @@ class LedgerStore:
         """
         if not self.store_body:
             return False
+        body, kinds = self.redact_text(body)  # P35
         with self._transaction() as db:
             changed = db.execute("UPDATE messages SET body=? WHERE id=? AND body IS NULL "
                                  "AND (note IS NULL OR note != 'message_deleted')",
                                  (body, message_id)).rowcount
+        if changed > 0:
+            self._note_redacted(message_id, kinds)
         return changed > 0
 
     def set_suggestion(self, message_id, lane, reason, classifier_version):
