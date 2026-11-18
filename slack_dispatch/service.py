@@ -313,7 +313,7 @@ def run(config, *, once=False, dry_run=False, clock=None, sleep=None, config_nam
             sweep.lock = pipeline.lock
             directory = card_dir(config)
             if directory and not once and not dry_run:
-                # P12: Jarvis card decisions; off without a dispatch_card dir, in --once and --dry-run.
+                # P12: card bot decisions; off without a dispatch_card dir, in --once and --dry-run.
                 decisions = DecisionConsumer(config, store, directory)
             sources = build_service_sources(config, pipeline.handle_event, store, once=once)
             monitor = CoverageMonitor(store, pipeline, sources, clock, config.service.gap_alert_seconds)

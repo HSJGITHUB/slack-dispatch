@@ -2,9 +2,9 @@
 
 Socket Mode is primary intake. Reconciliation is a startup catch-up pass and a
 periodic history check for channels already known to the ledger. Construction
-and `build_sources` perform no network or credential reads. The service wiring
-is outside this packet; callers open and migrate the store, upsert configured
-lanes, build sources, and start/stop them explicitly.
+and `build_sources` perform no network or credential reads. The resident service
+(SERVICE.md) opens and migrates the store, registers the configured lanes, builds
+the sources and starts and stops them; any other caller does the same explicitly.
 
 ## Configuration and body policy
 
@@ -31,8 +31,9 @@ The caller must also avoid logging normalized events containing opt-in text.
 
 Open enables foreign keys and requests WAL (SQLite in-memory databases use their
 native memory journal). Migrations and all production mutations use
-`BEGIN IMMEDIATE` under a per-store lock. Version 2 includes the scaffold and
-additive columns/tables; migration upgrades version 1 and an unversioned scaffold.
+`BEGIN IMMEDIATE` under a per-store lock. Schema version 2 holds the base tables
+plus the additive columns and tables; migration upgrades a version 1 ledger and a
+ledger without a version row (one created from the original base schema).
 Repeated migrations are idempotent. Unknown schema versions are rejected.
 The database parent directory must already exist; deployment owns its creation.
 
@@ -104,7 +105,7 @@ token. Tests mock credential loading and use only synthetic values in memory.
 Before deployment, follow `tools/probe/README.md` and run the probe with an
 operator-provided credential file and a protected output directory. Confirm
 visibility for expected event types and channels; an empty log is not evidence
-of success. This packet does not run the live probe or access credentials.
+of success. The offline test suite never runs the live probe or reads credentials.
 
 From the repository root, run `python -m unittest discover -s tests -v`.
 Set `PYTHONDONTWRITEBYTECODE=1` to avoid bytecode files. If installed, run

@@ -102,7 +102,7 @@ def build_notifiers(config, store) -> list[Notifier]:
         elif adapter.kind in ("file_drop", "assistant_dm"):
             result.append(FileDropNotifier(adapter.path, adapter.template))
         elif adapter.kind == "dispatch_card":
-            # P12: Jarvis card requests for immediate human-queue notices.
+            # P12: card bot requests for immediate human-queue notices.
             result.append(DispatchCardNotifier(adapter.path, config, store,
                                                only_immediate=adapter.only_immediate,
                                                workspace_domain=adapter.workspace_domain))

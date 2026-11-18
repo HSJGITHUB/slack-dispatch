@@ -67,7 +67,7 @@ class ResolveTargetTests(SessionDirTest):
     def test_value_forms(self):
         for value in (ID_A, ID_A.upper(), "0000aaaa", "0000aaaa-0000"):
             self.assertTrue(is_session_id(value), value)
-        for value in ("dummy-alpha", "0000aaa", "hstest-f4", "0000aaaz", "", None):
+        for value in ("dummy-alpha", "0000aaa", "sess-f4", "0000aaaz", "", None):
             self.assertFalse(is_session_id(value), value)
 
     def test_exact_uuid_and_prefix(self):

@@ -1,6 +1,6 @@
 # slack-dispatch phase 1 contracts (v0.1 target)
 
-These contracts let three packets (ingest+ledger, router+queue, inbox+notify) be built in parallel against the v0.0.1 scaffold. Packets implement or consume exactly these shapes. Additive changes only; record any deviation in `CONTRACT_NOTES.md` inside the packet.
+These are the interfaces between the components: sections 1 to 7 define the normalized event, message id, ledger API, router, inbox record, notifier and configuration, and the later sections, named by change number (see CHANGELOG.md), list the additive contracts each change introduced. Components implement or consume exactly these shapes, and changes stay additive.
 
 ## 1. Normalized event (Source -> service -> ledger)
 
@@ -54,7 +54,7 @@ list_reactions(message_id: str) -> list[dict]
 
 `record_event` behaviour: message events insert (state `new`) or update; reaction events insert into `reactions` and return the referenced message id (created=False); file_shared with a message ts marks `has_files=1` on that message; channel_created and member_joined_channel are stored in `events_seen` only (kind="channel_meta"). Any event whose event_id was already seen returns duplicate=True with no change.
 
-Schema additions owned by the ingest+ledger packet (additive to the scaffold `schema.sql`): `schema_version(version INTEGER)`, `events_seen(event_id PK, received_at, kind, message_id)`, `reactions(message_id, user, reaction, added_at, removed_at)`, columns `messages.event_id`, `messages.channel_type`, `messages.has_files`, `messages.edited_at`, `messages.note`.
+Schema additions to the original base `schema.sql`: `schema_version(version INTEGER)`, `events_seen(event_id PK, received_at, kind, message_id)`, `reactions(message_id, user, reaction, added_at, removed_at)`, columns `messages.event_id`, `messages.channel_type`, `messages.has_files`, `messages.edited_at`, `messages.note`.
 
 Other packets must not edit `schema.sql` or `store.py`; their tests use an in-memory fake implementing the method names above.
 
@@ -229,7 +229,7 @@ All additive; the schema version stays 2.
 - Console: page `/proposals`, `GET /api/proposals`, `POST /api/proposals/actions`,
   `GET /api/proposals/export`.
 
-### Card request `dispatch_card/1` (dispatcher writes, Jarvis reads)
+### Card request `dispatch_card/1` (dispatcher writes, card bot reads)
 
 `<dir>/cards/<message_id_safe>.json`, `message_id_safe = message_id` with `:` and `.`
 replaced by `_`, written as `<dir>/cards/.tmp/<name>.part` and renamed. A card is
@@ -252,14 +252,14 @@ that FYI notice is queued only when the attention flag is in
 - `title`: `[slack-dispatch] <attention with spaces, or "human queue"> <console channel
   name or channel id>`, at most 120 characters.
 - `body`: the first 1500 characters of the stored body, else the ids-only notice
-  summary. dispatch_card/1 has no `console_url` key and Jarvis rejects unknown keys,
+  summary. dispatch_card/1 has no `console_url` key and the card bot rejects unknown keys,
   so with `console.base_url` the last body line is `Open: <base_url>/#msg=<id>` and the
   stored body is cut to keep the total at 1500.
 - `lanes`: 1 to 5 configured lane ids without `human_queue` and without the direct lane
   (`console.direct_lane`, which the fixed `direct` button already covers; when no
   configured lane is the direct lane nothing else is left out); the classifier
   suggestion first, then the channel or DM default of the channel, then the thread
-  binding, then the rest alphabetically. Ids Jarvis does not accept (`direct`,
+  binding, then the rest alphabetically. Ids the card bot does not accept (`direct`,
   `exclude`, or not matching `[a-z0-9][a-z0-9_-]{0,29}`) are left out; with none left no
   card is written.
 - `suggested_lane`: the classifier suggestion when it is in `lanes`, else null.
@@ -267,7 +267,7 @@ that FYI notice is queued only when the attention flag is in
   `https://<workspace_domain>.slack.com/archives/<channel>/p<ts without the dot>` or
   null. `created_at`: local ISO time with offset.
 
-### Decision `dispatch_decision/1` (Jarvis writes, dispatcher reads)
+### Decision `dispatch_decision/1` (card bot writes, dispatcher reads)
 
 `<dir>/decisions/<message_id_safe>.json` with exactly `schema`, `message_id`, `lane`
 (a lane id, `direct` or `exclude`), `decided_by`, `decided_at`, `card_ts` and `hmac` =

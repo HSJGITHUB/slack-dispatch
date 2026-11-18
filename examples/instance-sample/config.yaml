@@ -82,7 +82,7 @@ notify_adapters:
         IDs: {ids}
         Read thread context: {cli} inbox {lane} --thread
         Reroute lane IDs: {lanes}
-        Your session's own records (registry, handoff) stay as they are.
+        Your session's own records stay as they are.
     dry_run: true
     timeout: 60
   - kind: file_drop
@@ -94,7 +94,7 @@ notify_adapters:
 #    purpose: human_queue
 #    command_template: [dummy-session-cli, --target, "{target}", --message, "{message}"]
 #    template: {target: dummy-operator-session}
-# A dispatch_card adapter (P12) writes Jarvis card requests for immediate human-queue
+# A dispatch_card adapter (P12) writes card bot requests for immediate human-queue
 # notices (owner mentions, always_human) to <dir>/cards/; digests never produce cards.
 # workspace_domain builds message permalinks; omit it to send cards without one.
 #  - kind: dispatch_card
@@ -173,7 +173,7 @@ owner_signals:
 # per-channel counts. direct_lane names the lane behind the Direct button; when set
 # it must be a configured lane. channels maps channel ids to console display names.
 # ui_language picks the console page language: en (default) or ko.
-# ui_language: 콘솔 화면 언어. 운영 인스턴스는 ko로 둔다 (버튼: 배정, 내가 처리, 끝, 제외).
+# With ko every page string, including the decision buttons, is shown in Korean.
 console:
   host: 127.0.0.1
   port: 8811
@@ -195,7 +195,7 @@ console:
     C0000000001: dummy-support
     C0000000002: dummy-general
 # Optional card decision consumer (P12). dir defaults to the first dispatch_card adapter
-# dir; without either the consumer is off. hmac_key_file is the key file the Jarvis side
+# dir; without either the consumer is off. hmac_key_file is the key file the card bot side
 # creates (one line DISPATCH_HMAC_KEY=<64 hex>); it lives outside the repository and is
 # never logged. Without a readable key, decision files stay where they are.
 decisions:
@@ -244,7 +244,7 @@ owner_resolver:
   registry_path: dummy/registry.json
   harvest_path: null
   refresh_seconds: 300
-  closed_statuses: [closed, answered, answered_action_ours, sent_closed_no_action_ours, delivered]
+  closed_statuses: [closed, answered, done]
   close_queue_on_owner_reply: true
   activity_days: 60
 # Optional delivery log (P18). Every attempt to wake a lane session or to reach the

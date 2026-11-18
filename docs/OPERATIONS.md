@@ -1,17 +1,21 @@
 # Operations
 
-## Integration status
+## Service
 
-This package supplies independent runtime and deployment building blocks.
-The current slack_dispatch.service is a scaffold raising NotImplementedError.
-Registering its task does not make it operational. Service integration remains
-a separate change. No production service or live scheduler registration is claimed.
+`slack_dispatch.service` is the resident service; `python -m slack_dispatch` and the
+`slack-dispatch-service` script run the same entry point. It composes intake, the
+ledger, the router, lane inboxes, notification adapters, timers and the card decision
+consumer. [SERVICE.md](SERVICE.md) describes its loop, configuration, control flags and
+exit codes, and [CONSOLE.md](CONSOLE.md) describes the operator console. This document
+covers the runtime primitives the service uses and the Windows deployment scripts.
 
-The integrated service must hold SingleInstanceLock(state / "service.lock")
-throughout its lifetime, configure logging, and call HeartbeatWriter.write()
-on loop iterations. On ControlFlags.should_stop(), stop sources, flush durable
-state, acknowledge_stop() after orderly shutdown, release the lock and exit.
-Check wake_enabled() before waking a lane. Intake can continue with wakes off.
+The service holds SingleInstanceLock(state / "service.lock") for its lifetime,
+configures logging, and publishes state/heartbeat.json through HeartbeatWriter on
+loop iterations (state is service.state_dir). When ControlFlags.should_stop() sees
+stop.flag it stops sources, flushes due work, calls acknowledge_stop() after an
+orderly shutdown, writes a final heartbeat and releases the lock. Lane wakes are
+blocked while wake.off exists at wake_switch_path(config) (see SERVICE.md); intake
+continues with wakes off.
 
 ## Runtime interfaces
 
@@ -49,8 +53,7 @@ Use Windows PowerShell 5.1 and a Python installation with dependencies already
 available. All example paths and user names below are dummy values. No network
 access is performed by these scripts.
 
-1. Complete service integration and offline acceptance before activating a task.
-   Preview a release with:
+1. Run the offline test suite before activating a task. Preview a release with:
    deploy.ps1 -Checkout C:\demo\checkout -Tag v0.1.0 -Target C:\demo\release -WhatIf
    Remove WhatIf to extract the tag into a new directory. Existing targets,
    symlinks, submodules and tracked DEPLOYED.json files are refused.

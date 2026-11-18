@@ -1,7 +1,7 @@
-"""Jarvis dispatch card requests for immediate human-queue notices (P12).
+"""Dispatch card requests to the card bot for immediate human-queue notices (P12).
 
 A `dispatch_card` adapter (purpose `human_queue`) writes one `dispatch_card/1` request per
-immediate notice to `<dir>/cards/<message_id_safe>.json`. Jarvis posts it to the operator
+immediate notice to `<dir>/cards/<message_id_safe>.json`. The card bot posts it to the operator
 as a card with one button per lane plus `direct` and `exclude`, and writes the click back
 as a decision file that `slack_dispatch.decisions` consumes. Cards are only for messages
 still in the human queue (state `human_pending`), and the direct lane gets no lane button
@@ -14,7 +14,7 @@ adapters ("FYI, assigned to lane <direct lane>") and waits in the console queue 
 `direct` row; it never gets a card, since the operator already owns it.
 
 The request is written to `<dir>/cards/.tmp/<name>.part` and then renamed into
-`cards/`, so Jarvis never reads a partial file. Digests, timers and storm notices never
+`cards/`, so the card bot never reads a partial file. Digests, timers and storm notices never
 produce cards; the ids-only `notify` is a no-op. Bodies are never logged.
 """
 import json
@@ -35,13 +35,13 @@ MAX_LANES = 5
 TITLE_CHARS = 120
 BODY_CHARS = 1500
 ATTENTION = ("owner_mention", "always_human")
-# Lane ids Jarvis accepts in `lanes`; `direct` and `exclude` are its fixed buttons.
-JARVIS_LANE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}")
+# Lane ids the card bot accepts in `lanes`; `direct` and `exclude` are its fixed buttons.
+CARD_BOT_LANE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}")
 RESERVED = ("direct", "exclude")
 
 
 def safe_name(message_id):
-    """File name stem shared with Jarvis: `:` and `.` become `_`."""
+    """File name stem shared with the card bot: `:` and `.` become `_`."""
     return str(message_id).replace(":", "_").replace(".", "_")
 
 
@@ -79,7 +79,7 @@ def card_lanes(config, store, message):
     direct = getattr(getattr(config, "console", None), "direct_lane", None) or None
     allowed = [lane.id for lane in config.lanes
                if lane.id not in (HUMAN_QUEUE, direct) and lane.id not in RESERVED
-               and JARVIS_LANE.fullmatch(lane.id)]
+               and CARD_BOT_LANE.fullmatch(lane.id)]
     ordered = []
 
     def add(lane):
@@ -109,7 +109,7 @@ def console_link(config, message_id):
 def card_body(stored, summary, link):
     """First 1500 characters of the stored body, else the ids-only notice summary.
 
-    dispatch_card/1 has no console_url key (Jarvis rejects unknown keys), so the console
+    dispatch_card/1 has no console_url key (the card bot rejects unknown keys), so the console
     link becomes the last body line when it is not already there.
     """
     text = stored if isinstance(stored, str) and stored.strip() else (summary or "")

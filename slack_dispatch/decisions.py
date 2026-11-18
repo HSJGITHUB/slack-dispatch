@@ -1,6 +1,6 @@
-"""Consume Jarvis card decisions (P12).
+"""Consume card decisions from the card bot (P12).
 
-Jarvis writes `<dir>/decisions/<message_id_safe>.json` (`dispatch_decision/1`) when the
+The card bot writes `<dir>/decisions/<message_id_safe>.json` (`dispatch_decision/1`) when the
 operator clicks a lane button on a dispatch card. The service polls that folder every
 `decisions.poll_seconds`, verifies each file and applies it through the console action
 code (the same path as the console and the inbox CLI):

@@ -4,7 +4,7 @@
 
 Date: 2026-11-11
 
-Status: Accepted for the target design; implementation pending.
+Status: Accepted and implemented.
 
 ### Context
 Session-local polling can miss old-thread replies and split cursor ownership.
@@ -19,7 +19,7 @@ Visibility and permissions require live human validation; durable cursors and id
 
 Date: 2026-11-11
 
-Status: Accepted for the target design; implementation pending.
+Status: Accepted and implemented.
 
 ### Context
 Session identifiers change while work ownership persists.
@@ -34,7 +34,7 @@ Claiming a lane preserves its inbox; lane maps and unique session names need exp
 
 Date: 2026-11-11
 
-Status: Accepted for the target design; implementation pending.
+Status: Accepted and implemented. The future per-channel promotion it describes is not implemented.
 
 ### Context
 Opaque automatic classification makes ownership difficult to audit.
@@ -49,7 +49,7 @@ Record suggestion versions and measured agreement. Promotion needs reversal and 
 
 Date: 2026-11-11
 
-Status: Accepted for the target design; implementation pending.
+Status: Accepted and implemented.
 
 ### Context
 Fast delivery is useful but bursts can repeatedly interrupt a session.
@@ -64,7 +64,7 @@ Provide a global switch and operator notification. Measure wake cost before roll
 
 Date: 2026-11-11
 
-Status: Accepted for the target design; implementation pending.
+Status: Accepted and implemented.
 
 ### Context
 Intake reliability should not depend on an interactive session or duplicate human messaging systems.
@@ -79,7 +79,7 @@ Require heartbeat, single-instance protection and recovery; the adapter retains 
 
 Date: 2026-11-11
 
-Status: Accepted for the target design; implementation pending.
+Status: Accepted and implemented: the service writes no team-visible reactions or status.
 
 ### Context
 Public status indicators introduce a social workflow before internal ownership is proven.

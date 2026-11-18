@@ -44,8 +44,9 @@ identity is derived from a nonempty `thread_ts` different from `ts`.
 
 ## Configuration
 
-All original required scaffold keys remain required. The routing keys are
-optional, including when loading older configuration files:
+The base keys the loader requires (such as `lanes`, `timers`, `wake_policy` and
+`notify_adapters`) stay required. The routing keys are optional, including when
+loading older configuration files:
 
 ```yaml
 always_human:
@@ -81,7 +82,7 @@ with pattern `#(?P<lane>[a-z]+)`. Full-tag entries take precedence over captured
 names. Unknown tags are skipped; the first recognized tag wins. Tags require
 text. A body stored under `body` is not implicitly read as `text`.
 
-DM defaults use conversation IDs, matching the scaffold sample. `im` and `mpim`
+DM defaults use conversation IDs, as in the sample configuration. `im` and `mpim`
 messages use only the DM table. A conversation explicitly in that table also
 uses it if channel type is missing. A null default produces no match and permits
 the person-channel rule to run. Person-channel rules use the validated
@@ -100,13 +101,14 @@ Suggester implementations without that attribute are enabled when supplied.
 A reply assigned by any rule binds its parent if no binding exists. Existing
 bindings are preserved. Root messages do not establish a reply binding here.
 Missing message IDs raise KeyError before mutations. Each store mutation uses
-the ledger's transaction policy; this packet does not add cross-call atomicity.
+the ledger's transaction policy; applying one decision is not a single atomic
+transaction across those calls.
 
 Construct AnthropicSuggester only for enabled configuration, using model,
 api_key_env, lane_descriptions as taxonomy, and taxonomy_version. The SDK import
 and environment lookup happen only on suggest, and missing SDK support raises
-a clear RuntimeError. The SDK is optional at runtime; this packet does not edit
-package dependency metadata. Tests inject a zero-argument client_factory, which
+a clear RuntimeError. The SDK is optional at runtime and is not a declared
+package dependency; install `anthropic` to enable the classifier. Tests inject a zero-argument client_factory, which
 bypasses SDK and credential access entirely.
 
 The prompt lists lane descriptions and requests one JSON object with exactly
@@ -116,7 +118,7 @@ fields, and non-text or multiple content blocks produce no suggestion. The
 parser does not attempt linguistic sentence counting. Stored version is
 `taxonomy_version+p1`. SDK errors propagate, leaving the item in the human queue.
 The adapter uses only `text` supplied by the store, with a body-unavailable
-placeholder when absent. The default ledger read may omit text; this packet
+placeholder when absent. The default ledger read may omit text; the adapter
 never requests a privileged body read.
 
 ## Human queue

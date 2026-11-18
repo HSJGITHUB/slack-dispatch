@@ -778,7 +778,7 @@ the direct lane and so back in the queue.
   lane). While no session value (config or ledger claim) is attached to the direct lane,
   its card is not listed and the tab shows one line instead, `Operator items are in the
   queue` (`<operator> 직접 글은 큐에 있습니다` in `ko`), linking to the queue filtered to direct
-  rows. When a session is attached (a future assistant session) the card is listed again
+  rows. When a session is attached (for example an operator assistant session) the card is listed again
   and the queue still includes its items with the `session attached` note. fix1: when the
   attached session is not live the card stays listed with a `session down` (`세션 꺼짐`)
   badge (card `session_down`, `direct_lane.session_down`), so a dead session stays visible.

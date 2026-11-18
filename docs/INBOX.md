@@ -190,11 +190,12 @@ Storm counters continue accumulating events while the global switch is off.
 
 Integration order is durable file inbox append first, then wake policy evaluation,
 then session delivery for Deliver or due flush batches. File drop is an independent
-operator adapter. This packet does not edit service.py or implement a scheduler.
+operator adapter. The resident service calls `flush` every 30 seconds (SERVICE.md).
 Wake state is in memory; durable pending work remains in the ledger and inbox.
 Route mutation and inbox append are separate operations; append failures surface
-and require caller retry. Delivery deduplication and crash recovery orchestration
-remain service integration responsibilities.
+and require caller retry. The service records deliveries and retries failed
+notifications; it does not claim exactly-once delivery (SERVICE.md, "Timers and
+persistence").
 
 ## Human queue digests
 

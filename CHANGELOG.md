@@ -1,9 +1,13 @@
 # Changelog
 
 All notable changes are documented here using the Keep a Changelog format.
-This project follows Semantic Versioning while remaining pre-alpha.
+This project follows Semantic Versioning. Versions below 1.0 may change interfaces.
+`P<n>` labels such as `P30` are internal work packet numbers (one reviewed change set each), not release versions.
 
 ## [Unreleased]
+
+### P31 public showcase
+- Rewrite the README as the public front page, add the MIT `LICENSE`, `SECURITY.md` and package metadata, and use the neutral name `card bot` for the external card consumer in comments, docstrings and docs; no runtime behaviour changes.
 
 ### P30 mention-only owner mode
 - A `channel_defaults` entry accepts `mention_only: owner` next to `true` and `false`.
@@ -328,9 +332,9 @@ This project follows Semantic Versioning while remaining pre-alpha.
   close only lane items delivered before the lane's last own ack or done, keep later
   items and every attention item open and deliver them again as `backfill`.
 - Add the `dispatch_card` notify adapter: immediate human-queue notices become
-  `dispatch_card/1` requests for Jarvis, written through `cards/.tmp/*.part` and a rename;
+  `dispatch_card/1` requests for the card bot, written through `cards/.tmp/*.part` and a rename;
   digests never produce cards.
-- Add the card decision consumer (`decisions` config section): HMAC-verified Jarvis
+- Add the card decision consumer (`decisions` config section): HMAC-verified card bot
   decisions assign (`human:card`), assign to the direct lane or exclude, then move to
   `decisions/done/` or `decisions/rejected/`; heartbeat counters `card_decisions` and
   `card_decisions_rejected`.

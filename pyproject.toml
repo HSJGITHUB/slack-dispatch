@@ -1,12 +1,25 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "slack-dispatch"
 version = "0.1.0"
-description = "Offline-first scaffold for lane-based message dispatch"
+description = "Resident Slack intake that records every message in a SQLite ledger and routes it to AI agent session lanes or a human queue"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+]
 dependencies = ["slack_sdk", "pyyaml"]
 
 [project.optional-dependencies]

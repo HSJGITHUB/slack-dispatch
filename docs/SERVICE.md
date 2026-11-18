@@ -22,7 +22,7 @@ load config -> acquire state/service.lock -> configure logging
   -> publish heartbeat
   -> repeat every second:
        inspect stop.flag
-       every decisions.poll_seconds (with a card dir): apply Jarvis card decisions (P12)
+       every decisions.poll_seconds (with a card dir): apply card bot decisions (P12)
        every 5 seconds: turn pending wake requests into lane wake offers (P12)
        every 30 seconds: flush due wake batches and failed notifications
        every 60 seconds: sweep overdue ledger items
@@ -429,7 +429,7 @@ above); see INGEST.md.
 ### Dispatch cards
 
 A notify adapter of kind `dispatch_card` (purpose `human_queue` is required) turns
-immediate human-queue notices into Jarvis card requests:
+immediate human-queue notices into card requests for the card bot:
 
 ```yaml
 notify_adapters:
@@ -445,7 +445,7 @@ queue a card; with `only_immediate: false` and `human_queue.mode: immediate` eve
 per-item notice does. Digests, timer notices and storm notices never produce cards
 (the ids-only `notify` of the adapter is a no-op). Each card is
 `<dir>/cards/<message_id_safe>.json` in the `dispatch_card/1` shape (CONTRACTS.md),
-written as `<dir>/cards/.tmp/<name>.part`, flushed, then renamed, so Jarvis never sees
+written as `<dir>/cards/.tmp/<name>.part`, flushed, then renamed, so the card bot never sees
 a partial file. A failed write leaves the human notice unsent, so the next flush
 retries it; the `.part` file stays in `.tmp` (nothing is deleted). Other human-queue
 adapters keep working alongside; remove either entry to disable it. The card body is
