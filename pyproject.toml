@@ -7,8 +7,9 @@ name = "slack-dispatch"
 version = "0.1.0"
 description = "Resident Slack intake that records every message in a SQLite ledger and routes it to AI agent session lanes or a human queue"
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "COPYRIGHT"]
+authors = [{name = "Hyunseok Jin"}]
 requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 3 - Alpha",

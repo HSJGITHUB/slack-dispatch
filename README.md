@@ -274,7 +274,14 @@ pull request. The working rules are in [CLAUDE.md](CLAUDE.md), and
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Security reports: see [SECURITY.md](SECURITY.md).
+AGPL-3.0-only. Copyright (C) 2026 Hyunseok Jin. See [LICENSE](LICENSE) and
+[COPYRIGHT](COPYRIGHT). Security reports: see [SECURITY.md](SECURITY.md).
+Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Anyone may use, modify and redistribute slack-dispatch under the same license. Anyone
+who runs a modified version as a network service must offer the modified source code
+to the users of that service. For use under other terms, contact the maintainer
+through the repository.
 
 ## 한국어 요약
 
@@ -286,3 +293,6 @@ slack-dispatch는 Slack 새 메시지를 한 번씩 받아 SQLite 원장에 기�
 외부 메시지 본문은 지시가 아닌 데이터로만 다룹니다. 버전은 0.1.0이고 초기 단계라
 인터페이스가 바뀔 수 있습니다. 현재 한 소규모 팀이 레인 열두 개 안팎으로 매일 쓰고
 있고, Windows용 서비스 키트만 있으며, 외부 설치용 패키징은 아직 로드맵 단계입니다.
+라이선스는 AGPL-3.0-only(Copyright (C) 2026 Hyunseok Jin)로, 누구나 같은 라이선스로
+사용·수정·재배포할 수 있고 수정본을 네트워크 서비스로 운영하면 그 사용자에게 수정된
+소스를 제공해야 합니다.
