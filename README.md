@@ -42,7 +42,6 @@ The screenshots show synthetic demo data from `tools/demo`.
 ## Status
 
 - Version 0.1.0. Early stage: interfaces may change.
-- In daily production use with about a dozen lanes.
 - The only service kit is for Windows (Task Scheduler templates in `deploy/windows/`).
   CI runs the test suite on Windows.
 - Not yet packaged for third-party installation. That is a roadmap item.
@@ -313,6 +312,6 @@ through the repository.
 - **담당 지정은 설정으로 합니다:** 채널·DM 기본값, `[support]` 같은 명시 태그, 사용자별 규칙, 스레드 연결, 사람이 승인하는 담당 범위 지정(scope claim)을 씁니다. 분류기는 선택 기능이며 제안만 붙이고 레인을 직접 배정하지 않습니다.
 - **사람이 결정권을 가집니다:** 규칙에 맞지 않는 글은 로컬 운영자 콘솔의 대기열로 가고, 보호 대상 작성자의 글과 운영자 멘션에는 주의 표시가 붙습니다. 콘솔에서는 배정 결정을 모아 한 번에 적용하고, 최근 작업을 짧은 시간 안에 되돌릴 수 있습니다. 서비스는 Slack에 글을 쓰지 않으며, 외부 메시지 본문은 지시가 아닌 데이터로만 다룹니다.
 - **바로 체험할 수 있습니다:** `tools/demo`로 합성 데모 데이터를 만들면 Slack에 연결하지 않고도 운영자 콘솔을 띄워 볼 수 있습니다. README의 스크린샷도 이 데모 데이터로 찍었습니다.
-- **현재 상태:** 버전 0.1.0의 초기 단계라 인터페이스가 바뀔 수 있습니다. 레인 열두 개 안팎으로 매일 운영 중입니다. 서비스 키트는 Windows용만 있고, 외부 설치용 패키징은 로드맵 단계입니다.
+- **현재 상태:** 버전 0.1.0의 초기 단계라 인터페이스가 바뀔 수 있습니다. 서비스 키트는 Windows용만 있고, 외부 설치용 패키징은 로드맵 단계입니다.
 - **라이선스:** AGPL-3.0-only(Copyright (C) 2026 Hyunseok Jin)입니다. 누구나 같은 라이선스로 사용·수정·재배포할 수 있고, 수정본을 네트워크 서비스로 운영하면 그 사용자에게 수정된 소스를 제공해야 합니다.
 - **고지:** 개인 프로젝트이며 개인 자격으로 공개합니다. 고용주의 제품이나 공식 도구가 아니고, 고용주와 제휴하거나 보증받은 것이 아닙니다. Slack, Anthropic, OpenAI와도 관계가 없습니다.
