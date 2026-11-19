@@ -12,7 +12,9 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import warnings
 import xml.etree.ElementTree as ET
+import zipfile
 
 from slack_dispatch.runtime import (
     AlreadyRunning, ControlFlags, HeartbeatWriter, SingleInstanceLock,
@@ -22,6 +24,22 @@ from slack_dispatch.runtime.logging_setup import RedactionFilter
 
 ROOT = Path(__file__).resolve().parents[1]
 POWERSHELL = shutil.which("powershell.exe")
+DEPLOY_EXTRACT_DRIVER = """param([string]$Script, [string]$Archive, [string]$Destination)
+$ErrorActionPreference = 'Stop'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)
+foreach ($statement in $ast.EndBlock.Statements) {
+    if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+        . ([scriptblock]::Create($statement.Extent.Text))
+    }
+}
+Expand-DeploymentArchive -ArchivePath $Archive -DestinationPath $Destination
+Write-Output 'extracted'
+"""
+FAILING_ARCHIVE_MODULE = (
+    "function Expand-Archive { throw 'Cannot find an overload for \"ExtractToDirectory\" "
+    "and the argument count: \"3\".' }\n"
+    "Export-ModuleMember -Function Expand-Archive\n"
+)
 
 
 def fixture(test):
@@ -150,6 +168,21 @@ class RuntimeTests(unittest.TestCase):
             handler.close()
 
 
+class DeployScriptTests(unittest.TestCase):
+    def test_deploy_script_does_not_depend_on_archive_module(self):
+        code = [line.split("#", 1)[0] for line in
+                (ROOT / "deploy/deploy.ps1").read_text(encoding="utf-8").splitlines()]
+        for forbidden in ("Expand-Archive", "ExtractToDirectory"):
+            self.assertFalse([line for line in code if forbidden in line], forbidden)
+        text = "\n".join(code)
+        for required in ("Add-Type -AssemblyName System.IO.Compression\n",
+                         "Add-Type -AssemblyName System.IO.Compression.FileSystem\n",
+                         "[System.IO.Compression.ZipFile]::OpenRead(",
+                         "[System.IO.Compression.ZipFileExtensions]::ExtractToFile($item.Entry, $item.Path, $false)",
+                         "$zip.Dispose()"):
+            self.assertIn(required, text)
+
+
 @unittest.skipUnless(POWERSHELL, "Windows PowerShell is unavailable")
 class WindowsToolTests(unittest.TestCase):
     def run_ps(self, script, *args, expected=0, env=None):
@@ -221,7 +254,83 @@ class WindowsToolTests(unittest.TestCase):
     def test_tagged_deploy_manifest_with_short_path(self):
         self.check_tagged_deploy("short")
 
-    def check_tagged_deploy(self, path_form=None):
+    @unittest.skipUnless(shutil.which("git"), "git is unavailable")
+    def test_tagged_deploy_does_not_use_archive_module(self):
+        modules = fixture(self) / "modules"
+        module = modules / "Microsoft.PowerShell.Archive"
+        module.mkdir(parents=True)
+        (module / "Microsoft.PowerShell.Archive.psm1").write_text(FAILING_ARCHIVE_MODULE, encoding="utf-8")
+        self.check_tagged_deploy(env={"PSModulePath": str(modules)})
+
+    def extract_with_deploy_function(self, archive, destination, expected=0):
+        driver = fixture(self) / "extract_driver.ps1"
+        driver.write_text(DEPLOY_EXTRACT_DRIVER, encoding="utf-8")
+        result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                 "-File", str(driver), "-Script", str(ROOT / "deploy/deploy.ps1"),
+                                 "-Archive", str(archive), "-Destination", str(destination)],
+                                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                timeout=45)
+        output = (result.stdout or "") + (result.stderr or "")
+        self.assertEqual(result.returncode, expected, output)
+        return output
+
+    def test_deploy_extraction_writes_entries_without_overwriting(self):
+        directory = fixture(self)
+        archive = directory / "release.zip"
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("nested/", b"")
+            zf.writestr("nested/binary.bin", bytes(range(256)))
+            zf.writestr("empty.bin", b"")
+            zf.writestr("sample.txt", b"tagged\n")
+        destination = directory / "parent" / "release"
+        self.assertIn("extracted", self.extract_with_deploy_function(archive, destination))
+        self.assertEqual((destination / "nested" / "binary.bin").read_bytes(), bytes(range(256)))
+        self.assertEqual((destination / "empty.bin").read_bytes(), b"")
+        self.assertEqual((destination / "sample.txt").read_bytes(), b"tagged\n")
+        duplicate = directory / "duplicate.zip"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with zipfile.ZipFile(duplicate, "w") as zf:
+                zf.writestr("same.txt", b"first")
+                zf.writestr("same.txt", b"second")
+                zf.writestr("late.txt", b"late")
+        second = directory / "second"
+        self.extract_with_deploy_function(duplicate, second, expected=1)
+        self.assertEqual((second / "same.txt").read_bytes(), b"first")
+        self.assertFalse((second / "late.txt").exists())
+
+    def test_deploy_extraction_refuses_entries_outside_target(self):
+        outside = "Archive entry is outside the target directory"
+        rooted = "Archive entry is absolute, drive-qualified or empty"
+        crafted = ((r"..\evil.txt", outside), ("../evil.txt", outside), ("nested/../../evil.txt", outside),
+                   (r"nested\..\..\evil.txt", outside), ("../release2/evil.txt", outside),
+                   ("/evil.txt", rooted), (r"\evil.txt", rooted), ("C:/evil.txt", rooted),
+                   ("C:evil.txt", rooted), (r"\\server\share\evil.txt", rooted), ("evil.txt:stream", rooted),
+                   ("nested/evil|name.txt", "Archive entry is not a valid path"))
+        unreadable = "Archive entries cannot be read: "
+        for name, message in crafted:
+            with self.subTest(name=name):
+                directory = fixture(self)
+                archive = directory / "crafted.zip"
+                with zipfile.ZipFile(archive, "w") as zf:
+                    zf.writestr("good.txt", b"good")
+                    entry = zipfile.ZipInfo("placeholder.txt")
+                    entry.filename = name
+                    zf.writestr(entry, b"evil")
+                    zf.writestr("late.txt", b"late")
+                self.assertIn(name.encode("ascii"), archive.read_bytes())
+                destination = directory / "parent" / "release"
+                destination.parent.mkdir()
+                output = self.extract_with_deploy_function(archive, destination, expected=1)
+                expected = [message + ": " + name]
+                if message == "Archive entry is not a valid path":
+                    expected.append(unreadable)  # Windows PowerShell 5.1 rejects the name while listing
+                self.assertTrue(any(text in output for text in expected), output)
+                self.assertFalse(destination.exists())
+                self.assertEqual(sorted(path.name for path in directory.rglob("*")),
+                                 ["crafted.zip", "parent"])
+
+    def check_tagged_deploy(self, path_form=None, env=None):
         directory = fixture(self)
         parent = directory / "Deployment Parent With Long Name"
         parent.mkdir()
@@ -275,10 +384,10 @@ class WindowsToolTests(unittest.TestCase):
         script = ROOT / "deploy/deploy.ps1"
         args = ("-Checkout", checkout, "-Tag", "v-test", "-Target", target,
                 "-ArchiveDirectory", archive)
-        self.run_ps(script, *args, "-WhatIf")
+        self.run_ps(script, *args, "-WhatIf", env=env)
         self.assertFalse(target.exists())
         self.assertFalse(archive.exists())
-        output = self.run_ps(script, *args)
+        output = self.run_ps(script, *args, env=env)
         manifest = json.loads((target / "DEPLOYED.json").read_text(encoding="utf-8"))
         self.assertEqual(json.loads(output), manifest)
         self.assertEqual(manifest["tag"], "v-test")
@@ -287,7 +396,7 @@ class WindowsToolTests(unittest.TestCase):
         self.assertEqual(manifest["sha256"], {
             name: hashlib.sha256((target / name).read_bytes()).hexdigest()
             for name in ("sample.txt", "empty.bin", "nested/binary.bin")})
-        self.run_ps(script, *args, expected=1)
+        self.run_ps(script, *args, expected=1, env=env)
 
     def test_restart_waits_for_original_process_and_whatif(self):
         directory = fixture(self)

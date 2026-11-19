@@ -6,6 +6,25 @@ This project follows Semantic Versioning. Versions below 1.0 may change interfac
 
 ## [Unreleased]
 
+### P40 deploy extraction
+- `deploy/deploy.ps1` no longer calls `Expand-Archive`. On some hosted Windows runners
+  the `Microsoft.PowerShell.Archive` module called an `ExtractToDirectory` overload that
+  the loaded .NET assembly did not have, so tagged deploys failed intermittently. The
+  script now loads `System.IO.Compression` and `System.IO.Compression.FileSystem`, opens
+  the archive with `ZipFile.OpenRead` and writes each entry with `ExtractToFile` (never
+  overwriting a file), in Windows PowerShell 5.1 and PowerShell 7 alike. The archive is
+  disposed in a `finally` block.
+- Every entry is checked before anything is written. An entry with an absolute, drive-
+  qualified or empty name, a `:` or another character not valid in a file name, or a
+  path that resolves outside the target directory (for example `..\`) stops the deploy
+  with an `Archive entry ...` error and exit code 1, and nothing is extracted. Both `/`
+  and `\` count as separators in entry names. Destination layout, manifest, hashes,
+  `-WhatIf` and success output are unchanged.
+- New tests: a crafted zip with `..\`, `../`, rooted, drive-qualified and UNC entries is
+  refused through the script's extraction function; extraction writes nested, empty and
+  binary entries and refuses a duplicate entry without overwriting; and a tagged deploy
+  succeeds when a broken `Microsoft.PowerShell.Archive` module shadows the real one.
+
 ### P38 cosmetic rule tightened
 - The `wake_policy.followup_ignore_cosmetic` rule is now a short positive list; anything
   not listed re-delivers. An edit is cosmetic only when the Slack entity sets are equal

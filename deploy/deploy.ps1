@@ -6,6 +6,89 @@ param(
     [string]$ArchiveDirectory = $env:TEMP
 )
 $ErrorActionPreference = 'Stop'
+
+function Get-PathComparison {
+    if ([IO.Path]::DirectorySeparatorChar -eq '\') {
+        return [StringComparison]::OrdinalIgnoreCase
+    }
+    return [StringComparison]::Ordinal
+}
+
+function Expand-DeploymentArchive {
+    # Extracts every entry itself instead of calling Expand-Archive or any
+    # ExtractToDirectory overload, so it behaves the same in Windows PowerShell 5.1
+    # and PowerShell 7. All entries are checked before anything is written.
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $comparison = Get-PathComparison
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $invalidNameCharacters = [IO.Path]::GetInvalidFileNameChars()
+    $prefix = [IO.Path]::GetFullPath($DestinationPath).TrimEnd('\', '/') + $separator
+    # GetFullPath expands 8.3 short names of existing directories, but not
+    # consistently, so a destination given with short names could resolve to two
+    # different spellings. Entry names are therefore resolved under a fresh,
+    # nonexistent directory on the same volume and the contained remainder is
+    # appended to the destination prefix.
+    $probeName = 'deploy-check-' + [guid]::NewGuid().ToString('N')
+    $probe = [IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetPathRoot($prefix), $probeName)) + $separator
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        # A method call, not the Entries property: PowerShell turns an exception in a
+        # property getter (such as an entry name with characters Windows PowerShell 5.1
+        # rejects) into $null, which would extract nothing and report success.
+        try {
+            $archiveEntries = $zip.get_Entries()
+        }
+        catch {
+            throw ('Archive entries cannot be read: ' + $_.Exception.GetBaseException().Message)
+        }
+        $plan = New-Object System.Collections.Generic.List[object]
+        foreach ($entry in $archiveEntries) {
+            $name = [string]$entry.FullName
+            $relative = $name.Replace('/', $separator).Replace('\', $separator)
+            if ($name.Length -eq 0 -or $name.Contains(':') -or $relative.StartsWith($separator)) {
+                throw ('Archive entry is absolute, drive-qualified or empty: ' + $name)
+            }
+            foreach ($segment in $relative.Split($separator)) {
+                if ($segment.IndexOfAny($invalidNameCharacters) -ge 0) {
+                    throw ('Archive entry is not a valid path: ' + $name)
+                }
+            }
+            if ([IO.Path]::IsPathRooted($relative)) {
+                throw ('Archive entry is absolute, drive-qualified or empty: ' + $name)
+            }
+            try {
+                $resolved = [IO.Path]::GetFullPath($probe + $relative)
+            }
+            catch {
+                throw ('Archive entry is not a valid path: ' + $name)
+            }
+            if (-not $resolved.StartsWith($probe, $comparison)) {
+                throw ('Archive entry is outside the target directory: ' + $name)
+            }
+            $path = $prefix + $resolved.Substring($probe.Length)
+            $isDirectory = $relative.EndsWith($separator)
+            $plan.Add([pscustomobject]@{ Entry = $entry; Path = $path; IsDirectory = $isDirectory })
+        }
+        $null = [IO.Directory]::CreateDirectory($prefix)
+        foreach ($item in $plan) {
+            if ($item.IsDirectory) {
+                $null = [IO.Directory]::CreateDirectory($item.Path)
+                continue
+            }
+            $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($item.Path))
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($item.Entry, $item.Path, $false)
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+
 $ref = 'refs/tags/' + $Tag
 & git check-ref-format $ref
 if ($LASTEXITCODE -ne 0) { throw 'Invalid tag name.' }
@@ -24,13 +107,10 @@ if ($PSCmdlet.ShouldProcess($destination, 'Extract tagged checkout and write dep
     $archive = Join-Path $ArchiveDirectory ('dispatch-' + [guid]::NewGuid().ToString('N') + '.zip')
     & git -C $Checkout archive --format=zip ('--output=' + $archive) $commit
     if ($LASTEXITCODE -ne 0) { throw 'git archive failed.' }
-    Expand-Archive -LiteralPath $archive -DestinationPath $destination
+    Expand-DeploymentArchive -ArchivePath $archive -DestinationPath $destination
     $canonicalRoot = (Get-Item -LiteralPath $destination).FullName.TrimEnd('\', '/')
     $rootPrefix = $canonicalRoot + [IO.Path]::DirectorySeparatorChar
-    $comparison = [StringComparison]::Ordinal
-    if ([IO.Path]::DirectorySeparatorChar -eq '\') {
-        $comparison = [StringComparison]::OrdinalIgnoreCase
-    }
+    $comparison = Get-PathComparison
     $hashes = [ordered]@{}
     Get-ChildItem -LiteralPath $canonicalRoot -File -Recurse -Force | Sort-Object FullName | ForEach-Object {
         if (-not $_.FullName.StartsWith($rootPrefix, $comparison)) {
