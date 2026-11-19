@@ -54,6 +54,28 @@ def mention_only_mode(value, path):
     raise ConfigError(f"{path} must be true, false or {MENTION_ONLY_OWNER}")
 
 
+# P36: limits of always_human.mention_texts.
+MENTION_TEXTS_MAX = 20
+MENTION_TEXT_MIN_LENGTH = 2
+
+
+def mention_texts(values):
+    """P36: `always_human.mention_texts`, a list of at most MENTION_TEXTS_MAX strings of at
+    least MENTION_TEXT_MIN_LENGTH characters after trimming. Returns the trimmed strings."""
+    if not isinstance(values, list):
+        raise ConfigError("always_human.mention_texts must be a list")
+    if len(values) > MENTION_TEXTS_MAX:
+        raise ConfigError("always_human.mention_texts must have at most "
+                          f"{MENTION_TEXTS_MAX} entries")
+    result = []
+    for value in values:
+        if not isinstance(value, str) or len(value.strip()) < MENTION_TEXT_MIN_LENGTH:
+            raise ConfigError("always_human.mention_texts entries must be strings of at least "
+                              f"{MENTION_TEXT_MIN_LENGTH} characters after trimming")
+        result.append(value.strip())
+    return tuple(result)
+
+
 def positive(value, path):
     if type(value) is not int or value <= 0:
         raise ConfigError(f"{path} must be a positive integer")
@@ -216,7 +238,8 @@ def parse_config(raw):
     owner = human.get("owner_user")
     if owner is not None:
         string(owner, "always_human.owner_user")
-    human = AlwaysHuman(user_ids("users"), user_ids("mention_users"), owner)
+    human = AlwaysHuman(user_ids("users"), user_ids("mention_users"), owner,
+                        mention_texts(human.get("mention_texts", [])))
     classifier = mapping(data.get("classifier", {}), "classifier")
     kind = classifier.get("kind", "none")
     if kind not in ("none", "anthropic"):

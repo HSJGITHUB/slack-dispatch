@@ -72,8 +72,13 @@ class WakePolicyEngine:
             return Batch(lane, [message_id], notice)
         owner = self.setting("owner_user")
         mentions = message.get("mentions", ()) or ()
-        bypass = author in self.setting("immediate_users", ()) or bool(owner and (
-            owner in mentions or f"<@{owner}>" in (message.get("text") or "")))
+        # P36: attention `owner_mention` (an exact mention of the owner or a mention user, or
+        # a configured operator name) bypasses the same-author debounce like an exact owner
+        # mention; the storm guard above and the global switch still apply.
+        bypass = (author in self.setting("immediate_users", ())
+                  or message.get("attention") == "owner_mention"
+                  or bool(owner and (owner in mentions
+                                     or f"<@{owner}>" in (message.get("text") or ""))))
         key = (lane, author)
         last = self.last.get(key)
         if not bypass and last is not None and now < last + self.setting("debounce_seconds", 90):

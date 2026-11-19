@@ -142,6 +142,14 @@ always_human:
   users: [U0000000091]
   mention_users: [U0000000092]
   owner_user: U0000000093
+  # Optional (P36): names that address the operator in plain text. A post containing one
+  # (case-insensitive after Unicode NFKC, whitespace runs collapsed, not inside a Slack
+  # link or mention label) gets attention owner_mention exactly like <@owner_user>, so it
+  # also opens mention_only channels of both modes. ASCII names need word boundaries
+  # (sam does not match sample); names with non-ASCII characters, such as a name with a
+  # Korean honorific, match anywhere. At most 20 entries of at least 2 characters.
+  # Default empty: exact mentions only.
+  # mention_texts: [Operator Kim]
 classifier:
   kind: none
   enabled: false

@@ -77,7 +77,7 @@ invoke a suggester. See ROUTING.md for the full precedence table.
 
 ## 6. Notifier contract (package `slack_dispatch.notify`)
 
-`Notifier.notify(lane: str, message_ids: list[str]) -> None`. Payloads carry ids and counts only. Adapters: `FileInboxNotifier(root)`, `SessionMessageNotifier(command_template, target_resolver, dry_run)`, `FileDropNotifier(outbox_dir, template)`. Wake policy (`notify/wake.py`) decides when to call notifiers: immediate by default, 90 s debounce per (lane, author), per-lane storm guard (30 per hour -> 600 s batching), global switch (config flag or presence of file `<state>/wake.off`), immediate triggers for configured user ids and owner mentions.
+`Notifier.notify(lane: str, message_ids: list[str]) -> None`. Payloads carry ids and counts only. Adapters: `FileInboxNotifier(root)`, `SessionMessageNotifier(command_template, target_resolver, dry_run)`, `FileDropNotifier(outbox_dir, template)`. Wake policy (`notify/wake.py`) decides when to call notifiers: immediate by default, 90 s debounce per (lane, author), per-lane storm guard (30 per hour -> 600 s batching), global switch (config flag or presence of file `<state>/wake.off`), immediate triggers for configured user ids and owner mentions (an exact `<@wake_policy.owner_user>` token or `mentions` id, and since P36 fix1 a message whose `attention` is `owner_mention`).
 
 ## 7. Config additions (owned by each packet, additive to `config/schema.py`)
 
@@ -818,3 +818,41 @@ All additive; no ledger schema change.
   *, apply=False, days=30, kinds=None, now=None)` returns `scanned`, `rows` (`table`, `id`,
   `kinds` as kind -> match count), `counts` (kind -> `rows`, `matches`) and `updated`.
   JSON output adds `mode` and `days`. Exit 0, or 2 for an invalid `--days`.
+
+## P36 owner name mention
+
+All additive; no ledger schema change and no new store method.
+
+- Config: `AlwaysHuman.mention_texts: tuple[str, ...] = ()` from the optional
+  `always_human.mention_texts` list. `config.loader` adds `MENTION_TEXTS_MAX = 20`,
+  `MENTION_TEXT_MIN_LENGTH = 2` and `mention_texts(values)`, which returns the trimmed
+  strings and raises `ConfigError` for a non-list (`always_human.mention_texts must be a
+  list`), more than 20 entries (`... must have at most 20 entries`) or an entry that is not
+  a string of at least 2 characters after trimming (`always_human.mention_texts entries
+  must be strings of at least 2 characters after trimming`). Messages never echo values.
+- Router (`slack_dispatch.router.engine`): `exact_mention(message, config)` (the exact
+  `<@id>` check that `attention_for` used before), `fold_text(value)` (NFKC, casefold,
+  whitespace runs collapsed, trimmed), `plain_segments(text)` (text outside `<...>`
+  entities with `&lt;`, `&gt;`, `&amp;` decoded), `folded_names(texts)` (cached),
+  `contains_name(segment, name, bounded)` and `name_mention(message, config)`.
+  `attention_for` returns `owner_mention` for `exact_mention or name_mention`, else
+  `always_human` for a protected author, else None. `route()`, `Decision` and
+  `gate_attention` are unchanged; a name match is `owner_mention` everywhere.
+- Pipeline: `Pipeline.owner_name_mentions` (int) counts routing decisions (`_handle` and
+  the P24 `_redeliver_edit`) whose attention is `owner_mention` while `exact_mention` is
+  false; `snapshot()["owner_name_mentions"]` (and so the heartbeat) appears once nonzero.
+  Edit verdicts (P22) and the P24 lane hold are unchanged.
+- fix1 matching speed: `folded_names(texts)` returns `FoldedNames(slow, fast, fast_ok,
+  filler)`: the configured names folded and deduped once per configuration, with search
+  keys (`mark_words(name)` for an ASCII name, else the name) minus keys that another key
+  of the same kind contains. `name_mention` joins the folded parts with `\x01`, replaces
+  `\x00` and `\x01` in the text with a filler control character no name holds, and
+  answers with one `in` test per key (on the `\x00`-marked text for ASCII names): C-level
+  linear scans whatever the text. A configuration whose names hold `\x00` or `\x01` uses
+  the reference rule `contains_name` per part. Results are identical to the reference rule.
+- fix1 wake: `WakePolicyEngine.offer` also bypasses the same-author debounce when
+  `message["attention"] == "owner_mention"`; the storm guard and the global switch are
+  unchanged. `Pipeline._handle` and `_redeliver_edit` offer `dict(message,
+  attention=decision.attention)` (the decision just made, not the row read before
+  routing). The service wake request path offers the stored row, whose stored
+  `owner_mention` flag now bypasses the debounce too.

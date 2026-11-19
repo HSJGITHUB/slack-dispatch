@@ -92,6 +92,10 @@ class AlwaysHuman:
     users: tuple[str, ...] = ()
     mention_users: tuple[str, ...] = ()
     owner_user: str | None = None
+    # P36: names that address the operator in plain text (for example `Operator Kim`); a
+    # post containing one outside Slack entities gets attention `owner_mention` like an
+    # exact owner mention. Empty (the default) keeps the mention check exact-only.
+    mention_texts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

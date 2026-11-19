@@ -6,6 +6,31 @@ This project follows Semantic Versioning. Versions below 1.0 may change interfac
 
 ## [Unreleased]
 
+### P36 owner name mention
+- New optional `always_human.mention_texts` (at most 20 names, each at least 2 characters
+  after trimming; default empty keeps today's behaviour). A post whose text contains one,
+  compared case-insensitively after Unicode NFKC with whitespace runs collapsed and never
+  inside a Slack entity (link, channel reference, mention label), gets attention
+  `owner_mention` exactly like an exact owner mention: it opens mention-only channels in
+  both modes, routes to the channel default lane, binds the thread and follows the human
+  notice flags. ASCII names need word boundaries (`sam` does not match `sample`); names
+  with non-ASCII characters match as substrings. Live case: a post that addressed the
+  operator by name and honorific without an `@` mention was excluded as
+  `excluded:no_mention` in a mention-only channel.
+- Matching is plain linear substring search; no regex is built from configuration. Fix
+  pass: the configured names are folded and deduped once per configuration and each name
+  is one C-level substring test on the whole text (ASCII names on a word-marked copy), so
+  1 MB of repeated `a` with 20 short names takes milliseconds instead of seconds.
+- Wake debounce: a message with attention `owner_mention` (an exact owner or mention user
+  mention, or a configured name) bypasses the same-author debounce like an exact
+  `<@wake_policy.owner_user>` mention; other attention values and the storm guard are
+  unchanged.
+- Heartbeat counter `owner_name_mentions` (routing decisions whose `owner_mention` came from
+  a name, not an exact mention) once nonzero.
+- Edit semantics are unchanged: an edit that adds a name to an excluded post behaves like
+  an edit that adds an `@` mention (recorded only under the default
+  `wake_policy.followup: changed_after_ack`, routed again under `always`).
+
 ### P35 credential redaction
 - Credentials in message text are replaced with `[redacted:<kind>]` before anything reaches
   the ledger: PEM private keys, AWS access key ids (and a 40 character secret next to one

@@ -8,7 +8,7 @@ mutate the message, call a classifier, or write to the ledger.
 | 1 | Excluded channel | Excluded, no attention or classifier |
 | 2 | Bot with exclude_all | Excluded with excluded:bot |
 | 2 | Bot with route_or_exclude | Channel/DM default only, otherwise excluded:bot (always excluded:bot in a mention-only channel, P26) |
-| 3 | Protected author or configured exact mention | Set attention, continue routing |
+| 3 | Protected author, configured exact mention or configured operator name (P36) | Set attention, continue routing |
 | 4 | Mention-only channel (P26) without attention, or in owner mode (P30) without `owner_mention`, not a reply in a bound thread | Excluded with excluded:no_mention |
 | 5 | Existing reply thread binding | Assign inherited lane |
 | 6 | Confirmed scope claim in the ledger (P13 ScopeClaim) | Assign claimed lane |
@@ -68,6 +68,7 @@ Omitted always-human settings default to empty user lists and a null owner.
 Mentions must be exact Slack markup such as `<@U0000000093>`. Bare identifiers
 and longer identifiers do not match. If text is absent, only author checks apply.
 Both `mention_users` and the optional `owner_user` participate in mention checks.
+The optional `mention_texts` list (P36, below) adds plain-text operator names.
 
 Omitted classifier settings default to kind `none`, enabled `false`, empty model,
 API key environment variable name `ANTHROPIC_API_KEY`, taxonomy version `v1`, and
@@ -378,9 +379,10 @@ In `route()`, after the excluded channel check, the bot policy and the attention
 (precedence 4 above), a message in a mention-only channel:
 
 - with attention (an exact mention of `always_human.owner_user` or a
-  `always_human.mention_users` id: `owner_mention`; an `always_human.users` author:
-  `always_human`) continues through the normal precedence unchanged: thread binding,
-  scope claim, explicit tag, channel default, person rule. With `{default: <lane>}` it is
+  `always_human.mention_users` id, or a configured operator name (P36): `owner_mention`;
+  an `always_human.users` author: `always_human`) continues through the normal
+  precedence unchanged: thread binding, scope claim, explicit tag, channel default,
+  person rule. With `{default: <lane>}` it is
   assigned to that lane with the attention flag (and the usual immediate human notice);
   with `{default: null}` and no other match it is a human pending `always_human` item.
   This holds for `mention_only: true`. In owner mode only `owner_mention` continues this
@@ -418,3 +420,62 @@ default nor a channel scope claim routes it). Under `exclude_all` nothing change
 `route_all` bot posts take the human path above.
 
 The console search view shows the note `excluded:no_mention` as text in its note column.
+
+## Operator name mentions (P36)
+
+People often address the operator by typing a name instead of an `@` mention. The optional
+`always_human.mention_texts` list makes such a post count as an exact owner mention:
+
+```yaml
+always_human:
+  owner_user: U0000000093
+  mention_texts: [Operator Kim, 운영자님]
+```
+
+The loader accepts a list of at most 20 strings, each at least 2 characters after trimming
+(entries are stored trimmed); anything else raises `ConfigError`. The default is an empty
+list, which keeps the exact-only behaviour.
+
+`attention_for` returns `owner_mention` when the message text contains a configured name:
+
+- Both sides are compared in one form: Unicode NFKC (full-width letters and spaces become
+  their ASCII forms), case folded, every run of whitespace collapsed to one space.
+- Text inside a Slack entity (`<...>`: a link and its label, a channel reference, a user
+  mention with its label, a broadcast or user group) never matches, and a name does not
+  match across an entity. The Slack escapes `&lt;`, `&gt;` and `&amp;` are decoded in the
+  text outside entities.
+- A name made only of ASCII characters must not touch an ASCII letter or digit on a side
+  where the name itself starts or ends with one: `Sam` does not match `sample` or `Asam`,
+  but matches `Sam,`, `(Sam)` and `Sam` followed by a Korean honorific. A name containing
+  a non-ASCII character (for example a Korean name with an honorific) matches as a plain
+  substring.
+- Matching is plain substring search (`str.find`) over the text, linear in its length;
+  no regex is built from the configured strings.
+
+The result is the same `owner_mention` an exact `<@owner_user>` gives: it opens
+mention-only channels of both modes (P26, P30), routes by the normal precedence (the
+channel default lane in a mention-only channel), binds the thread, follows
+`human_queue.immediate_flags` and `assigned_notice_flags`, and shows the attention badge
+in the inbox and the console. Posts by `always_human.owner_user` are still recorded as
+owner posts before routing, and bot posts carry no attention under `route_or_exclude` and
+`exclude_all`. The matched text is the redacted text (P35).
+
+Edits keep the P22 and P24 edit semantics, the same as for an edit that adds an `@`
+mention: under `wake_policy.followup: changed_after_ack` (the default) an edit of an
+`excluded:no_mention` post is recorded only (state, note and attention unchanged); under
+`always` it is routed again and, with the name, assigned like a new name post (followup
+inbox record); under `never` it is recorded only.
+
+The heartbeat counter `owner_name_mentions` (present once nonzero) counts routing
+decisions whose `owner_mention` came from a configured name and not from an exact mention
+(an edit routed again counts again).
+
+Wake debounce (P36 fix1): the pipeline hands the wake engine the attention of the routing
+decision it just made, and a message with attention `owner_mention` (an exact mention of
+`always_human.owner_user` or a `always_human.mention_users` id, or a configured operator
+name) bypasses the same-author debounce (`wake_policy.debounce_seconds`) exactly like the
+existing triggers (`wake_policy.immediate_users`, an exact `<@wake_policy.owner_user>`
+mention or a `mentions` id). Attention `always_human` and no attention are debounced as
+before; the storm guard and the global wake switch still apply to every message. A wake
+request served by the service (console wake, P21) offers the stored ledger row, so its
+stored `owner_mention` flag bypasses the debounce there too.

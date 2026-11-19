@@ -25,7 +25,7 @@ from slack_dispatch.queue.human import digest_counts_text, export_jsonl, queue_c
 from slack_dispatch.resolver.owner import VERSION as OWNER_VERSION, OwnerResolver, suggestion_for
 from slack_dispatch.router.apply import apply_decision
 from slack_dispatch.router.classifier import Suggestion
-from slack_dispatch.router.engine import NO_MENTION, is_mention_only, route
+from slack_dispatch.router.engine import NO_MENTION, exact_mention, is_mention_only, route
 
 LOG = logging.getLogger(__name__)
 HUMAN_QUEUE = "human_queue"
@@ -613,6 +613,10 @@ class Pipeline:
         # human_queue.assigned_notice_flags), plus queued rows dropped at flush for the same
         # reason; appears in the heartbeat once nonzero.
         self.attention_notice_skipped = 0
+        # P36: routing decisions whose `owner_mention` came from a configured name in the
+        # text (always_human.mention_texts), not from an exact mention; appears in the
+        # heartbeat once nonzero.
+        self.owner_name_mentions = 0
         # P16: optional UserDirectory; the service sets it when user_directory is enabled.
         self.directory = None
         self.app_posts_human = 0
@@ -708,6 +712,8 @@ class Pipeline:
                 result["excluded_no_mention"] = self.excluded_no_mention
             if self.owner_threads_bound:
                 result["owner_threads_bound"] = self.owner_threads_bound
+            if self.owner_name_mentions:
+                result["owner_name_mentions"] = self.owner_name_mentions
             skipped = self.attention_notice_skipped + self.human.attention_dropped
             if skipped:
                 result["attention_notice_skipped"] = skipped
@@ -1005,6 +1011,7 @@ class Pipeline:
             message["text"] = event["text"]
         message["is_bot"] = event["is_bot"]
         decision = route(message, self.routing_config(), self.store.lookup_binding)
+        self._note_name_mention(message, decision)
         suggester = self.suggester
         if self.owner_resolver is not None:
             suggester = OwnerFirstSuggester(self.owner_resolver, self.store, self.suggester)
@@ -1050,7 +1057,10 @@ class Pipeline:
                     self.catchup_ids.pop(mid, None)
                     self.catchup_ids[mid] = None
                     _trim_oldest(self.catchup_ids, NAME_TRACK_LIMIT)
-                wake = self.wake_engine.offer(lane, message, message.get("author"))
+                # P36: the wake engine sees this decision's attention (owner_mention
+                # bypasses the same-author debounce), not the row read before routing.
+                wake = self.wake_engine.offer(lane, dict(message, attention=decision.attention),
+                                              message.get("author"))
                 if edit:
                     self._note_edit_wake(mid)
                 if isinstance(wake, Deliver):
@@ -1071,6 +1081,12 @@ class Pipeline:
             self._assigned_attention_notice(mid, decision.attention)
         return HandleResult(mid, recorded.kind, state=outcome.state, lane=outcome.lane, backfill=backfill,
                             catchup=catchup)
+
+    def _note_name_mention(self, message, decision):
+        """P36: count an `owner_mention` that a configured name raised without an exact
+        mention (`router.engine.exact_mention`)."""
+        if decision.attention == "owner_mention" and not exact_mention(message, self.config):
+            self.owner_name_mentions += 1
 
     def _edit_ignored(self, mid):
         self.edits_ignored += 1
@@ -1098,10 +1114,13 @@ class Pipeline:
         if "text" in event:
             message["text"] = event["text"]
         decision = route(message, self.routing_config(), self.store.lookup_binding)
+        self._note_name_mention(message, decision)
         if decision.attention is not None or message.get("attention") is not None:
             self.store.set_attention(mid, decision.attention)
         self._send("lane", lane, [mid], inbox=True)
-        wake = self.wake_engine.offer(lane, message, message.get("author"))
+        # P36: the re-evaluated attention reaches the wake engine (debounce bypass).
+        wake = self.wake_engine.offer(lane, dict(message, attention=decision.attention),
+                                      message.get("author"))
         self._note_edit_wake(mid)
         if isinstance(wake, Deliver):
             self._send("lane", lane, [mid], inbox=False)
