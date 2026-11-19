@@ -64,6 +64,12 @@ wake_policy:
   # service.followup_window_seconds; other edits update the ledger silently. always: every
   # edit wakes (the behaviour before P22). never: edits update the ledger only.
   followup: changed_after_ack
+  # Optional (P37, default false): with true, an edit that would re-deliver an item that
+  # holds a lane is recorded only when it changed decoration only: sentence punctuation,
+  # emoticons such as =) or ^^, added emoji, case, spacing and link or mention labels. Any
+  # wording change, number, operator (- > / ->), removed or swapped emoji, or punctuation
+  # next to a digit still re-delivers.
+  # followup_ignore_cosmetic: false
   # Backfill found by a reconcile pass whose Slack ts is at most this many minutes old (a
   # post made while the service restarted) wakes the lane like a live post (P23); older
   # backfill fills the inbox without a wake. 0 disables catch-up wakes.

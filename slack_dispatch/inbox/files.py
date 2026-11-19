@@ -115,28 +115,49 @@ def lane_lock(root, lane):
             locking.locking(handle.fileno(), locking.LK_UNLCK, 1)
 
 
+def valid_edit_delta(value):
+    """P37: an edit size hint is {"added": int, "removed": int}, both non-negative."""
+    return (isinstance(value, dict) and set(value) == {"added", "removed"}
+            and all(type(value[key]) is int and value[key] >= 0 for key in value))
+
+
 def record(message, kind=None):
     """Body-free inbox record.
 
     Without an explicit kind, `followup` is written only for an edited message (ledger
     edited_at, set by message_changed). A reply delivered soon after an earlier delivery
     to its thread keeps its ordinary kind (`new` or `backfill`) with followup: true.
+    P37: a followup record also carries `edit_delta` ({"added": n, "removed": m}, token
+    counts only) when the message passed one (the pipeline does for a re-delivered edit).
     """
     from datetime import datetime, timezone
     if not kind:
         kind = ("followup" if message.get("edited_at")
                 else "backfill" if message.get("origin") == "reconcile" else "new")
-    return {"id": message.get("id", message.get("message_id")),
-            "delivered_at": datetime.now(timezone.utc).isoformat(),
-            "channel": message["channel"], "ts": message["ts"],
-            "thread_ts": message.get("thread_ts"),
-            "followup": bool(message.get("followup")),
-            "kind": kind}
+    row = {"id": message.get("id", message.get("message_id")),
+           "delivered_at": datetime.now(timezone.utc).isoformat(),
+           "channel": message["channel"], "ts": message["ts"],
+           "thread_ts": message.get("thread_ts"),
+           "followup": bool(message.get("followup")),
+           "kind": kind}
+    delta = message.get("edit_delta")
+    if kind == "followup" and valid_edit_delta(delta):
+        row["edit_delta"] = {"added": delta["added"], "removed": delta["removed"]}
+    return row
 
 
 def append(root, lane, records):
     keys = ("id", "delivered_at", "channel", "ts", "thread_ts", "followup", "kind")
-    clean = [{key: row[key] for key in keys} for row in records]
+    clean = []
+    for row in records:
+        item = {key: row[key] for key in keys}
+        if "edit_delta" in row:
+            # P37: the only optional field; never any message text.
+            if item["kind"] != "followup" or not valid_edit_delta(row["edit_delta"]):
+                raise ValueError("Invalid inbox record edit_delta")
+            item["edit_delta"] = {"added": row["edit_delta"]["added"],
+                                  "removed": row["edit_delta"]["removed"]}
+        clean.append(item)
     for row in clean:
         if row["kind"] not in ("new", "followup", "reroute", "backfill"):
             raise ValueError("Invalid inbox record kind")

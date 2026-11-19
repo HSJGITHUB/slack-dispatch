@@ -434,7 +434,8 @@ class DefaultEmptyPipelineTests(NameCase):
 
 class EditParityTests(NameCase):
     """An edit that adds the name to an excluded:no_mention post does what an edit adding
-    an exact mention does (P36 keeps the P22/P24 edit semantics)."""
+    an exact mention does (P36 keeps the P22/P24 edit semantics; since P37 both are routed
+    as a first assignment under every wake_policy.followup value)."""
 
     def edit_both(self):
         first = self.handle(1, user=PROTECTED, text="dummy request")
@@ -450,28 +451,34 @@ class EditParityTests(NameCase):
         return self.outcome(named), self.outcome(exact)
 
     def test_edit_outcome(self):
-        """Under changed_after_ack (the default) both edits are recorded only."""
-        named, exact = self.edit_both()
-        self.assertEqual(named, exact)
-        self.assertEqual((named["state"], named["note"], named["attention"], named["inboxed"]),
-                         ("excluded", NO_MENTION, None, False))
-        counters = self.pipeline.snapshot()
-        self.assertEqual(counters["edits_ignored"], 2)
-        self.assertNotIn("owner_name_mentions", counters)
-
-
-class EditParityAlwaysTests(EditParityTests):
-    followup = "always"
-
-    def test_edit_outcome(self):
-        """Under always both edits are routed again and assigned to the default lane."""
+        """Under changed_after_ack (the default) both edits are assigned to the default lane
+        as a first assignment (P37; before P37 they were recorded only)."""
         named, exact = self.edit_both()
         self.assertEqual(named, exact)
         self.assertEqual((named["state"], named["lane"], named["attention"], named["inboxed"]),
                          ("assigned", DEFAULT_LANE, "owner_mention", True))
         self.assertEqual(named["notices"], ["attention:owner_mention"])
         counters = self.pipeline.snapshot()
-        self.assertEqual((counters["edits_woken"], counters["owner_name_mentions"]), (2, 1))
+        self.assertEqual((counters["edits_mention_added"], counters["owner_name_mentions"]),
+                         (2, 1))
+        self.assertNotIn("edits_ignored", counters)
+
+
+class EditParityAlwaysTests(EditParityTests):
+    followup = "always"
+
+    def test_edit_outcome(self):
+        """Under always both edits are routed again and assigned to the default lane (since
+        P37 as a first assignment, outside the edit wake counters)."""
+        named, exact = self.edit_both()
+        self.assertEqual(named, exact)
+        self.assertEqual((named["state"], named["lane"], named["attention"], named["inboxed"]),
+                         ("assigned", DEFAULT_LANE, "owner_mention", True))
+        self.assertEqual(named["notices"], ["attention:owner_mention"])
+        counters = self.pipeline.snapshot()
+        self.assertEqual((counters["edits_mention_added"], counters["owner_name_mentions"]),
+                         (2, 1))
+        self.assertNotIn("edits_woken", counters)
 
 
 class WakeEngineTests(unittest.TestCase):

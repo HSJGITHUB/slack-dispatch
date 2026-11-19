@@ -43,6 +43,10 @@ class WakePolicy:
     # P23: a reconcile (backfill) message whose Slack ts is within this many minutes of now
     # is offered to the wake engine like a live message; 0 disables catch-up wakes.
     catchup_minutes: int = 30
+    # P37: with true, an edit of an item that holds a lane whose text changed only in
+    # punctuation, symbols, emoji, case or whitespace (Slack entities unchanged) is recorded
+    # without re-delivery; false (the default) keeps the wake_policy.followup behaviour.
+    followup_ignore_cosmetic: bool = False
 
 
 @dataclass(frozen=True)

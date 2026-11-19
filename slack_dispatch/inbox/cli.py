@@ -15,7 +15,7 @@ from slack_dispatch.console import actions
 from slack_dispatch.console.actions import inbox_refusal
 from slack_dispatch.router.apply import DEFAULT_MIN_EVIDENCE
 
-from .files import append, read, record, validate_lane
+from .files import append, read, record, valid_edit_delta, validate_lane
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 CUTOVER_NOTE = "seen by the lane before cutover"
@@ -324,6 +324,11 @@ def inbox_rows(root, lane, store, include_done=False):
         # The followup flag alone (a recent reply in the same thread) does not count.
         if record_row.get("kind") == "followup":
             row["edited"] = "yes"
+            # P37: the latest followup record decides the edit size hint.
+            if valid_edit_delta(record_row.get("edit_delta")):
+                row["edit_delta"] = record_row["edit_delta"]
+            else:
+                row.pop("edit_delta", None)
     result = []
     for mid, row in grouped.items():
         message = store.get_message(mid) or {}
@@ -392,6 +397,14 @@ def text_label(value):
 JSON_EXTRA = ("ts", "author_id")
 
 
+def edit_delta_words(row):
+    """P37: the text suffix of a row with an edit size hint (`edit +1 -0`), else ()."""
+    delta = row.get("edit_delta")
+    if not valid_edit_delta(delta):
+        return ()
+    return ("edit", f"+{delta['added']}", f"-{delta['removed']}")
+
+
 def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc, names=None,
                links=None):
     """`inbox LANE` as text or JSON.
@@ -429,6 +442,8 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc, names=
         output = [{key: row[key] for key in LIST_COLUMNS + (JSON_EXTRA if args.json else ())}
                   for row in rows]
         for row, source in zip(output, rows):
+            if "edit_delta" in source:
+                row["edit_delta"] = source["edit_delta"]  # P37
             if args.json:
                 channel_name = names.channel_name(source.get("channel")) if names else None
                 if channel_name:
@@ -451,7 +466,7 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc, names=
             columns = LIST_COLUMNS + NAME_COLUMNS + (("link",) if with_links else ())
             print(" ".join(columns), file=stdout)
             for row in output:
-                print(*(row[key] for key in columns), file=stdout)
+                print(*(row[key] for key in columns), *edit_delta_words(row), file=stdout)
                 if "body" in row:
                     print(row["id"], row["body"], file=stdout)
         return
@@ -474,6 +489,8 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc, names=
         for row in pending:
             if row["id"] == root_id:
                 root_row.update({key: row[key] for key in ("kind", "edited", "attention")})
+                if "edit_delta" in row:
+                    root_row["edit_delta"] = row["edit_delta"]  # P37
         if not args.no_body:
             body = stored_body(store, root_id)
             root_row["body"] = body if args.full else body[:400]
@@ -484,6 +501,8 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc, names=
             item = {key: row[key] for key in ITEM_COLUMNS + (("author_id",) if args.json else ())}
             if links is not None:
                 item["permalink"] = row["permalink"]
+            if "edit_delta" in row:
+                item["edit_delta"] = row["edit_delta"]  # P37
             if not args.no_body:
                 item["body"] = stored_body(store, row["id"])
             items.append(item)
@@ -513,13 +532,15 @@ def show_inbox(args, root, store, stdout, people=None, zone=timezone.utc, names=
               "author_name", text_label(row["author"]),
               *(("link", row.get("permalink") or "-") if with_links else ()), file=stdout)
         if "kind" in row:
-            print("kind", row["kind"], "edited", row["edited"], "attention", row["attention"], file=stdout)
+            print("kind", row["kind"], "edited", row["edited"], "attention", row["attention"],
+                  *edit_delta_words(row), file=stdout)
         if "body" in row:
             print(row["body"], file=stdout)
         for item in group["items"]:
             print(*(legacy_author(item_ids[item["id"]]) if key == "author" else item[key]
                     for key in ITEM_COLUMNS), text_label(item["author"]),
-                  *((item.get("permalink") or "-",) if with_links else ()), file=stdout)
+                  *((item.get("permalink") or "-",) if with_links else ()),
+                  *edit_delta_words(item), file=stdout)
             if "body" in item:
                 print(item["body"], file=stdout)
         if "owner_replied_at" in group:

@@ -5,9 +5,11 @@ from decimal import Decimal
 from collections import Counter
 import logging
 from pathlib import Path
+import re
 import threading
 import sys
 import time
+import unicodedata
 from urllib.parse import quote
 
 from slack_dispatch.config.schema import FOLLOWUP_POLICIES, Redaction
@@ -18,6 +20,7 @@ from slack_dispatch.ingest.user_directory import carries_app_evidence, is_bot_me
 from slack_dispatch.notify.wake import Deliver
 from slack_dispatch.notify import effective_lane, notify_human, wake_switch_path
 from slack_dispatch.notify.dispatch_card import card_wanted
+from slack_dispatch.notify.file_inbox import FileInboxNotifier
 from slack_dispatch.notify.session_resolve import SessionResolver
 from slack_dispatch.notify.base import DeliveryRecorder, error_detail
 from slack_dispatch.notify.session_resolve import AMBIGUOUS
@@ -25,7 +28,9 @@ from slack_dispatch.queue.human import digest_counts_text, export_jsonl, queue_c
 from slack_dispatch.resolver.owner import VERSION as OWNER_VERSION, OwnerResolver, suggestion_for
 from slack_dispatch.router.apply import apply_decision
 from slack_dispatch.router.classifier import Suggestion
-from slack_dispatch.router.engine import NO_MENTION, exact_mention, is_mention_only, route
+from slack_dispatch.router.engine import (
+    NO_MENTION, attention_for, exact_mention, is_mention_only, route,
+)
 
 LOG = logging.getLogger(__name__)
 HUMAN_QUEUE = "human_queue"
@@ -148,6 +153,135 @@ def edit_text_changed(previous_body, text):
     if not isinstance(previous_body, str) or not isinstance(text, str):
         return True
     return comparable_text(text) != comparable_text(previous_body)
+
+
+def followup_ignore_cosmetic(config):
+    """wake_policy.followup_ignore_cosmetic (P37); configs without the key use False."""
+    return getattr(getattr(config, "wake_policy", None), "followup_ignore_cosmetic", False) is True
+
+
+# P37: broadcasts in raw mrkdwn (`<!here>`, `<!subteam^S1|@team>`); comparable_text drops
+# them, so they are read from the text before it.
+_BROADCAST = re.compile(r"<(![^<>|]*)(?:\|[^<>]*)?>")
+# P37: user and channel references as comparable_text leaves them (`<@U1>`, `<#C1>`).
+_REFERENCE = re.compile(r"<([@#][^<>|\s]*)>")
+# P37: a link target as comparable_text leaves it (bare, label dropped), and the trailing
+# punctuation that belongs to the sentence rather than to the link.
+_LINK = re.compile(r"(?<![\w@#!])(?:[A-Za-z][A-Za-z0-9+.-]*://|mailto:)[^\s<>]+")
+_LINK_TRAIL = ".,;:!?)]}'\""
+# P37 fix1: token classes of the cosmetic rule (after NFKC and case folding).
+# Sentence punctuation tokens and emoticon tokens are decoration.
+_SENTENCE = frozenset(".,!?~;\u2026")
+_EMOTICON_MARKS = frozenset("()[]{}^")
+# Characters stripped from the ends of a content token, only while the character next to
+# them inside the token is not a digit.
+_TOKEN_EDGE = frozenset(".,!?~;\u2026:'\"()[]")
+# A Slack emoji shortcode group (`:smile:`, `:+1:`, `:wave::skin-tone-2:`).
+_SHORTCODE = re.compile(r":[a-z0-9_+-]+:(?::skin-tone-[2-6]:)?")
+# Emoji joiners and presentation marks: zero width joiner, variation selectors 15 and 16,
+# combining enclosing keycap.
+_EMOJI_JOINERS = frozenset("\u200d\ufe0e\ufe0f\u20e3")
+_PRESENTATION = str.maketrans("", "", "\ufe0e\ufe0f")
+
+def edit_parts(text):
+    """P37: (plain, entities) of a stored body or an edit text. `entities` lists the Slack
+    entity targets (`@U1`, `#C1`, `!here`, a link URL; labels ignored) and `plain` is the
+    comparable_text form with those entities replaced by a space. A link rendered from rich
+    text blocks (bare URL) and from raw mrkdwn (`<url|label>`) give the same target."""
+    entities = [match.group(1) for match in _BROADCAST.finditer(text)]
+    plain = comparable_text(text)
+
+    def reference(match):
+        entities.append(match.group(1))
+        return " "
+
+    def link(match):
+        url = match.group(0).rstrip(_LINK_TRAIL)
+        entities.append(url)
+        return " " + match.group(0)[len(url):]
+
+    plain = _LINK.sub(link, _REFERENCE.sub(reference, plain))
+    return plain, entities
+
+
+def _letter_or_digit(char):
+    return unicodedata.category(char)[0] in "LN"
+
+
+def _emoji_char(char):
+    """P37 fix1: an emoji character (Unicode category So), a skin tone modifier, a tag
+    character or an emoji joiner or presentation mark."""
+    code = ord(char)
+    return (char in _EMOJI_JOINERS or 0x1F3FB <= code <= 0x1F3FF or 0xE0020 <= code <= 0xE007F
+            or unicodedata.category(char) == "So")
+
+
+def canonical_token(token):
+    """P37 fix1: a content token without the sentence punctuation, colons, quotes and
+    brackets at its ends; an end character stays when the character next to it inside the
+    token is a digit (`Done.` -> `done`, `5.` and `1.5` unchanged). Nothing inside the token
+    is removed."""
+    start, end = 0, len(token)
+    while start < end and token[start] in _TOKEN_EDGE and not (
+            start + 1 < end and token[start + 1].isdigit()):
+        start += 1
+    while end > start and token[end - 1] in _TOKEN_EDGE and not (
+            end - 2 >= start and token[end - 2].isdigit()):
+        end -= 1
+    return token[start:end]
+
+
+def cosmetic_tokens(plain):
+    """P37 fix1: (content, emoji) of the non-entity text `plain` after NFKC and case folding,
+    split on whitespace. Sentence punctuation tokens (only `. , ! ? ~ ; \u2026`) and emoticon
+    tokens (no letter or digit, at least one of `( ) [ ] { } ^`) are dropped. Emoji tokens
+    (only emoji characters and/or shortcode groups) go to the `emoji` Counter (variation
+    selectors removed). Every other token is a content token, kept in order in its
+    canonical form (`canonical_token`). One pass, linear in the text."""
+    content, emoji = [], Counter()
+    for token in unicodedata.normalize("NFKC", plain).casefold().split():
+        if all(char in _SENTENCE for char in token):
+            continue
+        if not any(_letter_or_digit(char) for char in token) and any(
+                char in _EMOTICON_MARKS for char in token):
+            continue
+        if all(_emoji_char(char) for char in _SHORTCODE.sub("", token)):
+            emoji[token.translate(_PRESENTATION)] += 1
+            continue
+        content.append(canonical_token(token))
+    return content, emoji
+
+
+def cosmetic_edit(previous_body, text):
+    """P37 fix1: whether an edit changed decoration only. True when the Slack entity sets
+    (targets, labels ignored) are equal, the canonical content token sequences are equal
+    (same tokens in the same order) and every emoji token of the old text is still in the
+    new text (emoji may be added, never removed or swapped). Sentence punctuation and
+    emoticon tokens may change freely. Conservative: wording changes, operators and
+    punctuation next to digits always count. A missing stored body (or new text) is never
+    cosmetic."""
+    if not isinstance(previous_body, str) or not isinstance(text, str):
+        return False
+    old_plain, old_entities = edit_parts(previous_body)
+    new_plain, new_entities = edit_parts(text)
+    if set(old_entities) != set(new_entities):
+        return False
+    old_content, old_emoji = cosmetic_tokens(old_plain)
+    new_content, new_emoji = cosmetic_tokens(new_plain)
+    return old_content == new_content and not old_emoji - new_emoji
+
+
+def edit_delta(previous_body, text):
+    """P37: {"added": n, "removed": m}: whitespace-separated tokens of the new text missing
+    from the old and of the old missing from the new (multiset difference; each Slack entity
+    is one token). None when either side is missing. No token text is kept."""
+    if not isinstance(previous_body, str) or not isinstance(text, str):
+        return None
+    old_plain, old_entities = edit_parts(previous_body)
+    new_plain, new_entities = edit_parts(text)
+    old = Counter(old_plain.split()) + Counter(old_entities)
+    new = Counter(new_plain.split()) + Counter(new_entities)
+    return {"added": sum((new - old).values()), "removed": sum((old - new).values())}
 
 
 def redaction_settings(config):
@@ -588,6 +722,15 @@ class Pipeline:
         # appear in the heartbeat once either is nonzero.
         self.edits_ignored = 0
         self.edits_woken = 0
+        # P37: edits of an item holding a lane recorded without re-delivery because they
+        # were cosmetic (also counted in edits_ignored), and excluded:no_mention posts routed
+        # as a first assignment because an edit added an owner mention; each appears in the
+        # heartbeat once nonzero.
+        self.edits_cosmetic = 0
+        self.edits_mention_added = 0
+        # P37: message id -> edit_delta for the followup inbox record being written (set
+        # only around that write).
+        self._edit_deltas = {}
         # P22: message id -> clock time of the last followup wake offered for an edit
         # (memory only, oldest dropped past NAME_TRACK_LIMIT).
         self._edit_wakes = {}
@@ -636,6 +779,7 @@ class Pipeline:
         self.wake_now_ids = set()
         self._export_pending = False
         self.human = HumanQueueDelivery(config, store, self.notifiers, clock)
+        self._wrap_inbox_lookups()
         # P35: credential redaction before any text reaches the store or the router; the
         # store applies the same settings to every body it writes.
         self.redaction = redaction_settings(config)
@@ -706,6 +850,10 @@ class Pipeline:
                 result["owner_reply_closed"] = self.owner_reply_closed
             if self.edits_ignored or self.edits_woken:
                 result.update(edits_ignored=self.edits_ignored, edits_woken=self.edits_woken)
+            if self.edits_cosmetic:
+                result["edits_cosmetic"] = self.edits_cosmetic
+            if self.edits_mention_added:
+                result["edits_mention_added"] = self.edits_mention_added
             if self.catchup_woken or self.backfill_silent:
                 result.update(catchup_woken=self.catchup_woken, backfill_silent=self.backfill_silent)
             if self.excluded_no_mention:
@@ -723,6 +871,33 @@ class Pipeline:
             if redacted:
                 result["credentials_redacted"] = redacted
             return result
+
+    def _wrap_inbox_lookups(self):
+        """P37: file_inbox notifiers look messages up through the pipeline, so a followup
+        record of a re-delivered edit carries its `edit_delta` (inbox.files.record)."""
+        for notifier in self.notifiers:
+            lookup = getattr(notifier, "lookup", None)
+            if not isinstance(notifier, FileInboxNotifier) or not callable(lookup):
+                continue
+            if getattr(lookup, "edit_delta_owner", None) is self:
+                continue
+
+            def wrapped(message_id, _lookup=lookup):
+                row = _lookup(message_id)
+                delta = self._edit_deltas.get(message_id)
+                return dict(row, edit_delta=delta) if row is not None and delta else row
+
+            wrapped.edit_delta_owner = self
+            notifier.lookup = wrapped
+
+    def _send_inbox(self, lane, mid, delta=None):
+        """The durable inbox write of one item; P37: `delta` goes on its followup record."""
+        if delta is not None:
+            self._edit_deltas[mid] = delta
+        try:
+            return self._send("lane", lane, [mid], inbox=True)
+        finally:
+            self._edit_deltas.pop(mid, None)
 
     def _thread_key(self, message, lane):
         return (message["source"], message["channel"],
@@ -961,19 +1136,34 @@ class Pipeline:
             self.excluded_not_member += int(event.get("channel") not in self.config.excluded_channels)
             return HandleResult(mid, recorded.kind, state="excluded")
         changed = event.get("subtype") == "message_changed"
-        verdict = self._edit_verdict(mid, message, recorded, event) if changed else None
+        verdict = None
+        mention_added = changed and self._mention_added(message, recorded, event)
+        if mention_added:
+            # P37: an excluded:no_mention post whose edit adds an owner mention is routed as
+            # a first assignment, under every wake_policy.followup value (counted below once
+            # the routing assigned it).
+            verdict = EDIT_FIRST
+        elif changed:
+            verdict = self._edit_verdict(mid, message, recorded, event)
+        cosmetic = False
         if changed and edit_holds_lane(message, recorded) and verdict != EDIT_IGNORE:
             # P24: an item that already has a lane (assigned, acked or done; rerouted or
             # assigned by hand included) is never routed again by an edit. Only EDIT_WAKE
             # re-delivers it, to its current lane, as a followup.
             if verdict != EDIT_WAKE or not edit_redeliverable(message):
                 verdict = EDIT_IGNORE
+            elif followup_ignore_cosmetic(self.config) and cosmetic_edit(
+                    self._previous_body(recorded), event.get("text")):
+                # P37: wake_policy.followup_ignore_cosmetic: punctuation, symbols, emoji,
+                # case and whitespace only; recorded like an ignored edit.
+                self.edits_cosmetic += 1
+                verdict, cosmetic = EDIT_IGNORE, True
             else:
                 return self._redeliver_edit(mid, message, recorded, event)
         if verdict == EDIT_IGNORE:
             # P22: the ledger already holds the edit (body, edited_at); no routing, inbox
             # record, wake offer or human notice, and the item keeps its state and lane.
-            self._edit_ignored(mid)
+            self._edit_ignored(mid, cosmetic=cosmetic)
             return HandleResult(mid, recorded.kind, state=message.get("state"),
                                 lane=message.get("lane"))
         # P22: only edit wakes count in the edit counters and the edit wake window; an edit
@@ -1016,6 +1206,8 @@ class Pipeline:
         if self.owner_resolver is not None:
             suggester = OwnerFirstSuggester(self.owner_resolver, self.store, self.suggester)
         outcome = apply_decision(self.store, mid, decision, suggester)
+        if mention_added and outcome.state == "assigned":
+            self.edits_mention_added += 1  # P37 fix1: only an assignment made here counts
         if outcome.state == "excluded" and decision.reason == NO_MENTION:
             # P26: recorded as excluded with note excluded:no_mention; no inbox record,
             # wake, queue entry or human notice follows (the branches below skip excluded).
@@ -1041,7 +1233,8 @@ class Pipeline:
                 self.store.mark_followup(mid)
                 message["followup"] = True
             # Durable inboxes must survive disabled, deferred and batched wakes.
-            inboxed = self._send("lane", lane, [mid], inbox=True)
+            inboxed = self._send_inbox(lane, mid, self._edit_delta(recorded, event) if edit
+                                       else None)
             catchup = (event.get("origin") == "reconcile"
                        and catchup_recent(self.config, event.get("ts"), self.clock()))
             if event.get("origin") == "reconcile" and not catchup:
@@ -1088,9 +1281,46 @@ class Pipeline:
         if decision.attention == "owner_mention" and not exact_mention(message, self.config):
             self.owner_name_mentions += 1
 
-    def _edit_ignored(self, mid):
+    def _edit_ignored(self, mid, *, cosmetic=False):
         self.edits_ignored += 1
-        LOG.info("Edit recorded without wake id=%s", mid)
+        if cosmetic:
+            LOG.info("Edit recorded without wake id=%s cosmetic", mid)
+        else:
+            LOG.info("Edit recorded without wake id=%s", mid)
+
+    def _previous_body(self, recorded):
+        """The stored body before this edit; P35: a body stored before redaction existed is
+        compared in its redacted form."""
+        previous = getattr(recorded, "previous_body", None)
+        if isinstance(previous, str) and self.redaction.enabled:
+            previous = redact(previous, self.redaction.kinds)[0]
+        return previous
+
+    def _edit_delta(self, recorded, event):
+        """P37: the edit size hint of a re-delivered edit (None without both texts)."""
+        return edit_delta(self._previous_body(recorded), event.get("text"))
+
+    def _mention_added(self, message, recorded, event):
+        """P37: whether this edit turns an `excluded:no_mention` post into one with attention
+        `owner_mention` (an exact owner or mention user mention, or a configured name).
+
+        The item must have been `excluded` with that note before the edit, the channel must
+        not be excluded now, the edit must not be a bot post, and the new text must give
+        `owner_mention` while the stored text before the edit did not. Without a stored body
+        (store_body off) the note alone stands for the old text: the post was excluded
+        because it had no owner mention. Other exclusions never qualify."""
+        if edit_state(message, recorded) != "excluded" or message.get("note") != NO_MENTION:
+            return False
+        text = event.get("text")
+        config = self.routing_config()
+        if (not isinstance(text, str) or event.get("is_bot")
+                or message.get("channel") in config.excluded_channels):
+            return False
+        if attention_for(dict(message, text=text, is_bot=False), config) != "owner_mention":
+            return False
+        previous = self._previous_body(recorded)
+        return not (isinstance(previous, str) and attention_for(
+            dict(message, text=previous, is_bot=False), config) == "owner_mention")
 
     def _note_edit_wake(self, mid):
         self.edits_woken += 1
@@ -1117,7 +1347,8 @@ class Pipeline:
         self._note_name_mention(message, decision)
         if decision.attention is not None or message.get("attention") is not None:
             self.store.set_attention(mid, decision.attention)
-        self._send("lane", lane, [mid], inbox=True)
+        # P37: the followup record carries the edit size hint.
+        self._send_inbox(lane, mid, self._edit_delta(recorded, event))
         # P36: the re-evaluated attention reaches the wake engine (debounce bypass).
         wake = self.wake_engine.offer(lane, dict(message, attention=decision.attention),
                                       message.get("author"))
@@ -1150,13 +1381,15 @@ class Pipeline:
         state = edit_state(message, recorded)
         if state == "new":
             return EDIT_FIRST
+        if state == "excluded" and message.get("note") != NO_MENTION:
+            # P37: an excluded channel, a bot, a channel the operator is not a member of or
+            # an operator exclusion is never routed again by an edit, under any policy.
+            return EDIT_IGNORE
         policy = followup_policy(self.config)
         if policy != "changed_after_ack":
             return EDIT_WAKE if policy == "always" else EDIT_IGNORE
         # P35: a body stored before redaction existed is compared in its redacted form.
-        previous = getattr(recorded, "previous_body", None)
-        if isinstance(previous, str) and self.redaction.enabled:
-            previous = redact(previous, self.redaction.kinds)[0]
+        previous = self._previous_body(recorded)
         if not edit_text_changed(previous, event.get("text")):
             return EDIT_IGNORE
         if state == "human_pending":

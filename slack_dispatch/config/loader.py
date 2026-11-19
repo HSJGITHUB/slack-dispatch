@@ -168,12 +168,15 @@ def parse_config(raw):
     catchup_minutes = wake.get("catchup_minutes", 30)
     if type(catchup_minutes) is not int or catchup_minutes < 0:
         raise ConfigError("wake_policy.catchup_minutes must be a non-negative integer")
+    ignore_cosmetic = boolean(wake.get("followup_ignore_cosmetic", False),
+                              "wake_policy.followup_ignore_cosmetic")
     wake = WakePolicy("immediate", boolean(required(wake, "enabled", "wake_policy"), "wake_policy.enabled"),
                       *(positive(required(wake, k, "wake_policy"), "wake_policy." + k)
                         for k in ("debounce_seconds", "storm_per_hour", "batch_seconds")),
                       immediate_users=immediate_users, owner_user=owner_user,
                       state_dir=string(wake.get("state_dir", "state"), "wake_policy.state_dir"),
-                      followup=followup, catchup_minutes=catchup_minutes)
+                      followup=followup, catchup_minutes=catchup_minutes,
+                      followup_ignore_cosmetic=ignore_cosmetic)
     inbox = mapping(data.get("inbox", {"root": "inbox"}), "inbox")
     inbox = Inbox(string(required(inbox, "root", "inbox"), "inbox.root"))
     adapters = []

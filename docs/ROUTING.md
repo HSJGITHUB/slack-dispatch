@@ -461,10 +461,10 @@ owner posts before routing, and bot posts carry no attention under `route_or_exc
 `exclude_all`. The matched text is the redacted text (P35).
 
 Edits keep the P22 and P24 edit semantics, the same as for an edit that adds an `@`
-mention: under `wake_policy.followup: changed_after_ack` (the default) an edit of an
-`excluded:no_mention` post is recorded only (state, note and attention unchanged); under
-`always` it is routed again and, with the name, assigned like a new name post (followup
-inbox record); under `never` it is recorded only.
+mention. Since P37 an edit that adds the name (or an exact mention) to an
+`excluded:no_mention` post is routed as a first assignment under every
+`wake_policy.followup` value (see "Edit handling (P37)"). Before P37 it was recorded only
+under `changed_after_ack` and `never` and routed again as an edit wake under `always`.
 
 The heartbeat counter `owner_name_mentions` (present once nonzero) counts routing
 decisions whose `owner_mention` came from a configured name and not from an exact mention
@@ -479,3 +479,99 @@ mention or a `mentions` id). Attention `always_human` and no attention are debou
 before; the storm guard and the global wake switch still apply to every message. A wake
 request served by the service (console wake, P21) offers the stored ledger row, so its
 stored `owner_mention` flag bypasses the debounce there too.
+
+## Edit handling (P37)
+
+Three additions to the P22 and P24 edit rules (SERVICE.md). Nothing changes for an edit
+that does not meet them.
+
+### Cosmetic edits (`wake_policy.followup_ignore_cosmetic`)
+
+Optional boolean, default `false` (today's behaviour). With `true`, an edit of an item
+that holds a lane (state `assigned`, `acked` or `done` with a lane) that would otherwise be
+re-delivered as a followup is recorded only (like an ignored edit: ledger body and
+`edited_at` updated, no inbox record, wake or notice; counted in `edits_ignored` and in the
+heartbeat counter `edits_cosmetic`) when the edit changed decoration only. The rule is
+token based and conservative (fix1): when in doubt, an edit is not cosmetic.
+
+- The set of Slack entities is unchanged: user and channel references (`<@U...>`,
+  `<#C...>`), broadcasts (`<!here>`, `<!subteam^...>`) and links, by target; labels are
+  ignored.
+- The rest of the text (NFKC, case folded) is split on whitespace and each token is
+  classified:
+  - sentence punctuation token: only `. , ! ? ~ ; …` characters (decoration);
+  - emoticon token: no letter and no digit, and at least one of `( ) [ ] { } ^`, for
+    example `=)`, `:)`, `:-(`, `^^`, `(^_^)` (decoration);
+  - emoji token: only emoji characters (with joiners, variation selectors and skin tone
+    modifiers) and/or shortcode groups (`:smile:`, `:+1:`, `:wave::skin-tone-2:`);
+  - every other token is a content token: anything with a letter or digit, mixed tokens
+    and operators or symbols standing alone (`>`, `<`, `>=`, `=`, `+`, `-`, `->`, `/`,
+    `%`, `&`, `|`, `#`, `$`).
+- A content token is compared in its canonical form: `. , ! ? ~ ; … : ' " ( ) [ ]` are
+  stripped from its ends only while the character next to them inside the token is not a
+  digit; nothing inside the token is removed. `Done.` equals `done!!!`; `1.5` and `15`,
+  `5.` and `5`, `don't` and `dont` differ.
+- The canonical content tokens of both texts must be the same in the same order, and every
+  emoji token of the old text must still be in the new text. Sentence punctuation and
+  emoticon tokens may be added, removed or changed freely.
+
+Limits, stated plainly: any wording change re-delivers (a changed, added, removed, joined or
+split word, a changed number, an added negation, an added or removed operator such as `-`,
+`->` or `/`); emoji may be added but never removed or swapped (`:+1:` to `:-1:`, `:yes:`
+to `:no:` and a removed emoji re-deliver); punctuation next to a digit counts as content
+(`5.` to `5` re-delivers). Emoji or emoticons glued to a word (`done:)`, `ok:smile:`) make
+a different content token and re-deliver. Both sides are first reduced to the P24
+comparable form, so a body rendered from rich text blocks and the raw mrkdwn of the same
+message compare equal (a link is its URL either way); that form also drops a line-leading
+`>` quote marker. A missing stored body (`ledger.store_body` off) is never cosmetic. The
+check is one linear pass over each text.
+
+The option applies under every `wake_policy.followup` value, but only where an edit would
+re-deliver an item that holds a lane: an acked or done item under `changed_after_ack`,
+any such item under `always`. Edits that collapse whitespace only, or add or remove only a
+broadcast, were never text changes under the P24 comparison and stay ignored without the
+option too.
+
+### An edit that adds an owner mention to an excluded post
+
+When a post was excluded with note `excluded:no_mention` (a mention-only channel, P26 and
+P30) and an edit gives it attention `owner_mention` (an exact mention of
+`always_human.owner_user` or a `mention_users` id, or a configured
+`always_human.mention_texts` name, P36) that the stored text before the edit did not give,
+the edit is routed as a first assignment (the P22 `EDIT_FIRST` path), under every
+`wake_policy.followup` value: the normal routing order (the channel default lane in a
+mention-only channel), attention, an inbox record, a wake offer (the owner mention bypasses
+the debounce), the thread binding and the human notice per
+`human_queue.assigned_notice_flags`, exactly as if the post had arrived with the mention.
+It counts in the heartbeat counter `edits_mention_added`, not in `edits_woken`. Like every
+`EDIT_FIRST` record the inbox record has kind `followup` (the message was edited) and the
+inbox view shows it as kind `new`, edited `yes`; it carries no `edit_delta`. The ledger
+note is not cleared by this first-assignment path: the assigned row keeps note
+`excluded:no_mention` (`apply_decision` and `set_route` set state, lane and route reason
+only; a test pins this). `edits_mention_added` counts only edits whose routing ended in an
+assignment (fix1); an edit that ends elsewhere (an operator's own edit closed as an owner
+post, or a human queue item in a channel without a default lane) is not counted.
+
+Without a stored body (`ledger.store_body` off) the `excluded:no_mention` note stands for
+the old text. The edit must not be a bot post and the channel must not be excluded now.
+Once assigned, the item holds a lane, so later edits follow the P22 and P24 rules for such
+items (a second identical edit does nothing under `changed_after_ack` and `never`; under
+`always` every edit of an item that holds a lane re-delivers a followup, as before).
+
+Other exclusions are never routed again by an edit, under any policy: an excluded channel
+(`excluded`), a bot (`excluded:bot`), a channel the operator is not a member of
+(`excluded:not_member`) and an operator exclusion (`human:console` and the like). Before
+P37 `always` routed such an edit again. An `excluded:no_mention` post edited without
+gaining an owner mention keeps the P22 behaviour (recorded only, or routed again and still
+excluded under `always`). An edit that removes a mention never excludes an item or moves
+it out of its lane.
+
+### Edit size hint
+
+A followup inbox record written for a re-delivered edit (an `EDIT_WAKE`: the P24
+re-delivery of an item that holds a lane, or the routing path under `always`) carries
+`edit_delta: {"added": n, "removed": m}`, the whitespace-separated tokens present in the
+new text but not the old and in the old but not the new (multiset difference). Each Slack
+entity counts as one token by its target (labels ignored); both sides use the P24
+comparable form. No token text is stored. Without both texts (no stored body) the field is
+left out. `inbox <lane>` shows it as `edit +n -m` (see INBOX.md).

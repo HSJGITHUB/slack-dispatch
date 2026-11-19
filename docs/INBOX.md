@@ -82,7 +82,10 @@ Header lines label tables; data lines begin with ids. Notes are not echoed.
 ## Durable formats and locking
 
 Each `<root>/<lane>.jsonl` line has exactly `id`, `delivered_at`, `channel`, `ts`,
-`thread_ts`, `followup`, and `kind`. Kinds include `new`, `followup`, `reroute`, and P7A `backfill`.
+`thread_ts`, `followup`, and `kind`, plus (P37) the optional `edit_delta` on a followup
+record of a re-delivered edit: `{"added": n, "removed": m}`, token counts only, never
+text. `append` rejects `edit_delta` on any other kind or with values that are not
+non-negative integers. Kinds include `new`, `followup`, `reroute`, and P7A `backfill`.
 Since P9, kind `followup` is written only for an edited message (message_changed,
 ledger `edited_at`). A reply delivered within the followup window of an earlier
 delivery to its thread keeps its ordinary kind (`new` or `backfill`) with
@@ -96,6 +99,16 @@ in text and JSON. Rows sort by that first delivery. Kind is the latest appended
 non-followup kind (default `new` if all records are followups). Edited is `yes`
 if any record has kind `followup` or the ledger has edited_at; the `followup` field
 alone does not mark an edit. Otherwise it is `no`.
+P37: the latest followup record of an id decides its edit size hint. When it carries
+`edit_delta`, the text list row and the thread view (root `kind` line and item line) end
+with `edit +n -m` (for example `edit +1 -0`), after every other column, and JSON rows,
+thread roots and thread items carry `edit_delta`. Rows whose latest followup record has no
+`edit_delta` (or that have no followup record) print exactly as before; the header line is
+unchanged.
+With `wake_policy.followup_ignore_cosmetic: true` an edit that changed decoration only
+(sentence punctuation, emoticons, added emoji, case, spacing, link or mention labels)
+writes no followup record at all; the token rule and its limits are in ROUTING.md
+("Edit handling (P37)").
 Missing attention and author values display `-`.
 
 Writers hold `<lane>.lock`; readers use it only when it already exists.

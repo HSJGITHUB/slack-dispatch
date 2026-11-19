@@ -6,6 +6,36 @@ This project follows Semantic Versioning. Versions below 1.0 may change interfac
 
 ## [Unreleased]
 
+### P37 edit handling
+- New optional `wake_policy.followup_ignore_cosmetic` (default false keeps today's
+  behaviour). With true, an edit of an item that holds a lane that would be re-delivered as
+  a followup is recorded only when it changed decoration only, by a conservative token
+  rule (fix1): the Slack entity set (mentions, channel references, broadcasts, links by
+  target) is unchanged, the content tokens (anything with a letter or digit, and operators
+  such as `-`, `>`, `->`, `/` standing alone; end punctuation stripped only away from
+  digits) are the same in the same order after NFKC and case folding, and every emoji of the
+  old text is still there. Sentence punctuation (`. , ! ? ~ ;`) and emoticons (`=)`, `:)`,
+  `^^`) may change freely; emoji may be added but not removed or swapped. No similarity
+  threshold: any wording change, a changed number (`1.5` to `15`), an operator change
+  (`x > 5` to `x < 5`) or punctuation next to a digit always re-delivers. Heartbeat counter `edits_cosmetic` once nonzero (such edits also count in
+  `edits_ignored`). Live case: a lane closed an item and was woken again when the author
+  added an emoticon.
+- An `excluded:no_mention` post (mention-only channel) edited to add an owner mention
+  (exact mention, mention user or a configured name) is routed as a first assignment under
+  every `wake_policy.followup` value: default lane, attention, inbox record, wake, thread
+  binding and human notice as for a post that arrived with the mention. Heartbeat counter
+  `edits_mention_added` once nonzero (only edits that ended in an assignment). Before, it stayed excluded under the default policy,
+  so the operator never heard of it. Other exclusions (excluded channel, bot, not a member,
+  operator exclusion) are now never routed again by an edit, also under `always`.
+- Followup inbox records of a re-delivered edit carry `edit_delta: {"added": n,
+  "removed": m}` (whitespace-separated token counts, entities as one token, no text).
+  `inbox <lane>` text output appends `edit +n -m` to such rows (list and thread view) and
+  JSON carries the field; other rows print as before.
+- Test expectations changed: `tests/test_owner_name_mention.py` `EditParityTests` and
+  `EditParityAlwaysTests` (an edit adding a name or mention to an `excluded:no_mention`
+  post is now assigned under `changed_after_ack` and counts in `edits_mention_added`
+  instead of `edits_woken` under `always`).
+
 ### P36 owner name mention
 - New optional `always_human.mention_texts` (at most 20 names, each at least 2 characters
   after trimming; default empty keeps today's behaviour). A post whose text contains one,

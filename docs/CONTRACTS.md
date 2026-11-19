@@ -73,7 +73,7 @@ invoke a suggester. See ROUTING.md for the full precedence table.
 
 ## 5. Inbox record (per-lane JSONL, `inbox/<lane>.jsonl`)
 
-`{"id": message_id, "delivered_at": iso, "channel": str, "ts": str, "thread_ts": str | None, "followup": bool, "kind": "new" | "followup" | "reroute" | "backfill"}`. No body. Writers hold `inbox/<lane>.lock` while appending. Kind `followup` means edited (message_changed, ledger `edited_at`); a reply within the followup window keeps `new` or `backfill` with `followup: true` (P9).
+`{"id": message_id, "delivered_at": iso, "channel": str, "ts": str, "thread_ts": str | None, "followup": bool, "kind": "new" | "followup" | "reroute" | "backfill"}`, plus the optional P37 `"edit_delta": {"added": int, "removed": int}` on kind `followup` only. No body. Writers hold `inbox/<lane>.lock` while appending. Kind `followup` means edited (message_changed, ledger `edited_at`); a reply within the followup window keeps `new` or `backfill` with `followup: true` (P9).
 
 ## 6. Notifier contract (package `slack_dispatch.notify`)
 
@@ -856,3 +856,49 @@ All additive; no ledger schema change and no new store method.
   attention=decision.attention)` (the decision just made, not the row read before
   routing). The service wake request path offers the stored row, whose stored
   `owner_mention` flag now bypasses the debounce too.
+
+## P37 edit handling
+
+All additive; no ledger schema change and no new store method.
+
+- Config: `WakePolicy.followup_ignore_cosmetic: bool = False` from the optional
+  `wake_policy.followup_ignore_cosmetic` boolean; any other value raises `ConfigError`
+  (`... must be a boolean`, naming the key). `followup_ignore_cosmetic(config)` in
+  `slack_dispatch.pipeline` reads it (False when absent).
+- `slack_dispatch.pipeline` helpers: `edit_parts(text) -> (plain, entities)` (the P24
+  `comparable_text` form with user and channel references and links taken out as targets,
+  broadcasts read from the raw text first). fix1 token rule: `cosmetic_tokens(plain) ->
+  (content: list[str], emoji: Counter)` (NFKC, casefold, whitespace split; sentence
+  punctuation tokens and emoticon tokens dropped; emoji tokens, made only of emoji
+  characters and/or `:shortcode:` groups, counted with variation selectors removed; every
+  other token kept in order as `canonical_token(token)`, which strips `. , ! ? ~ ; … : '
+  " ( ) [ ]` from the ends only while the inner neighbour is not a digit),
+  `cosmetic_edit(previous_body, text) -> bool` (equal entity sets, equal canonical content
+  sequences and the old emoji multiset contained in the new; False when either side is not
+  a string; linear time) and `edit_delta(previous_body, text) -> dict | None`
+  (`{"added", "removed"}` multiset token counts; None when either side is missing).
+- `Pipeline._handle`: an edit of an item that holds a lane whose verdict is `EDIT_WAKE`
+  becomes `EDIT_IGNORE` when the option is on and `cosmetic_edit` holds; it counts in
+  `edits_ignored` and `Pipeline.edits_cosmetic` and logs `Edit recorded without wake
+  id=<id> cosmetic`.
+- `Pipeline._mention_added(message, recorded, event)`: True for an edit of an item whose
+  state before the edit was `excluded` with note `excluded:no_mention`, in a channel not
+  excluded now, not a bot post, whose new text gives `attention_for(...) ==
+  "owner_mention"` while the stored previous body (redacted, P35) did not (a missing body
+  counts as not). `_handle` then uses `EDIT_FIRST` under every policy and adds 1 to
+  `Pipeline.edits_mention_added` once `apply_decision` returned state `assigned` (fix1; the
+  owner post path and a human queue outcome do not count). The ledger note is left as
+  `excluded:no_mention`. `_edit_verdict` returns `EDIT_IGNORE` for every other
+  `excluded` item (note other than `excluded:no_mention`) under every policy.
+- Edit size hint: `Pipeline._send_inbox(lane, mid, delta=None)` writes the durable inbox
+  record; for an `EDIT_WAKE` (both `_redeliver_edit` and the routing path) the delta is
+  `edit_delta(previous body, event text)`. The pipeline wraps the `lookup` of each
+  `FileInboxNotifier` it is given at construction so that, during that write only, the
+  looked-up row carries `edit_delta`; a retried inbox write (after a failure) has no
+  delta. `inbox.files.valid_edit_delta(value)`; `record()` adds `edit_delta` to a followup
+  record when the message carries a valid one; `append()` keeps it (and rejects it on other
+  kinds or with invalid values). `inbox.cli.inbox_rows` takes the hint from the latest
+  followup record of each id; `edit_delta_words(row)` gives the text suffix
+  (`edit`, `+n`, `-m`).
+- Heartbeat: `edits_cosmetic` and `edits_mention_added` each appear in `snapshot()` once
+  nonzero. `edits_ignored`/`edits_woken` keep their P22 rule.
