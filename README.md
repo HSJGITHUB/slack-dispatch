@@ -1,5 +1,8 @@
 # slack-dispatch
 
+**A mailroom for AI agents.** Each incoming Slack message is logged once, routed to the agent
+lane that owns that work, or queued for a human when no rule fits.
+
 slack-dispatch is a resident service that takes every new Slack message once,
 records it in a SQLite ledger and routes it with deterministic first-match rules
 to a lane. A lane is one long-lived AI agent session per work stream. The service
@@ -23,10 +26,23 @@ The screenshots show synthetic demo data from `tools/demo`.
   exact mentions of the operator, and posts no rule matches. Those reach a human,
   who decides.
 
+## Where it fits
+
+- Teams that run AI-assisted workflows out of Slack: support and ops triage,
+  partner and vendor threads, internal requests, alert channels.
+- It matters more as the team grows. Every new channel, lane or person adds threads
+  that separate per-session sweeps can miss or answer twice. One intake with a ledger
+  keeps at most one owning lane per message, however many lanes are configured.
+- Ownership is plain configuration: channel and DM defaults, explicit tags such as
+  `[support]`, person rules, thread binding, and scope claims that a human confirms.
+- Humans stay in the loop. Unmatched posts wait in a human queue in the operator
+  console, posts from protected authors and operator mentions are flagged for
+  attention, and the service never posts to Slack.
+
 ## Status
 
 - Version 0.1.0. Early stage: interfaces may change.
-- Runs daily for one small team with about a dozen lanes.
+- In daily production use with about a dozen lanes.
 - The only service kit is for Windows (Task Scheduler templates in `deploy/windows/`).
   CI runs the test suite on Windows.
 - Not yet packaged for third-party installation. That is a roadmap item.
@@ -295,8 +311,8 @@ slack-dispatch는 Slack 새 메시지를 한 번씩 받아 SQLite 원장에 기�
 그 세션을 깨웁니다. 규칙으로 배정하지 못한 메시지와 사람이 봐야 하는 메시지는 사람
 큐에 남고, 운영자는 로컬 웹 콘솔에서 처리합니다. 서비스는 Slack에 글을 쓰지 않으며,
 외부 메시지 본문은 지시가 아닌 데이터로만 다룹니다. 버전은 0.1.0이고 초기 단계라
-인터페이스가 바뀔 수 있습니다. 현재 한 소규모 팀이 레인 열두 개 안팎으로 매일 쓰고
-있고, Windows용 서비스 키트만 있으며, 외부 설치용 패키징은 아직 로드맵 단계입니다.
+인터페이스가 바뀔 수 있습니다. 현재 레인 열두 개 안팎으로 매일 운영
+중이고, Windows용 서비스 키트만 있으며, 외부 설치용 패키징은 아직 로드맵 단계입니다.
 라이선스는 AGPL-3.0-only(Copyright (C) 2026 Hyunseok Jin)로, 누구나 같은 라이선스로
 사용·수정·재배포할 수 있고 수정본을 네트워크 서비스로 운영하면 그 사용자에게 수정된
 소스를 제공해야 합니다.
