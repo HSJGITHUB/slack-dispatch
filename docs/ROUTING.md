@@ -491,46 +491,66 @@ Optional boolean, default `false` (today's behaviour). With `true`, an edit of a
 that holds a lane (state `assigned`, `acked` or `done` with a lane) that would otherwise be
 re-delivered as a followup is recorded only (like an ignored edit: ledger body and
 `edited_at` updated, no inbox record, wake or notice; counted in `edits_ignored` and in the
-heartbeat counter `edits_cosmetic`) when the edit changed decoration only. The rule is
-token based and conservative (fix1): when in doubt, an edit is not cosmetic.
+heartbeat counter `edits_cosmetic`) when the edit changed decoration only. Decoration is a
+short positive list (P38 fix1); anything not listed re-delivers.
 
-- The set of Slack entities is unchanged: user and channel references (`<@U...>`,
-  `<#C...>`), broadcasts (`<!here>`, `<!subteam^...>`) and links, by target; labels are
-  ignored.
-- The rest of the text (NFKC, case folded) is split on whitespace and each token is
-  classified:
-  - sentence punctuation token: only `. , ! ? ~ ; …` characters (decoration);
-  - emoticon token: no letter and no digit, and at least one of `( ) [ ] { } ^`, for
-    example `=)`, `:)`, `:-(`, `^^`, `(^_^)` (decoration);
-  - emoji token: only emoji characters (with joiners, variation selectors and skin tone
-    modifiers) and/or shortcode groups (`:smile:`, `:+1:`, `:wave::skin-tone-2:`);
-  - every other token is a content token: anything with a letter or digit, mixed tokens
-    and operators or symbols standing alone (`>`, `<`, `>=`, `=`, `+`, `-`, `->`, `/`,
-    `%`, `&`, `|`, `#`, `$`).
-- A content token is compared in its canonical form: `. , ! ? ~ ; … : ' " ( ) [ ]` are
-  stripped from its ends only while the character next to them inside the token is not a
-  digit; nothing inside the token is removed. `Done.` equals `done!!!`; `1.5` and `15`,
-  `5.` and `5`, `don't` and `dont` differ.
-- The canonical content tokens of both texts must be the same in the same order, and every
-  emoji token of the old text must still be in the new text. Sentence punctuation and
-  emoticon tokens may be added, removed or changed freely.
+An edit is cosmetic only when every point holds:
 
-Limits, stated plainly: any wording change re-delivers (a changed, added, removed, joined or
-split word, a changed number, an added negation, an added or removed operator such as `-`,
-`->` or `/`); emoji may be added but never removed or swapped (`:+1:` to `:-1:`, `:yes:`
-to `:no:` and a removed emoji re-deliver); punctuation next to a digit counts as content
-(`5.` to `5` re-delivers). Emoji or emoticons glued to a word (`done:)`, `ok:smile:`) make
-a different content token and re-deliver. Both sides are first reduced to the P24
-comparable form, so a body rendered from rich text blocks and the raw mrkdwn of the same
-message compare equal (a link is its URL either way); that form also drops a line-leading
-`>` quote marker. A missing stored body (`ledger.store_body` off) is never cosmetic. The
-check is one linear pass over each text.
+- The Slack entity sets are equal: user and channel references (`<@U...>`, `<#C...>`),
+  broadcasts (`<!here>`, `<!subteam^...>`) and links, by target; labels are ignored.
+- Formatting markers are content. The rule reads the text with Slack formatting kept:
+  strike-through `~...~`, bold `*...*`, italic `_..._`, inline code and code fences, and a
+  line-leading `>` or `&gt;` quote marker. Adding, removing or moving any of them is not
+  cosmetic. `&lt;`, `&gt;` and `&amp;` are decoded, so `&gt; a` equals `> a`.
+- The text is normalised with NFC (not NFKC) and case folded; the Greek question mark
+  U+037E counts as `?`. Full-width and compatibility forms (`ｏｋ`, `①`, `x²`, `㎏`) differ
+  from their ASCII forms and re-deliver.
+- The text is split on whitespace. A token is decoration only if it is one of:
+  - a run made only of `.` `!` `…` `,` characters;
+  - one of these exact emoticons: `:)` `:-)` `=)` `(:` `;)` `;-)` `:(` `:-(` `^^` `^_^`
+    `^-^`;
+  - a token made only of pleasantry emoji: the faces U+1F600 to U+1F644, U+1F910 to
+    U+1F92F (without the hand signs U+1F918 to U+1F91F) and U+1F970 to U+1F97A, and 🙏 👏
+    🎉 ✨ 🙇 ❤️ 🧡 💛 💚 💙 💜 (with variation selectors and skin tone modifiers), or the
+    shortcodes `:smile:` `:slightly_smiling_face:` `:grinning:` `:grin:` `:blush:`
+    `:smiley:` `:wink:` `:joy:` `:sweat_smile:` `:relaxed:` `:pray:` `:clap:` `:tada:`
+    `:sparkles:` `:bow:` `:heart:` (each with an optional skin tone suffix). The list is
+    one constant, `PLEASANTRY` in `slack_dispatch.pipeline`.
+  Every other token is content: any token with a letter or digit, a bracket, a quote,
+  `~`, `;`, `?`, an operator or a formatting marker, and any emoji or shortcode not on the
+  pleasantry list (thumbs, check marks, crosses, circles, signs, question and exclamation
+  emoji, arrows, numbers, flags, objects).
+- A content token is compared in its canonical form: only a trailing run of `.` `!` `…`
+  `,` `~` is stripped, and only when the character before the run is not a digit (`Done.`
+  equals `done!!!`, `ok~` equals `ok`; `5.` and `5` differ). Nothing else is stripped: no
+  leading characters, brackets, quotes, colons or semicolons. A `~` that closes a
+  strike-through span is kept.
+- The canonical content tokens of both texts are the same in the same order, and every
+  pleasantry emoji of the old text is still in the new text (pleasantry emoji may be added,
+  never removed or swapped; skin tones and variation selectors do not count). Decoration
+  runs and listed emoticons may be added, removed or changed.
+
+Anything not listed above re-delivers. Examples: `yes` to `yes?`, `승인` to `승인 ❌`,
+`ok` to `ok :+1:`, `a [✓]` to `a [ ]`, `진행 (보류)` to `진행 보류`, `~yes~ ok` to
+`yes ok!` (strike-through removed while other decoration changed), `5 ~ 6` to `5 6`,
+`x2` to `x²`. Still cosmetic: `Done.` to `done!!!`, `done` to `done :)`, `done` to
+`done 🎉`, `ok` to `OK`, and spacing or link and mention label changes. Both sides need a
+stored body (`ledger.store_body`); a missing one is never cosmetic. The check is one linear
+pass over each text.
 
 The option applies under every `wake_policy.followup` value, but only where an edit would
 re-deliver an item that holds a lane: an acked or done item under `changed_after_ack`,
 any such item under `always`. Edits that collapse whitespace only, or add or remove only a
 broadcast, were never text changes under the P24 comparison and stay ignored without the
 option too.
+
+Known gap (P38 fix1, not fixed): the cosmetic rule only runs on an edit that the P24
+comparison already counts as a text change. That comparison (`comparable_text`) drops
+strike-through, bold, italic, code and quote markers, and a body rendered from rich text
+blocks carries no style or quote markers at all. So an edit that only adds or removes
+strike-through or a quote marker is no text change and is never re-delivered under any
+policy, with or without the option. Changing that needs the block rendering to keep the
+markers, which changes the stored body and the router input.
 
 ### An edit that adds an owner mention to an excluded post
 

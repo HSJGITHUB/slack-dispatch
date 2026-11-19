@@ -260,6 +260,32 @@ class FollowupWakeTests(unittest.TestCase):
         self.assertEqual((self.offers.call_count, self.records()[-1]["kind"]), (2, "followup"))
         self.assertIsNone(self.row(mid)["body"])
 
+    def test_formatting_only_edits_are_no_text_change_known_gap(self):
+        """P38 fix1 evidence (known gap, not fixed): under the default changed_after_ack and
+        without followup_ignore_cosmetic, an edit of an acked item that only adds or removes
+        strike-through or a quote marker is no text change under the P24 comparison
+        (comparable_text drops `~...~` and a line-leading `>`), so it is recorded and never
+        re-delivered. The block path is in test_edit_reroute_guard."""
+        self.make_pipeline()
+        pairs = (("[support] ~yes~", "[support] yes"), ("[support] yes", "[support] ~yes~"),
+                 ("[support] ~old plan~ new plan", "[support] old plan new plan"),
+                 ("[support] yes", "> [support] yes"), ("[support] yes", "&gt; [support] yes"))
+        for index, (old, new) in enumerate(pairs):
+            with self.subTest(old=old, new=new):
+                number = 10 + 2 * index
+                ts = f"1000.{number:06d}"
+                mid = self.pipeline.handle_event(event(number, text=old, ts=ts)).message_id
+                self.store.set_state(mid, "acked")
+                self.now += 100
+                before = (self.offers.call_count, len(self.records()),
+                          self.pipeline.edits_ignored)
+                self.assertFalse(edit_text_changed(old, new))
+                self.pipeline.handle_event(edit(number + 1, text=new, ts=ts))
+                self.assertEqual((self.offers.call_count, len(self.records()),
+                                  self.pipeline.edits_ignored),
+                                 (before[0], before[1], before[2] + 1))
+                self.assertEqual((self.row(mid)["state"], self.row(mid)["body"]), ("acked", new))
+
     def test_edit_of_unknown_message_does_not_count(self):
         self.make_pipeline()
         self.pipeline.handle_event(edit(2))

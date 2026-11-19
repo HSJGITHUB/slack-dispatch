@@ -23,8 +23,8 @@ from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.notify.file_inbox import FileInboxNotifier
 from slack_dispatch.notify.wake import WakePolicyEngine
 from slack_dispatch.pipeline import (
-    Pipeline, canonical_token, cosmetic_edit, cosmetic_tokens, edit_delta, edit_parts,
-    followup_ignore_cosmetic,
+    PLEASANTRY, Pipeline, canonical_token, cosmetic_edit, cosmetic_parts, cosmetic_tokens,
+    edit_delta, edit_parts, followup_ignore_cosmetic, pleasantry_keys,
 )
 from slack_dispatch.router.classifier import NullSuggester
 from slack_dispatch.router.engine import NO_MENTION
@@ -114,16 +114,14 @@ class CosmeticEditTests(Case):
     COSMETIC = (
         ("emoticon added", BASE + " :)"),
         ("punctuation changed", "[support] please check the dummy report!!"),
-        ("punctuation removed", "support please check the dummy report"),
         ("line breaks and a full stop", "[support]  please check\nthe dummy\n\nreport.  "),
-        ("emoji added", BASE + " \U0001F44D\U0001F3FD"),
         ("emoji with presentation selector", BASE + " \U00002764\U0000FE0F"),
-        ("emoji shortcode added", BASE + " :thumbsup:"),
-        ("shortcode run with skin tone", BASE + " :wave::skin-tone-2:"),
         ("case changed", "[SUPPORT] Please Check The Dummy Report"),
-        ("numbered emoji code added", BASE + " :100:"),
         ("trailing tilde", BASE + "~"),
-        ("full width letters", "[support] please check the ｄｕｍｍｙ report"),
+        # P38 fix1: only pleasantry emoji are decoration.
+        ("pleasantry emoji added", BASE + " \U0001F64F\U0001F3FD"),
+        ("pleasantry shortcode added", BASE + " :tada:"),
+        ("pleasantry shortcode with skin tone", BASE + " :clap::skin-tone-2:"),
     )
     CONTENT = (
         ("changed digit", "[support] please check the dummy report 2"),
@@ -136,6 +134,20 @@ class CosmeticEditTests(Case):
         ("joined words", "[support] please check the dummyreport"),
         ("operator added", "[support] please check the dummy - report"),
         ("hangul word added", BASE + " 확인"),
+        # P38 fix1: moved from COSMETIC (brackets, non-pleasantry emoji, compatibility forms).
+        ("brackets removed", "support please check the dummy report"),
+        ("hand sign emoji added", BASE + " \U0001F44D\U0001F3FD"),
+        ("emoji shortcode added", BASE + " :thumbsup:"),
+        ("shortcode run with skin tone", BASE + " :wave::skin-tone-2:"),
+        ("numbered emoji code added", BASE + " :100:"),
+        ("full width letters", "[support] please check the \U0000FF44\U0000FF55\U0000FF4D"
+                               "\U0000FF4D\U0000FF59 report"),
+        ("decision emoji added", BASE + " \U0000274C"),
+        ("question mark added", BASE + "?"),
+        ("tilde standing alone", BASE + " ~"),
+        ("strike-through with a decoration change",
+         "[support] please check the ~dummy~ report!"),
+        ("quote marker with a decoration change", "&gt; " + BASE + "!"),
     )
 
     def acked_root(self, text=BASE, **options):
@@ -269,12 +281,13 @@ class CosmeticHelperTests(unittest.TestCase):
     def test_cosmetic_and_content_pairs(self):
         base = "please check the dummy report"
         for new in (base + ".", base.upper(), base + " :)", base + " \U0001F600",
-                    base + " :+1:", "Please check the dummy report!!!"):
+                    "Please check the dummy report!!!"):
             with self.subTest(new=new):
                 self.assertTrue(cosmetic_edit(base, new))
         for new in (base + " 2", base + " now", "please check the dummy reports",
                     base.replace("please", "please do not"), base + " <!channel>",
-                    base + " :-1: 1", "please, check the dummy-report", base + "\U00003002"):
+                    base + " :-1: 1", "please, check the dummy-report", base + "\U00003002",
+                    base + " :+1:"):
             with self.subTest(new=new):
                 self.assertFalse(cosmetic_edit(base, new))
 
@@ -303,17 +316,28 @@ class CosmeticHelperTests(unittest.TestCase):
         self.assertEqual(sorted(entities),
                          sorted(["!here", "@" + OTHER_USER, "#C0000000009", LINK]))
         self.assertNotIn("label", plain)
+        # P38 fix1: the cosmetic form keeps formatting markers and decodes entities.
+        plain, entities = cosmetic_parts(f"~hi~ <@{OTHER_USER}|x> see <{LINK}?a=1&amp;b=2|l>, "
+                                         f"<!here> &gt; *b* {LINK}/c.")
+        self.assertEqual(sorted(entities), sorted(["@" + OTHER_USER, f"{LINK}?a=1&b=2", "!here",
+                                                   f"{LINK}/c"]))
+        self.assertEqual(plain.split(), ["~hi~", "see", ",", ">", "*b*", "."])
         content, emoji = cosmetic_tokens("Hello, World! :smile: (^_^) ... 1.5 -> x "
-                                         "\U0001F44D\U0001F3FD :wave::skin-tone-2:")
-        self.assertEqual(content, ["hello", "world", "1.5", "->", "x"])
-        self.assertEqual(sorted(emoji), sorted([":smile:", "\U0001F44D\U0001F3FD",
-                                                ":wave::skin-tone-2:"]))
+                                         "\U0001F44D\U0001F3FD :wave::skin-tone-2: "
+                                         "\U0001F389\U0001F64F\U0001F3FD :clap::skin-tone-2:")
+        self.assertEqual(content, ["hello", "world", "(^_^)", "1.5", "->", "x",
+                                   "\U0001F44D\U0001F3FD", ":wave::skin-tone-2:"])
+        self.assertEqual(emoji, {":smile:": 1, "\U0001F389": 1, "\U0001F64F": 1, ":clap:": 1})
 
     def test_canonical_token(self):
-        for token, expected in (("done.", "done"), ("done!!!", "done"), ("(note)", "note"),
-                                ("'quoted'", "quoted"), ("re:", "re"), ("5.", "5."),
+        """P38 fix1: only a trailing run of `. ! \U00002026 , ~` strips, away from digits."""
+        for token, expected in (("done.", "done"), ("done!!!", "done"), ("(note)", "(note)"),
+                                ("'quoted'", "'quoted'"), ("re:", "re:"), ("5.", "5."),
                                 ("1.5", "1.5"), ("(5)", "(5)"), ("don't", "don't"),
-                                ("~ok~", "ok"), ("-5", "-5"), (":", "")):
+                                ("~ok~", "~ok"), ("-5", "-5"), (":", ":"), ("~", "~"),
+                                ("ok~", "ok"), ("done,", "done"), ("done\U00002026", "done"),
+                                ("5!", "5!"), ("5.!!", "5.!!"), ("...done", "...done"),
+                                ("yes?!", "yes?"), ("!?", "!?"), ("done;", "done;")):
             with self.subTest(token=token):
                 self.assertEqual(canonical_token(token), expected)
 
@@ -326,7 +350,8 @@ class CosmeticHelperTests(unittest.TestCase):
 
 
 class CosmeticRuleTableTests(unittest.TestCase):
-    """P37 fix1: the token based rule (verifier findings 1 and 2)."""
+    """P37 fix1 token rule, P38 question marks, P38 fix1 positive list (verifier findings
+    F1 to F10 and the bypass table)."""
     NOT_COSMETIC = (
         # Finding 1: punctuation next to digits, operators and word boundaries.
         ("pay $1.5 now", "pay $15 now"), ("0.5", "05"), ("1,000", "1.000"),
@@ -347,16 +372,138 @@ class CosmeticRuleTableTests(unittest.TestCase):
         ("hi", "hi <@U0000000001>"), ("<@U0000000001> hi", "hi"),
         ("hi <#C0000000001>", "hi <#C0000000002>"), ("hi", "hi <!here>"),
         (f"see <{LINK}/x|a>", f"see <{LINK}/y|a>"), (f"see <{LINK}|a>", "see a"),
+        # P38: a question mark is content (it turns a statement into a question).
+        ("yes", "yes?"), ("yes?", "yes"), ("ok?", "ok!"), ("really?", "really??"),
+        ("확인했습니다", "확인했습니다?"), ("확인했습니다", "확인했습니다 ?"),
+        ("done", "done ?"), ("done", "done ??"), ("done ?", "done"), ("done ?", "done ??"),
+        ("done", "done ?!"), ("done", "done !?"), ("done", "done... !?"),
+        ("done", "done (?)"), ("yes", "yes\U0000FF1F"), ("done", "done \U0000FF1F"),
+        ("yes", "yes\U0000FE56"), ("yes?", "yes\U00002047"), ("si", "\U000000BFsi"),
+        ("done", "done \U000000BF"), ("yes.", "yes?"), ("Done!", "done?"),
+        ("?!", "!?"), ("yes", "yes\U00002048"), ("yes", "yes\U00002049"),
+        ("yes", "yes\U0000203D"),
+        # P38 fix1 point c: U+037E is a question mark; NFC, not NFKC.
+        ("yes", "yes\U0000037E"), ("yes;", "yes\U0000037E"), ("yes?", "yes\U0000FF1F"),
+        ("x2", "x\U000000B2"), ("m2", "m\U000000B2"), ("x\U000000B2", "x2"),
+        ("\U00002460", "1"), ("\U00002170", "i"), ("\U0000338F", "kg"),
+        ("5\U0000338F", "5kg"), ("\U0000FF11", "1"),
+        ("a \U0000FF1C b", "a < b"), ("ok", "\U0000FF4F\U0000FF4B"),
+        # F1 and point b: formatting markers are content.
+        ("~old plan~ new plan", "old plan new plan"), ("~yes~", "yes"), ("yes", "~yes~"),
+        ("~취소~ 진행", "취소 진행"), ("~cancelled~", "cancelled"), ("~no~ yes", "no yes"),
+        ("~old plan~ new plan", "old ~plan~ new plan"), ("~yes~ ok", "yes ok!"),
+        ("*a*", "a"), ("a", "*a*"),
+        ("_a_", "a"), ("`not` ok", "not ok"), ("`rm -rf`", "rm -rf"), ("```x```", "x"),
+        ("x\n```y```", "x\ny"), ("> a", "a"), ("a", "> a"), ("> no\nyes", "no\nyes"),
+        ("a\n> b", "a\nb"), ("&gt; a", "a"), ("a", "&gt; a"), ("> a b", "a > b"),
+        ("\U00002022 a", "a"), ("\U00002022a", "a"),
+        # F2: checkbox and glyph-only bracket tokens.
+        ("a [\U00002713]", "a [ ]"), ("a [\U00002713]", "a [\U00002717]"),
+        ("a (-)", "a (+)"), ("a (+)", "a (-)"), ("a (!)", "a"), ("a [x]", "a [ ]"),
+        ("a [ ]", "a"),
+        # F3: decision emoji (not on the pleasantry list).
+        ("승인", "승인 \U0000274C"), ("승인", "승인 \U00002705"),
+        ("ok \U00002705", "ok \U00002705 \U0000274C"), ("ok", "ok \U00002705\U0000274C"),
+        ("ok", "ok :no:"), ("ok", "ok :yes:"), ("가능", "가능 \U00002715"),
+        ("가능", "가능 \U00002717"), ("진행", "진행 \U00002715"), ("진행", "진행 \U00002716"),
+        ("진행", "진행 \U00002718"), ("ok \U00002705", "ok"),
+        *(("ok", "ok " + mark) for mark in (
+            "\U0001F44E", "\U0001F645", "\U000026D4", "\U0001F6AB", "\U0001F197", "\U00002B55",
+            "\U0001F646", "\U0001F44D", "\U00002716", "\U00002715", "\U00002717", "\U00002718",
+            "\U0000274E", "\U00002714", "\U00002611", "\U0001F6D1", "\U0000274C", "\U00002705",
+            "\U0001F44C", "\U0001F440", ":x:", ":-1:", ":+1:", ":thumbsup:", ":thumbsdown:",
+            ":no_entry:", ":no_entry_sign:", ":white_check_mark:", ":heavy_check_mark:",
+            ":ballot_box_with_check:", ":heavy_multiplication_x:",
+            ":negative_squared_cross_mark:", ":stop:", ":octagonal_sign:", ":red_circle:",
+            ":ok:", ":o:", ":ok_hand:", ":ok_woman:", ":no_good:", ":eyes:", ":100:",
+            ":heart_eyes:", ":wave::skin-tone-2:", ":thumbsup::skin-tone-2:")),
+        # F4: question and exclamation emoji.
+        ("확인했습니다", "확인했습니다 \U00002753"), ("yes", "yes :grey_question:"),
+        ("ok \U00002753", "ok"),
+        *(("ok", "ok " + mark) for mark in (
+            "\U00002753", "\U00002754", "\U00002049\U0000FE0F", "\U00002757", "\U0000203C",
+            ":question:", ":grey_question:", ":interrobang:", ":exclamation:",
+            ":bangbang:")),
+        # F5: brackets and quotes are content (no edge stripping).
+        ("진행 (보류)", "진행 보류"), ("진행 보류", "진행 (보류)"), ("A (not B)", "A not B"),
+        ("(A or B) and C", "A or (B and C)"), ("(A or B) and C", "A or B and C"),
+        ("(not A)", "not A"), ("(not) A", "not A"), ("진행 (보류)", "(진행 보류)"),
+        ("진행 (보류)", "(진행) 보류"), ("진행 (보류)", "진행 보류)"),
+        ('"A and B" C', 'A "and B" C'), ('"A" and B', 'A and "B"'), ('say "yes"', "say yes"),
+        ("a", "a ("), ("a", "a )"), ("a b", "a ( b"), ("(yes?)", "yes?"),
+        ("'done'", "done"), ("done:", "done"), ("done;", "done"), ("(done)", "done"),
+        # F6: spaced marks other than the decoration run are content.
+        ("5 ~ 6", "5 6"), ("10 ~ 20", "10 20"), ("a ^ 2", "a 2"), ("a ^ b", "a b"),
+        ("a ; b", "a b"), ("합니다", "합니다 ;;"), ("ok", "ok ~"), ("ok", "ok ~~"),
+        # Point d: emoticons not on the list.
+        ("done", "done (^_^)"), ("done", "done :D"), ("done", "done xD"),
+        ("done", "done ^.^"), ("done", "done :-D"), ("done", "done T_T"), ("done", "done :P"),
+        ("done", "done :):)"), ("done", "done ;;"), ("done", "done ^"),
+        # Point d: pleasantry list boundaries and things just off it.
+        *(("ok", "ok " + mark) for mark in (
+            "\U0001F5FF", "\U0001F645", "\U0001F90F", "\U0001F918", "\U0001F91D",
+            "\U0001F91F", "\U0001F930", "\U0001F96F", "\U0001F97B", "\U0001F5A4",
+            "\U0001F90D", "\U0001F494", "\U0001F647\U0000200D\U00002642\U0000FE0F",
+            ":smile:x", ":smiles:", ":heart:heart", "\U0001F389x")),
+        # Point e: only a trailing decoration run or `~` strips, never next to a digit;
+        # a `~` that closes a strike-through span stays (point b).
+        ("~old plan~ new", "~old plan new"), ("~yes~", "~yes"), ("~a b~", "~a b"),
+        ("5.", "5"), ("5!", "5"), ("5", "5!!"), ("\U00002026done", "done"),
+        (".done", "done"), ("~done", "done"), ("re: plan", "re plan"),
+        # Point f: pleasantry emoji may be added, never removed or swapped.
+        ("ok \U0001F389", "ok"), ("ok \U0001F389\U0001F389", "ok \U0001F389"),
+        ("ok \U0001F600", "ok \U0001F603"), ("ok :tada:", "ok \U0001F389"),
+        ("ok :smile:", "ok"),
+        # Moved from COSMETIC by P38 fix1.
+        ("done", "done \U0001F44D"), ("done", "done :wave::skin-tone-2:"),
+        ("yes?", "(yes?)"), ("yes?", "yes? \U0001F44D"), ("done", "done :question:"),
+        ("done", "done \U00002753"),
     )
     COSMETIC = (
-        ("done", "done =)"), ("done", "done :)"), ("done", "done ^^"), ("done", "done (^_^)"),
-        ("done", "done !!!"), ("done", "done \U0001F44D"), ("done", "done :smile:"),
-        ("done", "done :wave::skin-tone-2:"), ("Done.", "done!!!"), ("Done.", "Done"),
-        ("a b", "a\n\nb  "), ("a b", "  a   b"), ("ok", "OK"), ("ok", "ok~"), ("ok", "ok ~"),
+        ("done", "done =)"), ("done", "done :)"), ("done", "done ^^"),
+        ("done", "done !!!"), ("done", "done :smile:"), ("Done.", "done!!!"), ("Done.", "Done"),
+        ("a b", "a\n\nb  "), ("a b", "  a   b"), ("ok", "OK"), ("ok", "ok~"),
         (f"see <{LINK}|here>", f"see <{LINK}|there>"),
         ("<@U0000000001|first> hi", "<@U0000000001|second> hi"),
         ("ok \U0001F44D", "ok \U0001F44D \U0001F389"),
-        ("ok \U00002764", "ok \U00002764\U0000FE0F"), ("done", "done... !?"),
+        ("ok \U00002764", "ok \U00002764\U0000FE0F"), ("done", "done... !!"),
+        # P38: everything other than a question mark that is on the list stays decoration.
+        ("done", "done!"), ("done", "done !"), ("Done.", "done!"),
+        ("확인했습니다", "확인했습니다!"), ("확인했습니다", "확인했습니다~ =)"),
+        ("yes?", "Yes?"), ("yes?", "yes? !!!"), ("yes?", "yes?!"), ("ok ?", "OK ? =)"),
+        # P38 fix1: every listed emoticon.
+        *(("done", "done " + face) for face in (
+            ":)", ":-)", "=)", "(:", ";)", ";-)", ":(", ":-(", "^^", "^_^", "^-^")),
+        # P38 fix1: every listed shortcode, with and without a skin tone.
+        *(("ok", f"ok :{name}:") for name in PLEASANTRY["shortcodes"]),
+        ("ok", "ok :clap::skin-tone-3:"), ("ok", "ok :pray::skin-tone-6:"),
+        # P38 fix1: pleasantry characters at each range edge and each single member.
+        *(("ok", "ok " + mark) for mark in (
+            "\U0001F600", "\U0001F644", "\U0001F910", "\U0001F917", "\U0001F920",
+            "\U0001F92F", "\U0001F970", "\U0001F97A", "\U0001F64F", "\U0001F44F",
+            "\U0001F389", "\U00002728", "\U0001F647", "\U00002764", "\U00002764\U0000FE0F",
+            "\U0001F9E1", "\U0001F49B", "\U0001F49A", "\U0001F499", "\U0001F49C",
+            "\U0001F64F\U0001F3FD", "\U0001F389\U0001F389", "\U0001F389:tada:")),
+        # P38 fix1: decoration runs (by spec, also between words).
+        ("done", "done ..."), ("done", "done \U00002026"), ("done", "done ,"),
+        ("done", "done .!,\U00002026"), ("a, b", "a b"), ("good", "good ..."),
+        ("3 . 5", "3 5"), ("a ... b", "a b"), ("합니다", "합니다\U00002026"),
+        ("진행", "진행 :("), ("a :(", "a :)"),
+        # P38 fix1: pleasantry emoji added next to the old ones; skin tones are decoration.
+        ("ok \U0001F389", "ok \U0001F389 \U0001F389"),
+        ("ok \U0001F600", "ok \U0001F600 \U0001F603"),
+        ("ok \U0001F44F\U0001F3FD", "ok \U0001F44F\U0001F3FB"),
+        ("ok :clap:", "ok :clap::skin-tone-4:"),
+        # P38 fix1: entities and the raw and rendered forms.
+        (f"see {LINK}.", f"see <{LINK}|page>!"), ("x < 5", "x &lt; 5"), ("a & b", "a &amp; b"),
+        ("> a", "&gt; a"), ("<@U0000000001> x", "x <@U0000000001>"),
+        (f"see <{LINK}?a=1&amp;b=2|x>", f"see {LINK}?a=1&b=2"),
+        ("yes?", "yes\U0000037E"),
+        # P38 fix1: formatting markers kept, decoration around them changed.
+        ("~yes~", "~Yes~!"), ("*bold* text", "*Bold* text."), ("> quote", "> Quote!!"),
+        ("~old plan~ new", "~Old plan~, new"),
+        # Case folding (not NFKC) maps the fi ligature to `fi`; the meaning is the same.
+        ("\U0000FB01", "fi"),
     )
 
     def test_not_cosmetic(self):
@@ -368,6 +515,29 @@ class CosmeticRuleTableTests(unittest.TestCase):
         for old, new in self.COSMETIC:
             with self.subTest(old=old, new=new):
                 self.assertTrue(cosmetic_edit(old, new))
+
+    def test_question_marks_are_content_tokens(self):
+        """P38: question marks are never dropped or stripped from a token's ends."""
+        cases = (("?", ["?"]), ("??", ["??"]), ("?!", ["?"]), ("!?", ["!?"]), ("(?)", ["(?)"]),
+                 ("\U0000FF1F", ["\U0000FF1F"]), ("\U000000BF", ["\U000000BF"]),
+                 ("yes?", ["yes?"]), ("(yes?)", ["(yes?)"]), ("Really??", ["really??"]),
+                 ("\U0000037E", ["?"]), ("! . ~ ; \U00002026", ["~", ";"]))
+        for text, content in cases:
+            with self.subTest(text=text):
+                tokens, emoji = cosmetic_tokens(text)
+                self.assertEqual((tokens, sum(emoji.values())), (content, 0))
+        self.assertEqual(canonical_token("yes?."), "yes?")
+        self.assertEqual(canonical_token("\U000000BFsi?"), "\U000000BFsi?")
+
+    def test_pleasantry_keys(self):
+        """P38 fix1: one key per pleasantry emoji, selectors and skin tones dropped."""
+        self.assertEqual(pleasantry_keys("\U0001F44F\U0001F3FD\U00002764\U0000FE0F:clap::"
+                                         "skin-tone-2::tada:"),
+                         ["\U0001F44F", "\U00002764", ":clap:", ":tada:"])
+        for token in ("", "x", ":smile:x", "\U0001F44D", ":thumbsup:", "\U0001F3FD",
+                      "\U0000FE0F"):
+            with self.subTest(token=token):
+                self.assertIsNone(pleasantry_keys(token))
 
 
 class ConfigTests(unittest.TestCase):

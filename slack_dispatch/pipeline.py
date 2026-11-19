@@ -169,19 +169,39 @@ _REFERENCE = re.compile(r"<([@#][^<>|\s]*)>")
 # punctuation that belongs to the sentence rather than to the link.
 _LINK = re.compile(r"(?<![\w@#!])(?:[A-Za-z][A-Za-z0-9+.-]*://|mailto:)[^\s<>]+")
 _LINK_TRAIL = ".,;:!?)]}'\""
-# P37 fix1: token classes of the cosmetic rule (after NFKC and case folding).
-# Sentence punctuation tokens and emoticon tokens are decoration.
-_SENTENCE = frozenset(".,!?~;\u2026")
-_EMOTICON_MARKS = frozenset("()[]{}^")
-# Characters stripped from the ends of a content token, only while the character next to
-# them inside the token is not a digit.
-_TOKEN_EDGE = frozenset(".,!?~;\u2026:'\"()[]")
-# A Slack emoji shortcode group (`:smile:`, `:+1:`, `:wave::skin-tone-2:`).
-_SHORTCODE = re.compile(r":[a-z0-9_+-]+:(?::skin-tone-[2-6]:)?")
-# Emoji joiners and presentation marks: zero width joiner, variation selectors 15 and 16,
-# combining enclosing keycap.
-_EMOJI_JOINERS = frozenset("\u200d\ufe0e\ufe0f\u20e3")
-_PRESENTATION = str.maketrans("", "", "\ufe0e\ufe0f")
+# P38 fix1: the cosmetic rule is a short positive list; any token not on it is content.
+# Raw Slack angle tokens the cosmetic form takes out as entities: a user or channel
+# reference, a broadcast or user group (`!`), or a link with a URL scheme, each with an
+# optional `|label`. Other text in angle brackets stays text.
+_COSMETIC_ANGLE = re.compile(
+    r"<([@#!][^<>|\s]*|[A-Za-z][A-Za-z0-9+.-]*:[^<>|\s]+)(?:\|[^<>]*)?>")
+_ENTITIES = (("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&"))
+# U+037E (Greek question mark) is a question mark; NFC would turn it into `;`.
+_GREEK_QUESTION = str.maketrans({"\u037e": "?"})
+# A decoration token made only of these characters (after NFC and case folding).
+_DECORATION_RUN = frozenset(".!\u2026,")
+# The only emoticon tokens that are decoration (exact match).
+_EMOTICONS = frozenset((":)", ":-)", "=)", "(:", ";)", ";-)", ":(", ":-(", "^^", "^_^", "^-^"))
+# Trailing characters stripped from a content token (only away from digits).
+_TRAILING = frozenset(".!\u2026,~")
+# The pleasantry list: the only emoji that are decoration, kept in one constant to audit.
+# chars: faces U+1F600 to U+1F644, U+1F910 to U+1F92F without the hand signs U+1F918 to
+# U+1F91F, U+1F970 to U+1F97A; folded hands, clapping hands, party popper, sparkles,
+# person bowing; red, orange, yellow, green, blue and purple heart. shortcodes: names
+# written as `:name:`, each with an optional skin tone suffix.
+PLEASANTRY = dict(
+    chars=("\U0001F600-\U0001F644" "\U0001F910-\U0001F917" "\U0001F920-\U0001F92F"
+           "\U0001F970-\U0001F97A" "\U0001F64F\U0001F44F\U0001F389\u2728\U0001F647"
+           "\u2764\U0001F9E1\U0001F49B\U0001F49A\U0001F499\U0001F49C"),
+    shortcodes=("smile", "slightly_smiling_face", "grinning", "grin", "blush", "smiley",
+                "wink", "joy", "sweat_smile", "relaxed", "pray", "clap", "tada", "sparkles",
+                "bow", "heart"))
+# One pleasantry emoji: a listed character with variation selectors and skin tone modifiers,
+# or a listed shortcode with an optional skin tone suffix. Group 1 or 2 is its key.
+_PLEASANTRY = re.compile(
+    "([" + PLEASANTRY["chars"] + "])[\ufe0e\ufe0f\U0001F3FB-\U0001F3FF]*"
+    "|(:(?:" + "|".join(PLEASANTRY["shortcodes"]) + "):)(?::skin-tone-[2-6]:)?")
+
 
 def edit_parts(text):
     """P37: (plain, entities) of a stored body or an edit text. `entities` lists the Slack
@@ -204,66 +224,107 @@ def edit_parts(text):
     return plain, entities
 
 
-def _letter_or_digit(char):
-    return unicodedata.category(char)[0] in "LN"
+def cosmetic_parts(text):
+    """P38 fix1: (plain, entities) for the cosmetic rule. Unlike `edit_parts` it does not go
+    through comparable_text, so formatting markers (`~strike~`, `*bold*`, `_italic_`, code
+    and fences, a line-leading `>` or `&gt;`) stay in `plain`. Raw angle tokens (references,
+    broadcasts, links by target with `&amp;` decoded; labels ignored) and bare links (as a
+    body rendered from rich text blocks holds them) become entities and are replaced by a
+    space; `&lt;`, `&gt;` and `&amp;` in the rest decode."""
+    entities = []
+
+    def angle(match):
+        target = match.group(1)
+        if not target.startswith(("@", "#", "!")):
+            for entity, char in _ENTITIES:
+                target = target.replace(entity, char)
+        entities.append(target)
+        return " "
+
+    plain = _COSMETIC_ANGLE.sub(angle, text)
+    for entity, char in _ENTITIES:
+        plain = plain.replace(entity, char)
+
+    def link(match):
+        url = match.group(0).rstrip(_LINK_TRAIL)
+        entities.append(url)
+        return " " + match.group(0)[len(url):]
+
+    return _LINK.sub(link, plain), entities
 
 
-def _emoji_char(char):
-    """P37 fix1: an emoji character (Unicode category So), a skin tone modifier, a tag
-    character or an emoji joiner or presentation mark."""
-    code = ord(char)
-    return (char in _EMOJI_JOINERS or 0x1F3FB <= code <= 0x1F3FF or 0xE0020 <= code <= 0xE007F
-            or unicodedata.category(char) == "So")
-
-
-def canonical_token(token):
-    """P37 fix1: a content token without the sentence punctuation, colons, quotes and
-    brackets at its ends; an end character stays when the character next to it inside the
-    token is a digit (`Done.` -> `done`, `5.` and `1.5` unchanged). Nothing inside the token
-    is removed."""
-    start, end = 0, len(token)
-    while start < end and token[start] in _TOKEN_EDGE and not (
-            start + 1 < end and token[start + 1].isdigit()):
-        start += 1
-    while end > start and token[end - 1] in _TOKEN_EDGE and not (
-            end - 2 >= start and token[end - 2].isdigit()):
+def canonical_token(token, strike=False):
+    """P38 fix1: a content token without its trailing run of `. ! \u2026 , ~`, stripped only
+    when a character precedes the run and that character is not a digit (`Done.` -> `done`,
+    `ok~` -> `ok`; `5.`, `5!` and `~` unchanged). Nothing else is stripped: no leading
+    characters, brackets, quotes, colons, semicolons or question marks. With `strike` (the
+    token closes a `~strike~` span) a `~` is never stripped, so the marker stays."""
+    trailing = _DECORATION_RUN if strike else _TRAILING
+    end = len(token)
+    while end and token[end - 1] in trailing:
         end -= 1
-    return token[start:end]
+    if 0 < end < len(token) and not token[end - 1].isdigit():
+        return token[:end]
+    return token
+
+
+def pleasantry_keys(token):
+    """P38 fix1: the pleasantry emoji of a token made only of pleasantry emoji (listed
+    characters with variation selectors and skin tone modifiers, listed shortcodes with an
+    optional skin tone suffix), keyed without selectors and skin tones; None for any other
+    token."""
+    keys, position = [], 0
+    for match in _PLEASANTRY.finditer(token):
+        if match.start() != position:
+            return None
+        keys.append(match.group(1) or match.group(2))
+        position = match.end()
+    return keys if keys and position == len(token) else None
 
 
 def cosmetic_tokens(plain):
-    """P37 fix1: (content, emoji) of the non-entity text `plain` after NFKC and case folding,
-    split on whitespace. Sentence punctuation tokens (only `. , ! ? ~ ; \u2026`) and emoticon
-    tokens (no letter or digit, at least one of `( ) [ ] { } ^`) are dropped. Emoji tokens
-    (only emoji characters and/or shortcode groups) go to the `emoji` Counter (variation
-    selectors removed). Every other token is a content token, kept in order in its
-    canonical form (`canonical_token`). One pass, linear in the text."""
+    """P38 fix1: (content, emoji) of the non-entity text `plain` (`cosmetic_parts`) after
+    U+037E becomes `?`, NFC and case folding, split on whitespace. Decoration tokens are
+    dropped: a run of only `. ! \u2026 ,`, or an exact listed emoticon (`:)` `:-)` `=)` `(:`
+    `;)` `;-)` `:(` `:-(` `^^` `^_^` `^-^`). A token made only of pleasantry emoji
+    (`PLEASANTRY`) goes to the `emoji` Counter (one count per emoji). Every other token is a
+    content token, kept in order as `canonical_token(token)`; a token that closes a
+    `~strike~` span (one opening with `~` came before, or it opens and closes itself) keeps
+    its closing `~`. One pass, linear in the text."""
     content, emoji = [], Counter()
-    for token in unicodedata.normalize("NFKC", plain).casefold().split():
-        if all(char in _SENTENCE for char in token):
+    text = unicodedata.normalize("NFC", plain.translate(_GREEK_QUESTION)).casefold()
+    opened = False
+    for token in text.split():
+        if token in _EMOTICONS or all(char in _DECORATION_RUN for char in token):
             continue
-        if not any(_letter_or_digit(char) for char in token) and any(
-                char in _EMOTICON_MARKS for char in token):
+        keys = pleasantry_keys(token)
+        if keys is not None:
+            emoji.update(keys)
             continue
-        if all(_emoji_char(char) for char in _SHORTCODE.sub("", token)):
-            emoji[token.translate(_PRESENTATION)] += 1
-            continue
-        content.append(canonical_token(token))
+        starts = len(token) > 1 and token[0] == "~"
+        closes = token.rstrip(".!\u2026,").endswith("~") and token.count("~") > starts
+        if starts and not closes:
+            opened = True
+        strike = closes and (opened or starts)
+        if strike:
+            opened = False
+        content.append(canonical_token(token, strike))
     return content, emoji
 
 
 def cosmetic_edit(previous_body, text):
-    """P37 fix1: whether an edit changed decoration only. True when the Slack entity sets
+    """P38 fix1: whether an edit changed decoration only. True when the Slack entity sets
     (targets, labels ignored) are equal, the canonical content token sequences are equal
-    (same tokens in the same order) and every emoji token of the old text is still in the
-    new text (emoji may be added, never removed or swapped). Sentence punctuation and
-    emoticon tokens may change freely. Conservative: wording changes, operators and
-    punctuation next to digits always count. A missing stored body (or new text) is never
-    cosmetic."""
+    (same tokens in the same order) and every pleasantry emoji of the old text is still in
+    the new text (they may be added, never removed or swapped). Decoration runs and listed
+    emoticons may change freely. Anything not on the positive list is content and
+    re-delivers: formatting markers, brackets, quotes, `~` `;` `?` standing alone,
+    operators, any other emoji or shortcode, compatibility forms (no NFKC). A missing
+    stored body (or new text) is never cosmetic."""
     if not isinstance(previous_body, str) or not isinstance(text, str):
         return False
-    old_plain, old_entities = edit_parts(previous_body)
-    new_plain, new_entities = edit_parts(text)
+    old_plain, old_entities = cosmetic_parts(previous_body)
+    new_plain, new_entities = cosmetic_parts(text)
     if set(old_entities) != set(new_entities):
         return False
     old_content, old_emoji = cosmetic_tokens(old_plain)

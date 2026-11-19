@@ -6,6 +6,40 @@ This project follows Semantic Versioning. Versions below 1.0 may change interfac
 
 ## [Unreleased]
 
+### P38 cosmetic rule tightened
+- The `wake_policy.followup_ignore_cosmetic` rule is now a short positive list; anything
+  not listed re-delivers. An edit is cosmetic only when the Slack entity sets are equal
+  (labels ignored), the content tokens are the same in the same order, and pleasantry
+  emoji were only added. Decoration tokens are: runs of `.` `!` `…` `,`; the exact
+  emoticons `:)` `:-)` `=)` `(:` `;)` `;-)` `:(` `:-(` `^^` `^_^` `^-^`; and tokens made
+  only of pleasantry emoji (faces U+1F600 to U+1F644, U+1F910 to U+1F92F without the hand
+  signs U+1F918 to U+1F91F, U+1F970 to U+1F97A, 🙏 👏 🎉 ✨ 🙇, red, orange, yellow, green,
+  blue and purple hearts, and the shortcodes `smile` `slightly_smiling_face` `grinning`
+  `grin` `blush` `smiley` `wink` `joy` `sweat_smile` `relaxed` `pray` `clap` `tada`
+  `sparkles` `bow` `heart`, skin tones allowed), kept in one constant `PLEASANTRY`. A
+  content token loses only a trailing run of `.` `!` `…` `,` `~` away from digits (a `~`
+  that closes a strike-through span stays).
+- Now content, so re-delivered: question marks (`yes` to `yes?`, also `¿` and the Greek
+  question mark U+037E); formatting markers (`~strike~`, `*bold*`, `_italic_`, code,
+  fences, a line-leading `>` or `&gt;`), because the rule no longer reads the
+  `comparable_text` form; brackets and quotes (`a [✓]` to `a [ ]`, `진행 (보류)` to
+  `진행 보류`); a standalone `~`, `;` or `^`; every emoji or shortcode not on the pleasantry
+  list (`승인` to `승인 ❌`, `ok` to `ok :+1:`, `❓`, `:question:`); full-width and
+  compatibility forms (NFC instead of NFKC: `x2` to `x²`, `ok` to `ｏｋ`).
+- Known gap, not changed: the P24 comparison (`comparable_text`) drops strike-through,
+  bold, italic, code and quote markers, and a body rendered from rich text blocks has no
+  style or quote markers, so an edit that only adds or removes strike-through or a quote
+  marker is no text change and is never re-delivered, under every policy and with the
+  option off. Fixing it needs the block rendering to keep those markers, which changes the
+  stored body and the router input. New tests in `tests/test_followup_wakes.py` and
+  `tests/test_edit_reroute_guard.py` pin today's behaviour.
+- Test expectations changed in `tests/test_edit_handling.py`: `CosmeticRuleTableTests`
+  (`done` to `done... !?` re-delivers; brackets, standalone `~`, non-pleasantry emoji and
+  full-width forms moved from the cosmetic to the not-cosmetic table), `CosmeticEditTests`
+  (brackets removed, a hand sign emoji, `:thumbsup:`, `:wave:` with a skin tone, `:100:`
+  and full-width letters moved to the content cases), `CosmeticHelperTests` (`:+1:` added
+  is content; token and `canonical_token` expectations follow the new stripping rule).
+
 ### P37 edit handling
 - New optional `wake_policy.followup_ignore_cosmetic` (default false keeps today's
   behaviour). With true, an edit of an item that holds a lane that would be re-delivered as

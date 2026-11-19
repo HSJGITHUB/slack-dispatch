@@ -106,9 +106,12 @@ thread roots and thread items carry `edit_delta`. Rows whose latest followup rec
 `edit_delta` (or that have no followup record) print exactly as before; the header line is
 unchanged.
 With `wake_policy.followup_ignore_cosmetic: true` an edit that changed decoration only
-(sentence punctuation, emoticons, added emoji, case, spacing, link or mention labels)
-writes no followup record at all; the token rule and its limits are in ROUTING.md
-("Edit handling (P37)").
+writes no followup record at all. Decoration is a short positive list (P38 fix1): runs of
+`.` `!` `…` `,`, a trailing `~` on a word, the emoticons `:)` `:-)` `=)` `(:` `;)` `;-)`
+`:(` `:-(` `^^` `^_^` `^-^`, added pleasantry emoji (smileys, 🙏 👏 🎉 ✨ 🙇 and coloured
+hearts), case, spacing, and link or mention labels. Anything not listed re-delivers,
+including question marks, formatting and quote markers, brackets, quotes and every other
+emoji. The full rule and its known gap are in ROUTING.md ("Edit handling (P37)").
 Missing attention and author values display `-`.
 
 Writers hold `<lane>.lock`; readers use it only when it already exists.

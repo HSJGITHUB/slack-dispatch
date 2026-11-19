@@ -12,11 +12,11 @@ from unittest.mock import Mock
 
 from slack_dispatch.console import actions
 from slack_dispatch.inbox import cli
-from slack_dispatch.ingest.normalize import comparable_text, normalize_slack_event
+from slack_dispatch.ingest.normalize import comparable_text, message_body, normalize_slack_event
 from slack_dispatch.ledger.store import LedgerStore
 from slack_dispatch.notify.file_inbox import FileInboxNotifier
 from slack_dispatch.notify.wake import WakePolicyEngine
-from slack_dispatch.pipeline import Pipeline, edit_text_changed
+from slack_dispatch.pipeline import Pipeline, cosmetic_edit, edit_text_changed
 from slack_dispatch.router.classifier import NullSuggester
 from tests.test_console_app import ts as console_ts
 from tests.test_console_undo import UndoCase
@@ -336,6 +336,33 @@ class ComparableTextTests(unittest.TestCase):
         self.assertEqual(comparable_text("5 * 3 and snake_case"), "5 * 3 and snake_case")
         # A link preview edit without blocks is still no text change.
         self.assertFalse(edit_text_changed(f"see {URL} & <@U0000000091> please", LINK_RAW))
+
+    def test_strike_and_quote_are_no_text_change_known_gap(self):
+        """P38 fix1 evidence (known gap, not fixed): message_body renders rich text without
+        styles or quote markers, and comparable_text drops `~...~` and a line-leading `>` or
+        `&gt;` from raw mrkdwn. So neither path sees strike-through or a quote added or
+        removed. Fixing it needs message_body to render the markers, which changes the stored
+        body and the router input; see the P38 FIX1 notes."""
+        def blocks(section):
+            return {"blocks": [{"type": "rich_text", "elements": [section]}]}
+
+        plain = blocks({"type": "rich_text_section",
+                        "elements": [{"type": "text", "text": "dummy yes"}]})
+        struck = blocks({"type": "rich_text_section", "elements": [
+            {"type": "text", "text": "dummy "},
+            {"type": "text", "text": "yes", "style": {"strike": True}}]})
+        quoted = blocks({"type": "rich_text_quote",
+                         "elements": [{"type": "text", "text": "dummy yes"}]})
+        self.assertEqual(message_body(plain), "dummy yes")
+        self.assertEqual(message_body(struck), "dummy yes")
+        self.assertEqual(message_body(quoted), "dummy yes")
+        for old, new in (("dummy ~yes~", "dummy yes"), ("dummy yes", "dummy ~yes~"),
+                         ("&gt; dummy yes", "dummy yes"), ("> dummy yes", "dummy yes")):
+            with self.subTest(old=old, new=new):
+                self.assertFalse(edit_text_changed(old, new))
+        # The cosmetic rule keeps the markers (P38 fix1), but it only runs after a text change.
+        self.assertFalse(cosmetic_edit("dummy ~yes~", "dummy yes"))
+        self.assertFalse(cosmetic_edit("&gt; dummy yes", "dummy yes"))
 
     def test_real_changes_still_count(self):
         self.assertTrue(edit_text_changed("dummy text", "dummy text 2"))

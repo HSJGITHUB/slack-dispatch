@@ -867,16 +867,24 @@ All additive; no ledger schema change and no new store method.
   `slack_dispatch.pipeline` reads it (False when absent).
 - `slack_dispatch.pipeline` helpers: `edit_parts(text) -> (plain, entities)` (the P24
   `comparable_text` form with user and channel references and links taken out as targets,
-  broadcasts read from the raw text first). fix1 token rule: `cosmetic_tokens(plain) ->
-  (content: list[str], emoji: Counter)` (NFKC, casefold, whitespace split; sentence
-  punctuation tokens and emoticon tokens dropped; emoji tokens, made only of emoji
-  characters and/or `:shortcode:` groups, counted with variation selectors removed; every
-  other token kept in order as `canonical_token(token)`, which strips `. , ! ? ~ ; … : '
-  " ( ) [ ]` from the ends only while the inner neighbour is not a digit),
-  `cosmetic_edit(previous_body, text) -> bool` (equal entity sets, equal canonical content
-  sequences and the old emoji multiset contained in the new; False when either side is not
-  a string; linear time) and `edit_delta(previous_body, text) -> dict | None`
-  (`{"added", "removed"}` multiset token counts; None when either side is missing).
+  broadcasts read from the raw text first; used by `edit_delta` only since P38 fix1) and
+  `edit_delta(previous_body, text) -> dict | None` (`{"added", "removed"}` multiset token
+  counts; None when either side is missing).
+- P38 fix1 cosmetic rule (a positive list; anything not listed is content):
+  `cosmetic_parts(text) -> (plain, entities)` (no `comparable_text`: formatting markers and
+  quote markers stay; raw angle tokens `<@U..>`, `<#C..>`, `<!..>` and `<scheme:..|label>`
+  and bare links become entities by target, `&amp;` decoded in link targets; `&lt;`,
+  `&gt;`, `&amp;` decoded in the rest); `cosmetic_tokens(plain) -> (content: list[str],
+  emoji: Counter)` (U+037E to `?`, NFC, casefold, whitespace split; tokens made only of
+  `. ! … ,` and the exact emoticons `:) :-) =) (: ;) ;-) :( :-( ^^ ^_^ ^-^` dropped; tokens
+  made only of pleasantry emoji counted per emoji by `pleasantry_keys(token) -> list[str] |
+  None`, keyed without variation selectors and skin tones; every other token kept in order
+  as `canonical_token(token, strike=False)`, which strips only a trailing run of `. ! … , ~`
+  when a character precedes it and that character is not a digit, keeping a `~` that
+  closes a strike-through span); `PLEASANTRY = {"chars": <regex class>, "shortcodes":
+  <names>}` is the one audited list; `cosmetic_edit(previous_body, text) -> bool` (equal
+  entity sets, equal canonical content sequences and the old pleasantry multiset contained
+  in the new; False when either side is not a string; linear time).
 - `Pipeline._handle`: an edit of an item that holds a lane whose verdict is `EDIT_WAKE`
   becomes `EDIT_IGNORE` when the option is on and `cosmetic_edit` holds; it counts in
   `edits_ignored` and `Pipeline.edits_cosmetic` and logs `Edit recorded without wake
