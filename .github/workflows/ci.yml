@@ -16,6 +16,7 @@ jobs:
       - run: python -m pip install -e ".[dev,console]"
       - run: python -m pytest -q
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/envhelper/tests/run_tests.ps1
+      - run: pwsh -NoProfile -ExecutionPolicy Bypass -File tools/envhelper/tests/run_tests.ps1
   hygiene:
     runs-on: ubuntu-latest
     steps:

@@ -1,6 +1,6 @@
 """Offline runtime checks with best-effort cleanup of system temporary fixtures."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -23,9 +23,16 @@ from slack_dispatch.runtime import (
 from slack_dispatch.runtime.logging_setup import RedactionFilter
 
 ROOT = Path(__file__).resolve().parents[1]
-POWERSHELL = shutil.which("powershell.exe")
+# Every Windows tool test runs once per installed PowerShell: Windows PowerShell 5.1 and
+# PowerShell 7. pwsh.exe is looked up by that name so the variant only exists on Windows.
+WINDOWS_POWERSHELL = shutil.which("powershell.exe")
+POWERSHELL_7 = shutil.which("pwsh.exe")
+# PowerShell 7 colours error output with ANSI codes even when it is redirected; NO_COLOR
+# turns that off so output comparisons see plain text. Windows PowerShell 5.1 ignores it.
+PLAIN_TEXT_ENV = {"NO_COLOR": "1"}
 DEPLOY_EXTRACT_DRIVER = """param([string]$Script, [string]$Archive, [string]$Destination)
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion.Major -ge 7) { $PSStyle.OutputRendering = 'PlainText' }
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)
 foreach ($statement in $ast.EndBlock.Statements) {
     if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
@@ -183,18 +190,35 @@ class DeployScriptTests(unittest.TestCase):
             self.assertIn(required, text)
 
 
-@unittest.skipUnless(POWERSHELL, "Windows PowerShell is unavailable")
-class WindowsToolTests(unittest.TestCase):
-    def run_ps(self, script, *args, expected=0, env=None):
+class WindowsToolChecks:
+    """Windows tool tests. The subclasses below run all of them under each installed PowerShell."""
+
+    powershell = None
+    minimum_major = None
+    maximum_major = None
+
+    def run_ps_result(self, script, *args, expected=0, env=None):
         child_env = os.environ.copy()
+        child_env.update(PLAIN_TEXT_ENV)
         if env is not None:
             child_env.update(env)
-        result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+        result = subprocess.run([self.powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                                  "Bypass", "-File", str(script), *map(str, args)],
                                 cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45,
                                 env=child_env)
         self.assertEqual(result.returncode, expected, (result.stdout or "") + (result.stderr or ""))
-        return result.stdout or ""
+        return result
+
+    def run_ps(self, script, *args, expected=0, env=None):
+        return self.run_ps_result(script, *args, expected=expected, env=env).stdout or ""
+
+    def test_engine_is_the_intended_powershell(self):
+        script = fixture(self) / "version.ps1"
+        script.write_text("Write-Output $PSVersionTable.PSVersion.Major\n", encoding="utf-8")
+        major = int(self.run_ps(script).strip())
+        self.assertGreaterEqual(major, self.minimum_major)
+        if self.maximum_major is not None:
+            self.assertLessEqual(major, self.maximum_major)
 
     def test_real_template_render_and_whatif(self):
         directory = fixture(self)
@@ -265,11 +289,11 @@ class WindowsToolTests(unittest.TestCase):
     def extract_with_deploy_function(self, archive, destination, expected=0):
         driver = fixture(self) / "extract_driver.ps1"
         driver.write_text(DEPLOY_EXTRACT_DRIVER, encoding="utf-8")
-        result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        result = subprocess.run([self.powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                                  "-File", str(driver), "-Script", str(ROOT / "deploy/deploy.ps1"),
                                  "-Archive", str(archive), "-Destination", str(destination)],
                                 cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                timeout=45)
+                                timeout=45, env=dict(os.environ, **PLAIN_TEXT_ENV))
         output = (result.stdout or "") + (result.stderr or "")
         self.assertEqual(result.returncode, expected, output)
         return output
@@ -398,6 +422,86 @@ class WindowsToolTests(unittest.TestCase):
             for name in ("sample.txt", "empty.bin", "nested/binary.bin")})
         self.run_ps(script, *args, expected=1, env=env)
 
+    @unittest.skipUnless(shutil.which("git"), "git is unavailable")
+    def test_deploy_checks_git_exit_codes_itself(self):
+        # With this preference on, PowerShell 7 throws its own error for a failing native
+        # command before deploy.ps1 can check $LASTEXITCODE. Windows PowerShell 5.1 ignores it.
+        directory = fixture(self)
+        wrapper = directory / "native_errors_on.ps1"
+        wrapper.write_text(
+            "param([string]$Script, [string]$Checkout, [string]$Target)\n"
+            "$ErrorActionPreference = 'Stop'\n"
+            "$PSNativeCommandUseErrorActionPreference = $true\n"
+            "& $Script -Checkout $Checkout -Tag 'bad..tag' -Target $Target -WhatIf\n", encoding="utf-8")
+        result = self.run_ps_result(wrapper, "-Script", ROOT / "deploy/deploy.ps1",
+                                    "-Checkout", directory / "checkout", "-Target", directory / "release",
+                                    expected=1)
+        self.assertIn("Invalid tag name.", (result.stdout or "") + (result.stderr or ""))
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["native_errors_on.ps1"])
+
+    def test_restart_compares_heartbeat_time_as_an_instant(self):
+        # PowerShell 7 ConvertFrom-Json turns ts into a DateTime. Formatting that back to a
+        # string dropped the fractional seconds and the offset, so a heartbeat written in the
+        # same second as the process start looked older than the process. The process is
+        # started just after a second boundary, and the launch is accepted only when the
+        # clock read before and after it falls in the same whole second, so the fresh
+        # heartbeat below always shares the start's second and is never earlier than it.
+        import time
+        directory = fixture(self)
+
+        def stop(process):
+            # The dummy process exits when its standard input is closed.
+            process.stdin.close()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+        attempts = 5
+        child = None
+        for _ in range(attempts):
+            time.sleep(1.05 - time.time() % 1)
+            before = time.time()
+            child = subprocess.Popen([sys.executable, "-B", "-c", "import sys; sys.stdin.read()"],
+                                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            observed = time.time()
+            # The start time Windows records can lag the precise clock by one timer tick,
+            # so the launch must also begin clearly after the second boundary.
+            if int(before) == int(observed) and before % 1 >= 0.03:
+                break
+            stop(child)
+            child = None
+        if child is None:
+            self.fail("The dummy process could not be started within one whole second in "
+                      + str(attempts) + " attempts, so the sub-second case would not be covered")
+        try:
+            utc = datetime.fromtimestamp(observed, timezone.utc)
+            forms = {
+                "service writer form": lambda moment: moment.astimezone().isoformat(),
+                "UTC with Z": lambda moment: moment.isoformat().replace("+00:00", "Z"),
+                "UTC with offset": lambda moment: moment.isoformat(),
+                "negative offset": lambda moment: moment.astimezone(
+                    timezone(-timedelta(hours=8, minutes=30))).isoformat(),
+            }
+            script = ROOT / "deploy/windows/restart.ps1"
+            args = ("-StateDirectory", directory, "-TimeoutSeconds", "10", "-WhatIf")
+            heartbeat = directory / "heartbeat.json"
+            for name, form in forms.items():
+                with self.subTest(form=name):
+                    heartbeat.write_text(json.dumps({"schema": "slack-dispatch-heartbeat/1", "ts": form(utc),
+                                                     "pid": child.pid}), encoding="utf-8")
+                    self.run_ps(script, *args)
+                    heartbeat.write_text(json.dumps({"schema": "slack-dispatch-heartbeat/1",
+                                                     "ts": form(utc - timedelta(hours=1)),
+                                                     "pid": child.pid}), encoding="utf-8")
+                    result = self.run_ps_result(script, *args, expected=1)
+                    self.assertIn("Heartbeat predates this process", (result.stdout or "") + (result.stderr or ""))
+                    self.assertFalse((directory / "stop.flag").exists())
+            self.assertIsNone(child.poll())
+        finally:
+            stop(child)
+
     def test_restart_waits_for_original_process_and_whatif(self):
         directory = fixture(self)
         code = (
@@ -437,6 +541,26 @@ class WindowsToolTests(unittest.TestCase):
                 child.wait()
             finally:
                 child.communicate()
+
+
+@unittest.skipUnless(WINDOWS_POWERSHELL, "Windows PowerShell 5.1 (powershell.exe) is not installed")
+class WindowsToolTests(WindowsToolChecks, unittest.TestCase):
+    powershell = WINDOWS_POWERSHELL
+    minimum_major = 5
+    maximum_major = 5
+
+
+@unittest.skipUnless(POWERSHELL_7, "PowerShell 7 (pwsh.exe) is not installed")
+class WindowsToolTestsPowerShell7(WindowsToolChecks, unittest.TestCase):
+    powershell = POWERSHELL_7
+    minimum_major = 7
+
+
+class WindowsToolAvailabilityTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "PowerShell is only required on Windows")
+    def test_windows_tool_tests_run_under_at_least_one_powershell(self):
+        self.assertTrue(WINDOWS_POWERSHELL or POWERSHELL_7,
+                        "Neither powershell.exe nor pwsh.exe is installed, so no Windows tool test runs")
 
 
 if __name__ == "__main__":

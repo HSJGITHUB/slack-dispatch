@@ -6,6 +6,9 @@ param(
     [string]$ArchiveDirectory = $env:TEMP
 )
 $ErrorActionPreference = 'Stop'
+# git exit codes are checked through $LASTEXITCODE below. PowerShell 7 would otherwise
+# throw its own error first when the caller turns this preference on; 5.1 ignores it.
+$PSNativeCommandUseErrorActionPreference = $false
 
 function Get-PathComparison {
     if ([IO.Path]::DirectorySeparatorChar -eq '\') {

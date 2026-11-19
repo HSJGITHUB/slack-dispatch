@@ -1,4 +1,12 @@
 ﻿$ErrorActionPreference = 'Stop'
+# Exit codes of the helper and of mklink are checked through $LASTEXITCODE. PowerShell 7
+# would otherwise throw first when the caller turns this preference on; 5.1 ignores it.
+$PSNativeCommandUseErrorActionPreference = $false
+# The previous values are captured here and changed only inside the try below, whose
+# finally restores them.
+$previousNoColor = $env:NO_COLOR
+$previousRendering = $null
+if ($PSVersionTable.PSVersion.Major -ge 7) { $previousRendering = $PSStyle.OutputRendering }
 $helper = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\set_env_secret.ps1'))
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
 $tempRoot = Join-Path $repoRoot ('tests\tmp\' + [Guid]::NewGuid().ToString('N'))
@@ -30,6 +38,10 @@ function BytesEqual([byte[]]$Left, [byte[]]$Right) {
     return [Convert]::ToBase64String($Left) -ceq [Convert]::ToBase64String($Right)
 }
 try {
+    # Plain text output in PowerShell 7, here and in the helper processes (NO_COLOR), so
+    # the disclosure checks compare text without ANSI colour codes. 5.1 has no $PSStyle.
+    $env:NO_COLOR = '1'
+    if ($null -ne $previousRendering) { $PSStyle.OutputRendering = 'PlainText' }
     foreach ($kind in @('crlf', 'lf', 'bom', 'mixed')) {
         $eol = "`n"
         if ($kind -eq 'crlf') { $eol = "`r`n" }
@@ -190,4 +202,8 @@ catch {
     Write-Output ('TEMP: ' + $tempRoot)
     exit 1
 }
-finally { $env:SLACK_DISPATCH_ALLOWED_ROOTS = $previousRoots }
+finally {
+    $env:SLACK_DISPATCH_ALLOWED_ROOTS = $previousRoots
+    $env:NO_COLOR = $previousNoColor
+    if ($null -ne $previousRendering) { $PSStyle.OutputRendering = $previousRendering }
+}

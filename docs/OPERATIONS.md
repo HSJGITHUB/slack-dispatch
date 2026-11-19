@@ -49,9 +49,11 @@ continues with wakes off.
 
 ## Windows operator steps
 
-Use Windows PowerShell 5.1 and a Python installation with dependencies already
-available. All example paths and user names below are dummy values. No network
-access is performed by these scripts.
+Use Windows PowerShell 5.1 (powershell.exe) or PowerShell 7 (pwsh.exe) and a
+Python installation with dependencies already available. The scripts behave the
+same in both, and the Windows tool tests run under each one that is installed.
+All example paths and user names below are dummy values. No network access is
+performed by these scripts.
 
 1. Run the offline test suite before activating a task. Preview a release with:
    deploy.ps1 -Checkout C:\demo\checkout -Tag v0.1.0 -Target C:\demo\release -WhatIf

@@ -6,6 +6,33 @@ This project follows Semantic Versioning. Versions below 1.0 may change interfac
 
 ## [Unreleased]
 
+### P42 PowerShell 7 compatibility
+- `deploy/windows/restart.ps1` failed under PowerShell 7 with `Heartbeat predates this
+  process; possible PID reuse.` PowerShell 7 `ConvertFrom-Json` turns the heartbeat `ts`
+  string into a `DateTime`, and passing that to `[DateTimeOffset]::Parse` formatted it as
+  invariant `MM/dd/yyyy HH:mm:ss`, which dropped the fractional seconds and the offset (a
+  `Z` timestamp was then read as local time, and a culture with day-first dates could not
+  parse it at all). The script now turns a `DateTime` back into a round-trip string and
+  parses every timestamp with the invariant culture and `RoundtripKind`, so 5.1 and 7
+  compare the same instant. A heartbeat whose `ts` is missing or not a string now stops
+  with `Heartbeat timestamp is invalid.` (exit code 1, nothing written).
+- `deploy/deploy.ps1`, `tools/envhelper/set_env_secret.ps1` and
+  `tools/envhelper/tests/run_tests.ps1` set `$PSNativeCommandUseErrorActionPreference` to
+  `$false`, so a caller that turns it on in PowerShell 7 still gets the scripts' own exit
+  code checks and messages (for example `Invalid tag name.`). Windows PowerShell 5.1
+  ignores the variable.
+- `run_tests.ps1` sets `NO_COLOR` for the helper processes and plain text output in
+  PowerShell 7, and restores both afterwards, so its checks compare text without ANSI
+  colour codes.
+- Every Windows tool test in `tests/test_runtime_operations.py` now runs under each
+  installed PowerShell (`WindowsToolTests` for `powershell.exe`,
+  `WindowsToolTestsPowerShell7` for `pwsh.exe`); a missing executable skips its variant,
+  and on Windows at least one variant must exist. New tests check the engine version,
+  heartbeat timestamps in the service form, `Z`, `+00:00` and a negative offset (fresh
+  ones pass, ones from before the process start are refused), and that `deploy.ps1`
+  reports `Invalid tag name.` with the native error preference on. The CI windows job
+  also runs `run_tests.ps1` under `pwsh`.
+
 ### P40 deploy extraction
 - `deploy/deploy.ps1` no longer calls `Expand-Archive`. On some hosted Windows runners
   the `Microsoft.PowerShell.Archive` module called an `ExtractToDirectory` overload that

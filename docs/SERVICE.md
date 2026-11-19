@@ -335,6 +335,9 @@ not changes to the underlying package contracts.
 7. Request stop with state/stop.flag; verify its archive under state/done and the
    final stopped heartbeat. Manage scheduler restart behavior separately.
 
+The Windows scripts under deploy/ and tools/envhelper/ support Windows PowerShell 5.1
+and PowerShell 7 alike; see docs/OPERATIONS.md for the operator steps.
+
 No live probe, credentials, Slack request, session command or deployment was
 used for the service's offline validation. Older architecture/status documents
 retain their original packet descriptions; this document describes integration.

@@ -11,6 +11,9 @@ if ($env:SLACK_DISPATCH_ALLOWED_ROOTS) {
     $AllowedRoots += @($env:SLACK_DISPATCH_ALLOWED_ROOTS.Split(';') | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() })
 }
 $ErrorActionPreference = 'Stop'
+# icacls exit codes are checked through $LASTEXITCODE. PowerShell 7 would otherwise throw
+# its own error first when the caller turns this preference on; 5.1 ignores it.
+$PSNativeCommandUseErrorActionPreference = $false
 $clipboardUsed = $false
 $failure = $null
 $success = $null
