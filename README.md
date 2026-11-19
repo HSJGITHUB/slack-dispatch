@@ -272,6 +272,10 @@ pull request. The working rules are in [CLAUDE.md](CLAUDE.md), and
 - A demo mode with synthetic events.
 - Pluggable wake adapters.
 
+## Disclaimer
+
+This is a personal project, shared in a personal capacity. It is not a product or official tool of my employer, and it is not affiliated with or endorsed by my employer. It is also not affiliated with Slack, Anthropic or OpenAI; product names are trademarks of their respective owners.
+
 ## License
 
 AGPL-3.0-only. Copyright (C) 2026 Hyunseok Jin. See [LICENSE](LICENSE) and
